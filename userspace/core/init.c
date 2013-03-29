@@ -12,7 +12,7 @@
 #include <string.h>
 #include <syscall.h>
 
-#define DEFAULT_HOSTNAME "toaru-test"
+#define DEFAULT_HOSTNAME "twilight-sparkle"
 
 /* Set the hostname to whatever is in /etc/hostname */
 void set_hostname() {

@@ -208,7 +208,7 @@ int main (int argc, char ** argv) {
 			struct utsname u;
 			uname(&u);
 			/* UTF-8 Strings FTW! */
-			uint8_t * os_name_ = "とあるOS";
+			uint8_t * os_name_ = "PonyOS";
 			uint32_t l = snprintf(kernel_v, 512, "%s %s", os_name_, u.release);
 		}
 

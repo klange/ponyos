@@ -110,7 +110,7 @@ int main (int argc, char ** argv) {
 	uname(&u);
 
 	/* UTF-8 Strings FTW! */
-	uint8_t * os_name_ = "とあるOS";
+	uint8_t * os_name_ = "PonyOS";
 	uint8_t final[512];
 	uint32_t l = snprintf(final, 512, "%s %s", os_name_, u.release);
 
