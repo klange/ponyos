@@ -2,7 +2,7 @@
 <html>
 	<head>
 		<meta charset="utf-8">
-		<title>My Little Unix: Kernels are Magic!</title>
+		<title>PonyOS - My Little Unix: Kernels are Magic!</title>
 		<meta name="viewport" content="width=device-width, initial-scale=1.0">
 		<meta name="description" content="PonyOS: A Hobby Operating System for Everypony">
 		<link href="assets/css/bootstrap.css" rel="stylesheet">
@@ -27,6 +27,7 @@
 					<div class="nav-collapse collapse">
 						<ul class="nav">
 							<li class="active"><a href="#">Home</a></li>
+							<li><a href="#screenshots">Screenshots</a></li>
 							<li><a href="#downloads">Downloads</a></li>
 							<li><a href="#contact">Contact</a></li>
 						</ul>
@@ -37,13 +38,47 @@
 
 		<div class="container">
 			<div class="hero-unit">
-				<img style="float: left;" src="assets/img/logo.png">
-				<h1>PonyOS</h1>
-				<p>Coming Soon</p>
-				<div style="clear: left;"></div>
+				<center>
+					<h1>PonyOS</h1>
+					<p>A Hobby Operating System for Everypony!</p>
+					<img src="assets/img/logo.png">
+				</center>
 			</div>
 		</div>
 
+		<div class="container">
+			<h1>What is PonyOS?</h1>
+			<p>PonyOS is a new Unix-like operating system.</p>
+
+			<h2>Screenshots</h2>
+			<a name="screenshots"></a>
+			<iframe class="imgur-album" width="100%" height="550" frameborder="0" src="http://imgur.com/a/CW94K/embed"></iframe>
+			<h2>Downloads</h2>
+			<a name="downloads"></a>
+			<h3><img src="assets/img/elementary-archive-icon.png"> Code Archives</h3>
+			<p><a href="https://github.com/klange/ponyos/archive/master.zip">ZIP Archive (9.2MB)</a></p>
+			<h3><img src="assets/img/elementary-disk-icon.png"> Hard Disk Images</h3>
+			<p><a href="http://dl.dropbox.com/u/44305966/ponyos-disk.tar.gz">Raw disk image in a tarball (46.4MB)</a></p>
+
+			<h2>Using the Disk Image</h2>
+			<p>The disk image can be used with QEMU. Other emulators may work but are not supported.</p>
+			<p>Extract the disk image from the tarball and then execute QEMU as follows:</p>
+			<pre>qemu -m 1024 -hda ponyos-disk.img -vga std</pre>
+			<p>(If you do not have sufficient RAM on your host, you may use <code>-m 512</code> instead.)</p>
+			<p>The default user is <code>local</code> and the default password for that user is also <code>local</code>.</p>
+			<p>There is also a <code>root</code> user with password <code>toor</code>.</p>
+
+			<h2>Building from Scratch</h2>
+			<p>To build PonyOS from scratch, please use an Ubuntu or Debian-derived host.</p>
+			<p>Download and extract the code archive, or clone from <a href="https://github.com/klange/ponyos">our git repository</a> and then run <code>./build.sh</code>. Note that we do not support building PonyOS from scratch and this process may not work. Complete builds may take anywhere from thirty minutes to many hours, depending on your hardware.</p>
+		</div>
+
+		<div class="container">
+			<h2>Contact</h2>
+			<a name="contact"></a>
+			<p>You can find me on Twitter <a href="http://twitter.profile.dakko.us">@kevinlange</a>.</p>
+			<p style="color: #dddddd">Happy April Fools Day</p>
+		</div>
 
 		<script src="assets/js/jquery.js"></script>
 		<script src="assets/js/bootstrap-transition.js"></script>
