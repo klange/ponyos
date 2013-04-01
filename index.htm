@@ -66,7 +66,7 @@
 			<h2>Using the Disk Image</h2>
 			<p>The disk image can be used with QEMU. Other emulators may work but are not supported.</p>
 			<p>Extract the disk image from the tarball and then execute QEMU as follows:</p>
-			<pre>qemu -m 1024 -hda ponyos-disk.img -vga std</pre>
+			<pre>qemu-system-i386 -m 1024 -hda ponyos-disk.img -vga std</pre>
 			<p>(If you do not have sufficient RAM on your host, you may use <code>-m 512</code> instead.)</p>
 			<p>The default user is <code>local</code> and the default password for that user is also <code>local</code>.</p>
 			<p>There is also a <code>root</code> user with password <code>toor</code>.</p>
