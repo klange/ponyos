@@ -64,15 +64,18 @@
 			<p><a href="https://github.com/klange/ponyos/archive/master.zip">ZIP Archive (9.2MB)</a></p>
 			<h3><img src="assets/img/elementary-disk-icon.png"> Hard Disk Images</h3>
 			<p><a href="http://dl.dropbox.com/u/44305966/ponyos-disk.tar.gz">Raw disk image in a tarball (46.4MB)</a></p>
-			<p>VMWare images: <a href="http://flng.us/bI">Mirrior 1</a> <a href="http://flng.us/bJ">Mirrior 2</a> <a href="http://flng.us/bK">Mirror 3</a></p>
+			<p>VMWare images: <a href="http://flng.us/bI">Mirror 1</a> <a href="http://flng.us/bJ">Mirror 2</a> <a href="http://flng.us/bK">Mirror 3</a></p>
 
 			<h2>Using the Disk Image</h2>
-			<p>The disk image can be used with QEMU. Other emulators may work but are not supported.</p>
+			<p>The raw disk image can be used with QEMU. Other emulators may work but are not supported.</p>
 			<p>Extract the disk image from the tarball and then execute QEMU as follows:</p>
 			<pre>qemu-system-i386 -m 1024 -hda ponyos-disk.img -vga std</pre>
 			<p>(If you do not have sufficient RAM on your host, you may use <code>-m 512</code> instead.)</p>
 			<p>The default user is <code>local</code> and the default password for that user is also <code>local</code>.</p>
 			<p>There is also a <code>root</code> user with password <code>toor</code>.</p>
+
+			<h2>Using the VMWare Disk Image</h2>
+			<p>Download and extract the ZIP archive and open PonyOS.vmx. If VMWare prompts you as to whether you moved or copied files, "I copied it" will suffice as an answer. See the preceding section for available user accounts once the VM has booted.</p>
 
 			<h2>Building from Scratch</h2>
 			<p>To build PonyOS from scratch, please use an Ubuntu or Debian-derived host.</p>
