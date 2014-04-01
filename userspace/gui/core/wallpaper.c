@@ -43,7 +43,6 @@ typedef struct {
 application_t applications[] = {
 	{"/usr/share/icons/utilities-terminal.png",      "terminal", "Terminal"},
 	{"/usr/share/icons/applications-painting.png",   "draw",     "Draw!"},
-	{"/usr/share/icons/applications-simulation.png", "game",     "RPG Demo"},
 	{"/usr/share/icons/julia.png",                   "julia",    "Julia Fractals"},
 	{NULL, NULL, NULL}
 };

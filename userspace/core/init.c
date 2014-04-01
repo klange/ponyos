@@ -12,7 +12,7 @@
 #include <string.h>
 #include <syscall.h>
 
-#define DEFAULT_HOSTNAME "toaru-test"
+#define DEFAULT_HOSTNAME "fluttershy"
 
 /* Set the hostname to whatever is in /etc/hostname */
 void set_hostname() {
@@ -52,8 +52,6 @@ int main(int argc, char * argv[]) {
 		}
 		if (!strcmp(argv[1],"--single")) {
 			return start_options((char *[]){"/bin/compositor","/bin/terminal","-Fl",args,NULL});
-		} else if (!strcmp(argv[1], "--single-beta")) {
-			return start_options((char *[]){"/bin/compositor-beta","/bin/drawlines",args,NULL});
 		} else if (!strcmp(argv[1], "--vga")) {
 			return start_options((char *[]){"/bin/vga-warning",NULL});
 		}

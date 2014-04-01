@@ -33,7 +33,7 @@ struct timeval {
 	unsigned int tv_usec;
 };
 
-#define LOGO_FINAL_OFFSET 100
+#define LOGO_FINAL_OFFSET 150
 
 int checkUserPass(char * user, char * pass) {
 
@@ -165,7 +165,7 @@ int main (int argc, char ** argv) {
 		ctx = init_graphics_window_double_buffer(wina);
 
 		for (int i = 0; i < LOGO_FINAL_OFFSET; ++i) {
-			draw_fill(ctx, rgb(0,0,0));
+			draw_fill(ctx, rgb(39,55,113));
 			draw_sprite(ctx, sprites[0], center_x(sprites[0]->width), center_y(sprites[0]->height) - i);
 			flip(ctx);
 		}
@@ -209,7 +209,7 @@ int main (int argc, char ** argv) {
 			struct utsname u;
 			uname(&u);
 			/* UTF-8 Strings FTW! */
-			uint8_t * os_name_ = "とあるOS";
+			uint8_t * os_name_ = "PonyOS";
 			uint32_t l = snprintf(kernel_v, 512, "%s %s", os_name_, u.release);
 		}
 
@@ -252,14 +252,14 @@ int main (int argc, char ** argv) {
 				}
 
 				/* Redraw the background */
-				draw_fill(ctx, rgb(0,0,0));
+				draw_fill(ctx, rgb(39,55,113));
 				draw_sprite(ctx, sprites[0], center_x(sprites[0]->width), center_y(sprites[0]->height) - LOGO_FINAL_OFFSET);
 
 				draw_string(ctx, hostname_label_left, height - 12, white, hostname);
 				draw_string(ctx, kernel_v_label_left, height - 12, white, kernel_v);
 
 				/* Draw backdrops */
-				draw_box(ctx, box_x, box_y, BOX_WIDTH, BOX_HEIGHT, rgb(20,20,20));
+				draw_box(ctx, box_x, box_y, BOX_WIDTH, BOX_HEIGHT, rgb(180,124,205));
 				draw_box(ctx, box_x + LEFT_OFFSET, box_y + 32, 168, 16, rgb(255,255,255));
 				draw_box(ctx, box_x + LEFT_OFFSET, box_y + 56, 168, 16, rgb(255,255,255));
 
@@ -278,9 +278,9 @@ int main (int argc, char ** argv) {
 				}
 
 				if (focus == USERNAME_BOX) {
-					draw_box_border(ctx, box_x + LEFT_OFFSET, box_y + 32, 168, 16, rgb(8, 193, 236));
+					draw_box_border(ctx, box_x + LEFT_OFFSET, box_y + 32, 168, 16, rgb(229, 68, 138));
 				} else if (focus == PASSWORD_BOX) {
-					draw_box_border(ctx, box_x + LEFT_OFFSET, box_y + 56, 168, 16, rgb(8, 193, 236));
+					draw_box_border(ctx, box_x + LEFT_OFFSET, box_y + 56, 168, 16, rgb(229, 68, 138));
 				}
 
 				flip(ctx);
@@ -328,7 +328,7 @@ int main (int argc, char ** argv) {
 			show_error = 1;
 		}
 
-		draw_fill(ctx, rgb(0,0,0));
+		draw_fill(ctx, rgb(39,55,113));
 		draw_sprite(ctx, sprites[0], center_x(sprites[0]->width), center_y(sprites[0]->height) - LOGO_FINAL_OFFSET);
 		flip(ctx);
 

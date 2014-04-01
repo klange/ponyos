@@ -5,7 +5,7 @@
 
 /* Kernel name. If you change this, you're not
  * my friend any more. */
-char * __kernel_name = "toaru";
+char * __kernel_name = "ponyos";
 
 /* This really shouldn't change, and if it does,
  * always ensure it still has the correct arguments
@@ -13,15 +13,15 @@ char * __kernel_name = "toaru";
 char * __kernel_version_format = "%d.%d.%d-%s";
 
 /* Version numbers X.Y.Z */
-int    __kernel_version_major = 0;
-int    __kernel_version_minor = 6;
-int    __kernel_version_lower = 1;
+int    __kernel_version_major = 2;
+int    __kernel_version_minor = 0;
+int    __kernel_version_lower = 0;
 
 /* Kernel build suffix, which doesn't necessarily
  * mean anything, but can be used to distinguish
  * between different features included while
  * building multiple kernels. */
-char * __kernel_version_suffix   = "dev";
+char * __kernel_version_suffix   = "mlp";
 
 /* The release codename.
  *
@@ -30,7 +30,7 @@ char * __kernel_version_suffix   = "dev";
  *  * 0.5.X+ branches make up the "neopolitan flavors" family.
  *    0.5.0  is strawberry
  */
-char * __kernel_version_codename = "strawberry";
+char * __kernel_version_codename = "spike";
 
 /* Build architecture (should probably not be
  * here as a string, but rather some sort of
