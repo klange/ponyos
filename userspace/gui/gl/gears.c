@@ -213,9 +213,9 @@ static void reshape(int width, int height) {
 
 static void init(void) {
 	static GLfloat pos[4] = { 5.0, 5.0, 10.0, 0.0 };
-	static GLfloat red[4] = { 0.8, 0.1, 0.0, 1.0 };
-	static GLfloat green[4] = { 0.0, 0.8, 0.2, 1.0 };
-	static GLfloat blue[4] = { 0.2, 0.2, 1.0, 1.0 };
+	static GLfloat red[4] =   { 237.0/255.0, 78.0/255.0, 142.0/255.0, 1.0 };
+	static GLfloat green[4] = { 108.0/255.0, 39.0/255.0, 140.0/255.0, 1.0 };
+	static GLfloat blue[4] =  { 52.0/255.0, 58.0/255.0, 112.0/255.0, 1.0 };
 
 	glLightfv(GL_LIGHT0, GL_POSITION, pos);
 	glEnable(GL_CULL_FACE);

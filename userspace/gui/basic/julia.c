@@ -56,18 +56,18 @@ int no_repeat = 0;   /* Repeat colors? */
  * These are orange/red shades from the Ubuntu platte.
  */
 int colors[] = {
-	0xFFeec73e,
-	0xFFf0a513,
-	0xFFfb8b00,
-	0xFFf44800,
-	0xFFffff99,
-	0xFFffff00,
-	0xFFfdca01,
-	0xFF986601,
-	0xFFf44800,
-	0xFFfd3301,
-	0xFFd40000,
-	0xFF980101,
+	0xFF9dd7f6,
+	0xFFef3f33,
+	0xFFf27835,
+	0xFFf4e97f,
+	0xFF7ac041,
+	0xFF0091ce,
+	0xFF672d87,
+	0xFF343a70,
+	0xFF6c278c,
+	0xFFed4e8e,
+	0xFFc9a9d0,
+	0xFF9562ad,
 };
 
 int left   = 40;
