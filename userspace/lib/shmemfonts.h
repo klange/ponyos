@@ -2,7 +2,7 @@
 #define SHMEMFONTS_H
 
 #include "graphics.h"
-#include "window.h"
+#include "yutani.h"
 
 void init_shmemfonts();
 void draw_string(gfx_context_t * ctx, int x, int y, uint32_t fg, char * string);
@@ -21,7 +21,8 @@ char * shmem_font_name(int i);
 #define FONT_MONOSPACE_ITALIC       6
 #define FONT_MONOSPACE_BOLD_ITALIC  7
 #define FONT_JAPANESE               8
+#define FONT_SYMBOLA                9
 
-#define FONTS_TOTAL 9
+#define FONTS_TOTAL 10
 
 #endif

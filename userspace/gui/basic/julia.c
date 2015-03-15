@@ -1,3 +1,7 @@
+/* This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2013-2014 Kevin Lange
+ */
 /*
  * Julia Fractal Generator
  *
@@ -14,9 +18,11 @@
 #include <unistd.h>
 #include <getopt.h>
 
-#include "lib/window.h"
+#include "lib/yutani.h"
 #include "lib/graphics.h"
 #include "lib/decorations.h"
+
+#define DIRECT_OFFSET(x,y) ((x) + (y) * window->width)
 
 /*
  * Macros make verything easier.
@@ -26,8 +32,9 @@
 #define GFX_(xpt, ypt) ((uint32_t *)window->buffer)[DIRECT_OFFSET(xpt+decor_left_width,ypt+decor_top_height)]
 
 /* Pointer to graphics memory */
-window_t * window = NULL;
-gfx_context_t * ctx = NULL;
+static yutani_t * yctx;
+static yutani_window_t * window = NULL;
+static gfx_context_t * ctx = NULL;
 
 /* Julia fractals elements */
 float conx = -0.74;  /* real part of c */
@@ -152,16 +159,17 @@ void redraw() {
 	} while ( j < height );
 }
 
-void resize_callback(window_t * win) {
-	width  = win->width  - decor_left_width - decor_right_width;
-	height = win->height - decor_top_height - decor_bottom_height;
+void resize_finish(int w, int h) {
+	yutani_window_resize_accept(yctx, window, w, h);
+	reinit_graphics_yutani(ctx, window);
 
-	reinit_graphics_window(ctx, window);
-	redraw();
-}
+	width  = w - decor_left_width - decor_right_width;
+	height = h - decor_top_height - decor_bottom_height;
 
-void focus_callback(window_t * win) {
 	redraw();
+
+	yutani_window_resize_done(yctx, window);
+	yutani_flip(yctx, window);
 }
 
 
@@ -224,34 +232,73 @@ int main(int argc, char * argv[]) {
 		}
 	}
 
-	setup_windowing();
-	resize_window_callback = resize_callback;
+	yctx = yutani_init();
 
-	window = window_create(left, top, width + decor_width(), height + decor_height());
+	window = yutani_window_create(yctx, width + decor_width(), height + decor_height());
+	yutani_window_move(yctx, window, left, top);
 	init_decorations();
-	focus_changed_callback = focus_callback;
 
-	ctx = init_graphics_window(window);
+	yutani_window_advertise_icon(yctx, window, "Julia Fractals", "julia");
+
+	ctx = init_graphics_yutani(window);
 
 	redraw();
+	yutani_flip(yctx, window);
 
 	int playing = 1;
 	while (playing) {
-		char ch = 0;
-		w_keyboard_t * kbd = poll_keyboard();
-
-		if (kbd) {
-			switch (kbd->key) {
-				case 'q':
+		yutani_msg_t * m = yutani_poll(yctx);
+		if (m) {
+			switch (m->type) {
+				case YUTANI_MSG_KEY_EVENT:
+					{
+						struct yutani_msg_key_event * ke = (void*)m->data;
+						if (ke->event.action == KEY_ACTION_DOWN && ke->event.keycode == 'q') {
+							playing = 0;
+						}
+					}
+					break;
+				case YUTANI_MSG_WINDOW_FOCUS_CHANGE:
+					{
+						struct yutani_msg_window_focus_change * wf = (void*)m->data;
+						yutani_window_t * win = hashmap_get(yctx->windows, (void*)wf->wid);
+						if (win) {
+							win->focused = wf->focused;
+							redraw();
+							yutani_flip(yctx, window);
+						}
+					}
+					break;
+				case YUTANI_MSG_RESIZE_OFFER:
+					{
+						struct yutani_msg_window_resize * wr = (void*)m->data;
+						resize_finish(wr->width, wr->height);
+					}
+					break;
+				case YUTANI_MSG_WINDOW_MOUSE_EVENT:
+					{
+						int result = decor_handle_event(yctx, m);
+						switch (result) {
+							case DECOR_CLOSE:
+								playing = 0;
+								break;
+							default:
+								/* Other actions */
+								break;
+						}
+					}
+					break;
+				case YUTANI_MSG_SESSION_END:
 					playing = 0;
 					break;
 				default:
 					break;
 			}
 		}
+		free(m);
 	}
 
-	teardown_windowing();
+	yutani_close(yctx, window);
 
 	return 0;
 }

@@ -1,4 +1,8 @@
 /* vim: tabstop=4 shiftwidth=4 noexpandtab
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2011-2014 Kevin Lange
+ * Copyright (C) 2012 Markus Schober
  *
  * Syscall Tables
  *
@@ -11,6 +15,8 @@
 #include <version.h>
 #include <shm.h>
 #include <utsname.h>
+#include <printf.h>
+#include <syscall_nums.h>
 
 static char   hostname[256];
 static size_t hostname_len = 0;
@@ -38,26 +44,17 @@ int validate_safe(void * ptr) {
 }
 
 /*
- * print something to the debug terminal (serial)
- */
-static int print(char * s) {
-	validate((void *)s);
-	kprintf("%s", s);
-	return 0;
-}
-
-/*
  * Exit the current task.
  * DOES NOT RETURN!
  */
-static int exit(int retval) {
+static int sys_exit(int retval) {
 	/* Deschedule the current task */
 	task_exit(retval);
 	while (1) { };
 	return retval;
 }
 
-static int read(int fd, char * ptr, int len) {
+static int sys_read(int fd, char * ptr, int len) {
 	if (fd >= (int)current_process->fds->length || fd < 0) {
 		return -1;
 	}
@@ -71,7 +68,7 @@ static int read(int fd, char * ptr, int len) {
 	return out;
 }
 
-static int ioctl(int fd, int request, void * argp) {
+static int sys_ioctl(int fd, int request, void * argp) {
 	if (fd >= (int)current_process->fds->length || fd < 0) {
 		return -1;
 	}
@@ -83,7 +80,7 @@ static int ioctl(int fd, int request, void * argp) {
 	return ioctl_fs(node, request, argp);
 }
 
-static int readdir(int fd, int index, struct dirent * entry) {
+static int sys_readdir(int fd, int index, struct dirent * entry) {
 	if (fd >= (int)current_process->fds->length || fd < 0) {
 		return -1;
 	}
@@ -95,7 +92,6 @@ static int readdir(int fd, int index, struct dirent * entry) {
 
 	struct dirent * kentry = readdir_fs(node, (uint32_t)index);
 	if (!kentry) {
-		free(kentry);
 		return 1;
 	}
 
@@ -104,14 +100,7 @@ static int readdir(int fd, int index, struct dirent * entry) {
 	return 0;
 }
 
-static int write(int fd, char * ptr, int len) {
-	if ((fd == 1 && !current_process->fds->entries[fd]) ||
-		(fd == 2 && !current_process->fds->entries[fd])) {
-		for (uint32_t i = 0; i < (uint32_t)len; ++i) {
-			kprintf("%c", ptr[i]);
-		}
-		return len;
-	}
+static int sys_write(int fd, char * ptr, int len) {
 	if (fd >= (int)current_process->fds->length || fd < 0) {
 		return -1;
 	}
@@ -125,76 +114,13 @@ static int write(int fd, char * ptr, int len) {
 	return out;
 }
 
-static int advanced_wait(int child, int * status, int options) {
-	process_t * volatile child_task;
-	if (child == 0) {
-		debug_print_process_tree();
-		child_task = process_get_first_child((process_t *)current_process);
-	} else if (child == -1) {
-		debug_print(WARNING, "wait(-1) from %d", getpid());
-		child_task = process_get_first_child((process_t *)current_process);
-	} else if (child < 1) {
-		debug_print(WARNING, "Process %d requested group wait, which we can not do! Pretending they asked for a single process (%d)", getpid(), -child);
-		child_task = process_from_pid(-child);
-	} else {
-		child_task = process_from_pid(child);
-	}
-	/* If the child task doesn't exist, bail */
-	if (!child_task) {
-		if (status && !validate_safe(status)) {
-			*status = 0;
-		}
-		debug_print(WARNING, "Tried to wait for non-existent process by pid %d", getpid());
-		return -ECHILD;
-	}
-	debug_print(NOTICE, "pid=%d waiting on pid=%d", current_process->id, child_task->id);
-	while (child_task->finished == 0) {
-		/* Add us to the wait queue for this child */
-		sleep_on(child_task->wait_queue);
-	}
-	/* Grab the child's return value */
-	int ret = child_task->status;
-	if (status && !validate_safe(status)) {
-		*status = ret;
-	}
-	return child_task->id;
+static int sys_waitpid(int pid, int * status, int options) {
+	if (status && validate_safe(status)) return -EINVAL;
+
+	return waitpid(pid, status, options);
 }
 
-static int wait(int child) {
-	process_t * volatile child_task;
-	if (child == 0) {
-		debug_print_process_tree();
-		child_task = process_get_first_child((process_t *)current_process);
-	} else if (child == -1) {
-		debug_print(WARNING, "wait(-1) from %d", getpid());
-		child_task = process_get_first_child((process_t *)current_process);
-		if (child_task) {
-			child = child_task->id;
-		} else {
-			return -1;
-		}
-	} else if (child < 1) {
-		debug_print(WARNING, "Process %d requested group wait, which we can not do! Pretending they asked for a single process (%d)", getpid(), -child);
-		child_task = process_from_pid(-child);
-	} else {
-		child_task = process_from_pid(child);
-	}
-	/* If the child task doesn't exist, bail */
-	if (!child_task) {
-		debug_print(WARNING, "Tried to wait for non-existent process %d by pid %d", child, getpid());
-		return 0;
-	}
-	debug_print(NOTICE, "pid=%d waiting on pid=%d", current_process->id, child_task->id);
-	while (child_task->finished == 0) {
-		/* Add us to the wait queue for this child */
-		sleep_on(child_task->wait_queue);
-	}
-	/* Grab the child's return value */
-	int ret = child_task->status;
-	return ret;
-}
-
-static int open(const char * file, int flags, int mode) {
+static int sys_open(const char * file, int flags, int mode) {
 	validate((void *)file);
 	debug_print(NOTICE, "open(%s) flags=0x%x; mode=0x%x", file, flags, mode);
 	fs_node_t * node = kopen((char *)file, flags);
@@ -215,7 +141,7 @@ static int open(const char * file, int flags, int mode) {
 	return fd;
 }
 
-static int access(const char * file, int flags) {
+static int sys_access(const char * file, int flags) {
 	validate((void *)file);
 	debug_print(INFO, "access(%s, 0x%x) from pid=%d", file, flags, getpid());
 	fs_node_t * node = kopen((char *)file, 0);
@@ -224,26 +150,34 @@ static int access(const char * file, int flags) {
 	return 0;
 }
 
-static int close(int fd) {
+static int sys_close(int fd) {
 	if (fd >= (int)current_process->fds->length || fd < 0) { 
 		return -1;
 	}
 	close_fs(current_process->fds->entries[fd]);
+	current_process->fds->entries[fd] = NULL;
 	return 0;
 }
 
 static int sys_sbrk(int size) {
-	uintptr_t ret = current_process->image.heap;
+	process_t * proc = (process_t *)current_process;
+	if (proc->group != 0) {
+		proc = process_from_pid(proc->group);
+	}
+	spin_lock(&proc->image.lock);
+	uintptr_t ret = proc->image.heap;
 	uintptr_t i_ret = ret;
 	while (ret % 0x1000) {
 		ret++;
 	}
-	current_process->image.heap += (ret - i_ret) + size;
-	while (current_process->image.heap > current_process->image.heap_actual) {
-		current_process->image.heap_actual += 0x1000;
-		assert(current_process->image.heap_actual % 0x1000 == 0);
-		alloc_frame(get_page(current_process->image.heap_actual, 1, current_directory), 0, 1);
+	proc->image.heap += (ret - i_ret) + size;
+	while (proc->image.heap > proc->image.heap_actual) {
+		proc->image.heap_actual += 0x1000;
+		assert(proc->image.heap_actual % 0x1000 == 0);
+		alloc_frame(get_page(proc->image.heap_actual, 1, current_directory), 0, 1);
+		invalidate_tables_at(proc->image.heap_actual);
 	}
+	spin_unlock(&proc->image.lock);
 	return ret;
 }
 
@@ -258,11 +192,11 @@ static int sys_getpid(void) {
 }
 
 /* Actual getpid() */
-static int gettid(void) {
+static int sys_gettid(void) {
 	return getpid();
 }
 
-static int execve(const char * filename, char *const argv[], char *const envp[]) {
+static int sys_execve(const char * filename, char *const argv[], char *const envp[]) {
 	validate((void *)argv);
 	validate((void *)filename);
 	validate((void *)envp);
@@ -300,7 +234,7 @@ static int execve(const char * filename, char *const argv[], char *const envp[])
 	return -1;
 }
 
-static int seek(int fd, int offset, int whence) {
+static int sys_seek(int fd, int offset, int whence) {
 	if (fd >= (int)current_process->fds->length || fd < 0) {
 		return -1;
 	}
@@ -336,7 +270,7 @@ static int stat_node(fs_node_t * fn, uintptr_t st) {
 	if (fn->flags & FS_SYMLINK)     { flags |= _IFLNK; }
 
 	f->st_mode  = fn->mask | flags;
-	f->st_nlink = 0;
+	f->st_nlink = fn->nlink;
 	f->st_uid   = fn->uid;
 	f->st_gid   = fn->gid;
 	f->st_rdev  = 0;
@@ -353,7 +287,7 @@ static int stat_node(fs_node_t * fn, uintptr_t st) {
 	return 0;
 }
 
-static int stat_file(char * file, uintptr_t st) {
+static int sys_statf(char * file, uintptr_t st) {
 	int result;
 	validate((void *)file);
 	validate((void *)st);
@@ -379,7 +313,7 @@ static int sys_chmod(char * file, int mode) {
 }
 
 
-static int stat(int fd, uintptr_t st) {
+static int sys_stat(int fd, uintptr_t st) {
 	validate((void *)st);
 	if (fd >= (int)current_process->fds->length || fd < 0) {
 		return -1;
@@ -388,21 +322,22 @@ static int stat(int fd, uintptr_t st) {
 	return stat_node(fn, st);
 }
 
-static int mkpipe(void) {
+static int sys_mkpipe(void) {
 	fs_node_t * node = make_pipe(4096 * 2);
+	open_fs(node, 0);
 	return process_append_fd((process_t *)current_process, node);
 }
 
-static int dup2(int old, int new) {
+static int sys_dup2(int old, int new) {
 	process_move_fd((process_t *)current_process, old, new);
 	return new;
 }
 
-static int getuid(void) {
+static int sys_getuid(void) {
 	return current_process->user;
 }
 
-static int setuid(user_t new_uid) {
+static int sys_setuid(user_t new_uid) {
 	if (current_process->user == USER_ROOT_UID) {
 		current_process->user = new_uid;
 		return 0;
@@ -410,23 +345,7 @@ static int setuid(user_t new_uid) {
 	return -1;
 }
 
-static int kernel_name_XXX(char * buffer) {
-	char version_number[1024];
-	sprintf(version_number, __kernel_version_format,
-			__kernel_version_major,
-			__kernel_version_minor,
-			__kernel_version_lower,
-			__kernel_version_suffix);
-	return sprintf(buffer, "%s %s %s %s %s %s",
-			__kernel_name,
-			version_number,
-			__kernel_version_codename,
-			__kernel_build_date,
-			__kernel_build_time,
-			__kernel_arch);
-}
-
-static int uname(struct utsname * name) {
+static int sys_uname(struct utsname * name) {
 	validate((void *)name);
 	char version_number[256];
 	sprintf(version_number, __kernel_version_format,
@@ -448,51 +367,13 @@ static int uname(struct utsname * name) {
 	return 0;
 }
 
-int send_signal(pid_t process, uint32_t signal) {
-	process_t * receiver = process_from_pid(process);
-
-	if (!receiver) {
-		/* Invalid pid */
-		return 1;
-	}
-
-	if (receiver->user != current_process->user && current_process->user != USER_ROOT_UID) {
-		/* No way in hell. */
-		return 1;
-	}
-
-	if (signal > NUMSIGNALS) {
-		/* Invalid signal */
-		return 1;
-	}
-
-	if (receiver->finished) {
-		/* Can't send signals to finished processes */
-		return 1;
-	}
-
-	/* Append signal to list */
-	signal_t * sig = malloc(sizeof(signal_t));
-	sig->handler = (uintptr_t)receiver->signals.functions[signal];
-	sig->signum  = signal;
-	memset(&sig->registers_before, 0x00, sizeof(regs_t));
-
-	if (!process_is_ready(receiver)) {
-		make_process_ready(receiver);
-	}
-
-	list_insert(receiver->signal_queue, sig);
-
-	return 0;
-}
-
-static uintptr_t sys_signal(uint32_t signum, uintptr_t handler) {
+static int sys_signal(uint32_t signum, uintptr_t handler) {
 	if (signum > NUMSIGNALS) {
 		return -1;
 	}
 	uintptr_t old = current_process->signals.functions[signum];
 	current_process->signals.functions[signum] = handler;
-	return old;
+	return (int)old;
 }
 
 /*
@@ -502,7 +383,7 @@ static void inspect_memory (uintptr_t vaddr) {
 }
 */
 
-static int reboot(void) {
+static int sys_reboot(void) {
 	debug_print(NOTICE, "[kernel] Reboot requested from process %d by user #%d", current_process->id, current_process->user);
 	if (current_process->user != USER_ROOT_UID) {
 		return -1;
@@ -520,13 +401,15 @@ static int reboot(void) {
 	return 0;
 }
 
-static int chdir(char * newdir) {
+static int sys_chdir(char * newdir) {
 	char * path = canonicalize_path(current_process->wd_name, newdir);
 	fs_node_t * chd = kopen(path, 0);
 	if (chd) {
 		if ((chd->flags & FS_DIRECTORY) == 0) {
+			close_fs(chd);
 			return -1;
 		}
+		close_fs(chd);
 		free(current_process->wd_name);
 		current_process->wd_name = malloc(strlen(path) + 1);
 		memcpy(current_process->wd_name, path, strlen(path) + 1);
@@ -536,17 +419,16 @@ static int chdir(char * newdir) {
 	}
 }
 
-static char * getcwd(char * buf, size_t size) {
+static int sys_getcwd(char * buf, size_t size) {
 	if (!buf) {
-		debug_print(WARNING, "getcwd got NULL for buf, investigate");
-		return NULL;
+		return 0;
 	}
 	validate((void *)buf);
 	memcpy(buf, current_process->wd_name, min(size, strlen(current_process->wd_name) + 1));
-	return buf;
+	return (int)buf;
 }
 
-static int sethostname(char * new_hostname) {
+static int sys_sethostname(char * new_hostname) {
 	if (current_process->user == USER_ROOT_UID) {
 		size_t len = strlen(new_hostname) + 1;
 		if (len > 256) {
@@ -560,7 +442,7 @@ static int sethostname(char * new_hostname) {
 	}
 }
 
-static int gethostname(char * buffer) {
+static int sys_gethostname(char * buffer) {
 	memcpy(buffer, hostname, hostname_len);
 	return hostname_len;
 }
@@ -571,36 +453,11 @@ static int sys_mkdir(char * path, uint32_t mode) {
 	return mkdir_fs(path, 0777);
 }
 
-/**
- * share_fd: Make a file descriptor available to another process.
- */
-static uintptr_t share_fd(int fd, int pid) {
-	if (fd >= (int)current_process->fds->length || fd < 0) {
-		return 0;
-	}
-	fs_node_t * fn = current_process->fds->entries[fd];
-	fn->shared_with = pid;
-	return (uintptr_t)fn;
-}
-
-/**
- * get_fd: Retreive a file descriptor (by key == pointer to fs_node_t) from
- *         another proces.
- */
-static int get_fd(uintptr_t fn) {
-	fs_node_t * node = (fs_node_t *)fn;
-	if (node->shared_with == current_process->id || node->shared_with == current_process->group) {
-		return process_append_fd((process_t *)current_process, node);
-	} else {
-		return -1;
-	}
-}
-
 /*
  * Yield the rest of the quantum;
  * useful for busy waiting and other such things
  */
-static int yield(void) {
+static int sys_yield(void) {
 	switch_task(1);
 	return 1;
 }
@@ -608,33 +465,22 @@ static int yield(void) {
 /*
  * System Function
  */
-static int system_function(int fn, char ** args) {
+static int sys_sysfunc(int fn, char ** args) {
 	/* System Functions are special debugging system calls */
 	if (current_process->user == USER_ROOT_UID) {
 		switch (fn) {
-			case 1:
-				/* Print memory information */
-				/* Future: /proc/meminfo */
-				kprintf("Memory used:      %d\n", memory_use());
-				kprintf("Memory available: %d\n", memory_total());
-				return 0;
-			case 2:
-				/* Print process tree */
-				/* Future: /proc in general */
-				debug_print_process_tree();
-				return 0;
 			case 3:
 				debug_print(ERROR, "sync is currently unimplemented");
 				//ext2_disk_sync();
 				return 0;
 			case 4:
 				/* Request kernel output to file descriptor in arg0*/
-				kprintf("Setting output to file object in process %d's fd=%d!\n", getpid(), (int)args);
-				kprint_to_file = current_process->fds->entries[(int)args];
+				debug_print(NOTICE, "Setting output to file object in process %d's fd=%d!", getpid(), (int)args);
+				debug_file = current_process->fds->entries[(int)args];
 				break;
 			case 5:
 				validate((char *)args);
-				debug_print(NOTICE, "Replacing process %d's file descriptors with pointers to %s", (char *)args);
+				debug_print(NOTICE, "Replacing process %d's file descriptors with pointers to %s", getpid(), (char *)args);
 				fs_node_t * repdev = kopen((char *)args, 0);
 				while (current_process->fds->length < 3) {
 					process_append_fd((process_t *)current_process, repdev);
@@ -654,7 +500,7 @@ static int system_function(int fn, char ** args) {
 					uint8_t * buffer = malloc(length);
 					read_fs(file, 0, length, (uint8_t *)buffer);
 					close_fs(file);
-					debug_print(WARNING, "Finished reading file, going to write it now.\n");
+					debug_print(WARNING, "Finished reading file, going to write it now.");
 
 					fs_node_t * f = kopen("/dev/sdb", 0);
 					if (!f) {
@@ -666,15 +512,24 @@ static int system_function(int fn, char ** args) {
 					free(buffer);
 					return 0;
 				}
+			case 7:
+				debug_print(NOTICE, "Spawning debug hook as child of process %d.", getpid());
+				if (debug_hook) {
+					fs_node_t * tty = current_process->fds->entries[0];
+					int pid = create_kernel_tasklet(debug_hook, "[kttydebug]", tty);
+					return pid;
+				} else {
+					return -1;
+				}
 			default:
-				kprintf("Bad system function %d\n", fn);
+				debug_print(ERROR, "Bad system function %d", fn);
 				break;
 		}
 	}
 	return -1; /* Bad system function or access failure */
 }
 
-static int sleep(unsigned long seconds, unsigned long subseconds) {
+static int sys_sleepabs(unsigned long seconds, unsigned long subseconds) {
 	/* Mark us as asleep until <some time period> */
 	sleep_until((process_t *)current_process, seconds, subseconds);
 
@@ -688,10 +543,10 @@ static int sleep(unsigned long seconds, unsigned long subseconds) {
 	}
 }
 
-static int sleep_rel(unsigned long seconds, unsigned long subseconds) {
+static int sys_sleep(unsigned long seconds, unsigned long subseconds) {
 	unsigned long s, ss;
 	relative_time(seconds, subseconds, &s, &ss);
-	return sleep(s, ss);
+	return sys_sleepabs(s, ss);
 }
 
 static int sys_umask(int mode) {
@@ -703,68 +558,153 @@ static int sys_unlink(char * file) {
 	return unlink_fs(file);
 }
 
+static int sys_fork(void) {
+	return (int)fork();
+}
+
+static int sys_clone(uintptr_t new_stack, uintptr_t thread_func, uintptr_t arg) {
+	if (!new_stack || validate_safe((void*)new_stack)) {
+		return -1;
+	}
+	if (!thread_func || validate_safe((void*)thread_func)) {
+		return -1;
+	}
+
+	return (int)clone(new_stack, thread_func, arg);
+}
+
+static int sys_shm_obtain(char * path, size_t * size) {
+	validate(path);
+	validate(size);
+
+	return (int)shm_obtain(path, size);
+}
+
+static int sys_shm_release(char * path) {
+	validate(path);
+
+	return shm_release(path);
+}
+
+static int sys_kill(pid_t process, uint32_t signal) {
+	return send_signal(process, signal);
+}
+
+static int sys_gettimeofday(struct timeval * tv, void * tz) {
+	validate(tv);
+	validate(tz);
+
+	return gettimeofday(tv, tz);
+}
+
+static int sys_openpty(int * master, int * slave, char * name, void * _ign0, void * size) {
+	/* We require a place to put these when we are done. */
+	if (!master || !slave) return -1;
+	if (validate_safe(master) || validate_safe(slave)) return -1;
+	if (validate_safe(size)) return -1;
+
+	/* Create a new pseudo terminal */
+	fs_node_t * fs_master;
+	fs_node_t * fs_slave;
+
+	pty_create(size, &fs_master, &fs_slave);
+
+	/* Append the master and slave to the calling process */
+	*master = process_append_fd((process_t *)current_process, fs_master);
+	*slave  = process_append_fd((process_t *)current_process, fs_slave);
+
+	open_fs(fs_master, 0);
+	open_fs(fs_slave, 0);
+
+	/* Return success */
+	return 0;
+}
+
+static int sys_pipe(int pipes[2]) {
+	if (validate_safe(pipes)) return -EFAULT;
+
+	fs_node_t * outpipes[2];
+
+	make_unix_pipe(outpipes);
+
+	open_fs(outpipes[0], 0);
+	open_fs(outpipes[1], 0);
+
+	pipes[0] = process_append_fd((process_t *)current_process, outpipes[0]);
+	pipes[1] = process_append_fd((process_t *)current_process, outpipes[1]);
+
+	return 0;
+}
+
+static int sys_mount(char * arg, char * mountpoint, char * type, unsigned long flags, void * data) {
+
+	if (validate_safe(arg) || validate_safe(mountpoint) || validate_safe(type)) {
+		return -EFAULT;
+	}
+
+	if (current_process->user != USER_ROOT_UID) {
+		return -EPERM;
+	}
+
+	/* I may or may not start using these eventually. */
+	(void)flags;
+	(void)data;
+
+	return vfs_mount_type(type, arg, mountpoint);
+}
+
 /*
  * System Call Internals
  */
-static uintptr_t syscalls[] = {
+static int (*syscalls[])() = {
 	/* System Call Table */
-	(uintptr_t)&exit,               /* 0 */
-	(uintptr_t)&print,
-	(uintptr_t)&open,
-	(uintptr_t)&read,
-	(uintptr_t)&write,              /* 4 */
-	(uintptr_t)&close,
-	(uintptr_t)&gettimeofday,
-	(uintptr_t)&execve,
-	(uintptr_t)&fork,               /* 8 */
-	(uintptr_t)&sys_getpid,
-	(uintptr_t)&sys_sbrk,
-	(uintptr_t)&RESERVED,
-	(uintptr_t)&uname,              /* 12 */
-	(uintptr_t)&openpty,
-	(uintptr_t)&seek,
-	(uintptr_t)&stat,
-	(uintptr_t)&RESERVED,           /* 16 */
-	(uintptr_t)&wait,
-	(uintptr_t)&RESERVED,
-	(uintptr_t)&RESERVED,
-	(uintptr_t)&RESERVED,           /* 20 */
-	(uintptr_t)&mkpipe,
-	(uintptr_t)&dup2,
-	(uintptr_t)&getuid,
-	(uintptr_t)&setuid,             /* 24 */
-	(uintptr_t)&kernel_name_XXX,
-	(uintptr_t)&reboot,
-	(uintptr_t)&readdir,
-	(uintptr_t)&chdir,              /* 28 */
-	(uintptr_t)&getcwd,
-	(uintptr_t)&clone,
-	(uintptr_t)&sethostname,
-	(uintptr_t)&gethostname,        /* 32 */
-	(uintptr_t)&RESERVED,
-	(uintptr_t)&sys_mkdir,
-	(uintptr_t)&shm_obtain,
-	(uintptr_t)&shm_release,        /* 36 */
-	(uintptr_t)&send_signal,
-	(uintptr_t)&sys_signal,
-	(uintptr_t)&share_fd,
-	(uintptr_t)&get_fd,             /* 40 */
-	(uintptr_t)&gettid,
-	(uintptr_t)&yield,
-	(uintptr_t)&system_function,
-	(uintptr_t)&RESERVED,           /* 44 */
-	(uintptr_t)&sleep,
-	(uintptr_t)&sleep_rel,
-	(uintptr_t)&ioctl,
-	(uintptr_t)&access,             /* 48 */
-	(uintptr_t)&stat_file,
-	(uintptr_t)&sys_chmod,
-	(uintptr_t)&sys_umask,
-	(uintptr_t)&sys_unlink,         /* 52 */
-	(uintptr_t)&advanced_wait,
-	0
+	[SYS_EXT]          = sys_exit,
+	[SYS_OPEN]         = sys_open,
+	[SYS_READ]         = sys_read,
+	[SYS_WRITE]        = sys_write,
+	[SYS_CLOSE]        = sys_close,
+	[SYS_GETTIMEOFDAY] = sys_gettimeofday,
+	[SYS_EXECVE]       = sys_execve,
+	[SYS_FORK]         = sys_fork,
+	[SYS_GETPID]       = sys_getpid,
+	[SYS_SBRK]         = sys_sbrk,
+	[SYS_UNAME]        = sys_uname,
+	[SYS_OPENPTY]      = sys_openpty,
+	[SYS_SEEK]         = sys_seek,
+	[SYS_STAT]         = sys_stat,
+	[SYS_MKPIPE]       = sys_mkpipe,
+	[SYS_DUP2]         = sys_dup2,
+	[SYS_GETUID]       = sys_getuid,
+	[SYS_SETUID]       = sys_setuid,
+	[SYS_REBOOT]       = sys_reboot,
+	[SYS_READDIR]      = sys_readdir,
+	[SYS_CHDIR]        = sys_chdir,
+	[SYS_GETCWD]       = sys_getcwd,
+	[SYS_CLONE]        = sys_clone,
+	[SYS_SETHOSTNAME]  = sys_sethostname,
+	[SYS_GETHOSTNAME]  = sys_gethostname,
+	[SYS_MKDIR]        = sys_mkdir,
+	[SYS_SHM_OBTAIN]   = sys_shm_obtain,
+	[SYS_SHM_RELEASE]  = sys_shm_release,
+	[SYS_KILL]         = sys_kill,
+	[SYS_SIGNAL]       = sys_signal,
+	[SYS_GETTID]       = sys_gettid,
+	[SYS_YIELD]        = sys_yield,
+	[SYS_SYSFUNC]      = sys_sysfunc,
+	[SYS_SLEEPABS]     = sys_sleepabs,
+	[SYS_SLEEP]        = sys_sleep,
+	[SYS_IOCTL]        = sys_ioctl,
+	[SYS_ACCESS]       = sys_access,
+	[SYS_STATF]        = sys_statf,
+	[SYS_CHMOD]        = sys_chmod,
+	[SYS_UMASK]        = sys_umask,
+	[SYS_UNLINK]       = sys_unlink,
+	[SYS_WAITPID]      = sys_waitpid,
+	[SYS_PIPE]         = sys_pipe,
+	[SYS_MOUNT]        = sys_mount,
 };
-uint32_t num_syscalls;
+
+uint32_t num_syscalls = sizeof(syscalls) / sizeof(int (*)());
 
 typedef uint32_t (*scall_func)(unsigned int, ...);
 
@@ -773,7 +713,7 @@ void syscall_handler(struct regs * r) {
 		return;
 	}
 
-	uintptr_t location = syscalls[r->eax];
+	uintptr_t location = (uintptr_t)syscalls[r->eax];
 	if (!location) {
 		return;
 	}
@@ -792,7 +732,6 @@ void syscall_handler(struct regs * r) {
 }
 
 void syscalls_install(void) {
-	for (num_syscalls = 0; syscalls[num_syscalls] != 0; ++num_syscalls);
 	debug_print(NOTICE, "Initializing syscall table with %d functions", num_syscalls);
 	isrs_install_handler(0x7F, &syscall_handler);
 }

@@ -1,3 +1,7 @@
+/* This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2013-2014 Kevin Lange
+ */
 /*
  * cat
  *
@@ -10,9 +14,12 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <syscall.h>
-#include "lib/pthread.h"
 #include <signal.h>
 #include <termios.h>
+#include <fcntl.h>
+#include <sys/wait.h>
+
+#include "lib/pthread.h"
 
 int fd = 0;
 
@@ -54,7 +61,7 @@ int main(int argc, char ** argv) {
 
 	set_unbuffered();
 
-	fd = syscall_open(device, 0, 0);
+	fd = open(device, 0, 0);
 
 	pthread_create(&receive_thread, NULL, print_serial_stuff, NULL);
 
@@ -77,8 +84,7 @@ int main(int argc, char ** argv) {
 					if (!strcmp(line, "quit")) {
 						kill(child_pid, SIGKILL);
 						printf("Waiting for threads to shut down...\n");
-						syscall_wait(child_pid);
-
+						while (wait(NULL) != -1);
 						printf("Exiting.\n");
 						return 0;
 					} else if (!strcmp(line, "continue")) {

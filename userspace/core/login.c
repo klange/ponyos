@@ -1,4 +1,7 @@
 /* vim: tabstop=4 shiftwidth=4 noexpandtab
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2013-2014 Kevin Lange
  *
  * Login Service
  *
@@ -15,10 +18,11 @@
 #include <time.h>
 #include <signal.h>
 #include <termios.h>
-
+#include <errno.h>
+#include <sys/wait.h>
 #include <sys/utsname.h>
 
-#include "lib/sha2.h"
+#include "lib/toaru_auth.h"
 
 #define LINE_LEN 1024
 
@@ -38,92 +42,15 @@ void sig_segv(int sig) {
 	/* no return */
 }
 
-int checkUserPass(char * user, char * pass) {
-
-	/* Generate SHA512 */
-	char hash[SHA512_DIGEST_STRING_LENGTH];
-	SHA512_Data(pass, strlen(pass), hash);
-
-	/* Open up /etc/master.passwd */
-
-	FILE * passwd = fopen("/etc/master.passwd", "r");
-	char line[2048];
-
-	while (fgets(line, 2048, passwd) != NULL) {
-
-		line[strlen(line)-1] = '\0';
-
-		char *p, *tokens[4], *last;
-		int i = 0;
-		for ((p = strtok_r(line, ":", &last)); p;
-				(p = strtok_r(NULL, ":", &last)), i++) {
-			if (i < 511) tokens[i] = p;
-		}
-		tokens[i] = NULL;
-		
-		if (strcmp(tokens[0],user) != 0) {
-			continue;
-		}
-		if (!strcmp(tokens[1],hash)) {
-			fclose(passwd);
-			return atoi(tokens[2]);
-		}
-		}
-	fclose(passwd);
-	return -1;
-
-}
-
-void set_username() {
-	FILE * passwd = fopen("/etc/passwd", "r");
-	char line[LINE_LEN];
-	
-	int uid = syscall_getuid();
-
-	while (fgets(line, LINE_LEN, passwd) != NULL) {
-
-		line[strlen(line)-1] = '\0';
-
-		char *p, *tokens[10], *last;
-		int i = 0;
-		for ((p = strtok_r(line, ":", &last)); p;
-				(p = strtok_r(NULL, ":", &last)), i++) {
-			if (i < 511) tokens[i] = p;
-		}
-		tokens[i] = NULL;
-
-		if (atoi(tokens[2]) == uid) {
-			setenv("USER", tokens[0], 1);
-		}
-	}
-	fclose(passwd);
-}
-
-void set_homedir() {
-	char * user = getenv("USER");
-	if (user) {
-		char path[512];
-		sprintf(path,"/home/%s", user);
-		setenv("HOME",path,1);
-	} else {
-		setenv("HOME","/",1);
-	}
-}
-
-void set_path() {
-	setenv("PATH", "/usr/bin:/bin", 0);
-}
-
-
 int main(int argc, char ** argv) {
 
 	printf("\n");
 	system("uname -a");
 	printf("\n");
 
-	syscall_signal(SIGINT, sig_pass);
-	syscall_signal(SIGWINCH, sig_pass);
-	syscall_signal(SIGSEGV, sig_segv);
+	signal(SIGINT, sig_pass);
+	signal(SIGWINCH, sig_pass);
+	signal(SIGSEGV, sig_segv);
 
 	while (1) {
 		char * username = malloc(sizeof(char) * 1024);
@@ -135,7 +62,14 @@ int main(int argc, char ** argv) {
 
 		fprintf(stdout, "%s login: ", _hostname);
 		fflush(stdout);
-		fgets(username, 1024, stdin);
+		char * r = fgets(username, 1024, stdin);
+		if (!r) {
+			clearerr(stdin);
+			fprintf(stderr, "\n");
+			sleep(2);
+			fprintf(stderr, "\nLogin failed.\n");
+			continue;
+		}
 		username[strlen(username)-1] = '\0';
 
 		fprintf(stdout, "password: ");
@@ -148,14 +82,23 @@ int main(int argc, char ** argv) {
 		new.c_lflag &= (~ECHO);
 		tcsetattr(fileno(stdin), TCSAFLUSH, &new);
 
-		fgets(password, 1024, stdin);
+		r = fgets(password, 1024, stdin);
+		if (!r) {
+			clearerr(stdin);
+			tcsetattr(fileno(stdin), TCSAFLUSH, &old);
+			fprintf(stderr, "\n");
+			sleep(2);
+			fprintf(stderr, "\nLogin failed.\n");
+			continue;
+		}
 		password[strlen(password)-1] = '\0';
 		tcsetattr(fileno(stdin), TCSAFLUSH, &old);
 		fprintf(stdout, "\n");
 
-		int uid = checkUserPass(username, password);
+		int uid = toaru_auth_check_pass(username, password);
 
 		if (uid < 0) {
+			sleep(2);
 			fprintf(stdout, "\nLogin failed.\n");
 			continue;
 		}
@@ -166,19 +109,19 @@ int main(int argc, char ** argv) {
 
 		pid_t f = fork();
 		if (getpid() != pid) {
-			/* TODO: Read appropriate shell from /etc/passwd */
+			setuid(uid);
+			toaru_auth_set_vars();
 			char * args[] = {
-				"/bin/sh",
+				getenv("SHELL"),
 				NULL
 			};
-			syscall_setuid(uid);
-			set_username();
-			set_homedir();
-			set_path();
 			int i = execvp(args[0], args);
 		} else {
 			child = f;
-			syscall_wait(f);
+			int result;
+			do {
+				result = waitpid(f, NULL, 0);
+			} while (result < 0);
 		}
 		child = 0;
 		free(username);

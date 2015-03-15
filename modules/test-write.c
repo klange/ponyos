@@ -1,6 +1,12 @@
+/* vim: tabstop=4 shiftwidth=4 noexpandtab
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2014 Kevin Lange
+ */
 #include <system.h>
 #include <module.h>
 #include <fs.h>
+#include <printf.h>
 #include <mod/shell.h>
 
 DEFINE_SHELL_FUNCTION(testwrite, "Test write") {
@@ -15,7 +21,7 @@ DEFINE_SHELL_FUNCTION(testwrite, "Test write") {
 	f = kopen(file, 0);
 
 	if (!f) {
-		fs_printf(tty, "No device: %s\n", file);
+		fprintf(tty, "No device: %s\n", file);
 		return 1;
 	}
 

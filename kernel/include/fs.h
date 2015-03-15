@@ -81,7 +81,8 @@ typedef struct fs_node {
 
 	struct fs_node *ptr;   /* Alias pointer, for symlinks. */
 	uint32_t offset;       /* Offset for read operations XXX move this to new "file descriptor" entry */
-	int32_t shared_with;   /* File descriptor sharing XXX */
+	int32_t refcount;
+	uint32_t nlink;
 } fs_node_t;
 
 struct dirent {
@@ -112,7 +113,7 @@ struct vfs_entry {
 };
 
 extern fs_node_t *fs_root;
-extern int openpty(int * master, int * slave, char * name, void * _ign0, void * size);
+extern int pty_create(void *size, fs_node_t ** fs_master, fs_node_t ** fs_slave);
 
 uint32_t read_fs(fs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer);
 uint32_t write_fs(fs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer);
@@ -131,10 +132,16 @@ int unlink_fs(char * name);
 
 void vfs_install(void);
 void * vfs_mount(char * path, fs_node_t * local_root);
+typedef fs_node_t * (*vfs_mount_callback)(char * arg, char * mount_point);
+int vfs_register(char * name, vfs_mount_callback callback);
+int vfs_mount_type(char * type, char * arg, char * mountpoint);
+void vfs_lock(fs_node_t * node);
 
 /* Debug purposes only, please */
 void debug_print_vfs_tree(void);
 
 void map_vfs_directory(char *);
+
+int make_unix_pipe(fs_node_t ** pipes);
 
 #endif

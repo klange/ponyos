@@ -1,4 +1,8 @@
 /* vim: tabstop=4 shiftwidth=4 noexpandtab
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2012-2014 Kevin Lange
+ * Copyright (C) 2012 Markus Schober
  *
  * Shared Memory
  */
@@ -76,7 +80,8 @@ static shm_node_t * get_node (char * shm_path, int create) {
 
 
 static shm_chunk_t * create_chunk (shm_node_t * parent, size_t size) {
-	assert((size > 0) && "Size supplied to create_chunk() was zero!");
+	debug_print(WARNING, "Size supplied to create_chunk was 0");
+	if (!size) return NULL;
 
 	shm_chunk_t *chunk = malloc(sizeof(shm_chunk_t));
 	if (chunk == NULL) {
@@ -98,11 +103,11 @@ static shm_chunk_t * create_chunk (shm_node_t * parent, size_t size) {
 
 	/* Now grab some frames for this guy. */
 	for (uint32_t i = 0; i < chunk->num_frames; i++) {
-		uint32_t index = first_frame();
-		set_frame(index * 0x1000);
-		chunk->frames[i] = index;
+		page_t tmp = {0,0,0,0,0,0,0};
+		alloc_frame(&tmp, 0, 0);
+		chunk->frames[i] = tmp.frame;
 #if 0
-		kprintf("Using frame #%d for chunk[%d] (name=%s)\n", index, i, parent->name);
+		debug_print(WARNING, "Using frame 0x%x for chunk[%d] (name=%s)", tmp.frame * 0x1000, i, parent->name);
 #endif
 	}
 
@@ -116,7 +121,7 @@ static int release_chunk (shm_chunk_t * chunk) {
 		/* Does the chunk need to be freed? */
 		if (chunk->ref_count < 1) {
 #if 0
-			kprintf("[shm] Freeing chunk with name %s\n", chunk->parent->name);
+			debug_print(INFO, "Freeing chunk with name %s", chunk->parent->name);
 #endif
 
 			/* First, free the frames used by this chunk */
@@ -163,6 +168,57 @@ static void * map_in (shm_chunk_t * chunk, process_t * proc) {
 	mapping->num_vaddrs = chunk->num_frames;
 	mapping->vaddrs = malloc(sizeof(uintptr_t) * mapping->num_vaddrs);
 
+	debug_print(INFO, "want %d bytes, running through mappings...", mapping->num_vaddrs * 0x1000);
+	uintptr_t last_address = SHM_START;
+	foreach(node, proc->shm_mappings) {
+		shm_mapping_t * m = node->value;
+		if (m->vaddrs[0] > last_address) {
+			size_t gap = (uintptr_t)m->vaddrs[0] - last_address;
+			debug_print(INFO, "gap found at 0x%x of size %d", last_address, gap);
+			if (gap >= mapping->num_vaddrs * 0x1000) {
+				debug_print(INFO, "Gap is sufficient, we can insert here.");
+
+				/* Map the gap */
+				for (unsigned int i = 0; i < chunk->num_frames; ++i) {
+					page_t * page = get_page(last_address + i * 0x1000, 1, proc->thread.page_directory);
+					page->frame = chunk->frames[i];
+					alloc_frame(page, 0, 1);
+					invalidate_tables_at(last_address + i * 0x1000);
+					mapping->vaddrs[i] = last_address + i * 0x1000;
+				}
+
+				/* Insert us before this node */
+				list_insert_before(proc->shm_mappings, node, mapping);
+
+				return (void *)mapping->vaddrs[0];
+			}
+		}
+		last_address = m->vaddrs[0] + m->num_vaddrs * 0x1000;
+		debug_print(INFO, "[0x%x:0x%x] %s", m->vaddrs[0], last_address, m->chunk->parent->name);
+	}
+	if (proc->image.shm_heap > last_address) {
+		size_t gap = proc->image.shm_heap - last_address;
+		debug_print(INFO, "gap found at 0x%x of size %d", last_address, gap);
+		if (gap >= mapping->num_vaddrs * 0x1000) {
+			debug_print(INFO, "Gap is sufficient, we can insert here.");
+
+			for (unsigned int i = 0; i < chunk->num_frames; ++i) {
+				page_t * page = get_page(last_address + i * 0x1000, 1, proc->thread.page_directory);
+				page->frame = chunk->frames[i];
+				alloc_frame(page, 0, 1);
+				invalidate_tables_at(last_address + i * 0x1000);
+				mapping->vaddrs[i] = last_address + i * 0x1000;
+			}
+
+			list_insert(proc->shm_mappings, mapping);
+
+			return (void *)mapping->vaddrs[0];
+		} else {
+			debug_print(INFO, "should be more efficient here - there is space available, but we are not going to use it");
+		}
+	}
+
+
 	for (uint32_t i = 0; i < chunk->num_frames; i++) {
 		uintptr_t new_vpage = proc_sbrk(1, proc);
 		assert(new_vpage % 0x1000 == 0);
@@ -170,12 +226,13 @@ static void * map_in (shm_chunk_t * chunk, process_t * proc) {
 		page_t * page = get_page(new_vpage, 1, proc->thread.page_directory);
 		assert(page && "Page not allocated by sys_sbrk?");
 
-		alloc_frame(page, 0, 1);
 		page->frame = chunk->frames[i];
+		alloc_frame(page, 0, 1);
+		invalidate_tables_at(new_vpage);
 		mapping->vaddrs[i] = new_vpage;
 
 #if 0
-			kprintf("[kernel] [shm] mapping vaddr 0x%x --> #%d\n", new_vpage, page->frame);
+			debug_print(INFO, "mapping vaddr 0x%x --> #%d", new_vpage, page->frame);
 #endif
 	}
 
@@ -193,8 +250,6 @@ static size_t chunk_size (shm_chunk_t * chunk) {
 
 
 void * shm_obtain (char * path, size_t * size) {
-	validate(path);
-	validate(size);
 	spin_lock(&bsl);
 	process_t * proc = (process_t *)current_process;
 
@@ -233,6 +288,7 @@ void * shm_obtain (char * path, size_t * size) {
 	*size = chunk_size(chunk);
 
 	spin_unlock(&bsl);
+	invalidate_page_tables();
 
 	return vshm_start;
 }
@@ -240,6 +296,10 @@ void * shm_obtain (char * path, size_t * size) {
 int shm_release (char * path) {
 	spin_lock(&bsl);
 	process_t * proc = (process_t *)current_process;
+
+	if (proc->group != 0) {
+		proc = process_from_pid(proc->group);
+	}
 
 	/* First, find the right chunk */
 	shm_node_t * _node = get_node(path, 0);
@@ -272,6 +332,7 @@ int shm_release (char * path) {
 
 		memset(page, 0, sizeof(page_t));
 	}
+	invalidate_page_tables();
 
 	/* Clean up */
 	release_chunk(chunk);
@@ -305,48 +366,3 @@ void shm_release_all (process_t * proc) {
 }
 
 
-/* XXX: oh god don't use this */
-
-#if 0
-void shm_debug_frame (uintptr_t vaddr) {
-	uintptr_t vframe = vaddr / 0x1000;
-	uintptr_t pframe, paddr;
-
-	kprintf("[kernel] Inspecting user page 0x%x\n", vframe * 0x1000);
-
-	uintptr_t table_index = vframe / 1024;
-
-	if (!current_directory->tables[table_index]) {
-		kprintf("[kernel] Page does not exist!\n");
-		return;
-	} else {
-
-		// Where is the vaddr pointing to?
-		page_t * page = &current_directory->tables[table_index]->pages[vframe % 1024];
-		pframe = page->frame;
-		paddr = pframe * 0x1000;
-
-		kprintf("[kernel] Refers to physical frame #%d (present=%d rw=%d user=%d accessed=%d dirty=%d)\n", page->frame, page->present, page->rw, page->user, page->accessed, page->dirty);
-
-#if 0
-		// Map the page into kernel memory. Oh god.
-		assert((heap_end % 0x1000 == 0) && "Kernel heap not page-aligned!");
-
-		uintptr_t address = heap_end;
-		heap_end += 0x1000;
-		page_t * kpage = get_page(address, 1, kernel_directory);
-		kpage->frame = pframe;
-		alloc_frame(kpage, 0, 1);
-#endif
-
-		// Read it out...
-#if 0
-		kprintf("[kernel] Data in frame: ");
-		for (int i = 0; i < 0x1000; i++) {
-			kprintf("%c", ((char *)vaddr)[i]);
-		}
-		kprintf("\n");
-#endif
-	}
-}
-#endif

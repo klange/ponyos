@@ -1,7 +1,7 @@
 /* vim: tabstop=4 shiftwidth=4 noexpandtab
- *
- * Copyright 2012 Kevin Lange
- *
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2012-2014 Kevin Lange
  */
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -22,6 +22,13 @@
 
 #include "syscall.h"
 #include <bits/dirent.h>
+
+#include <syscall_nums.h>
+
+extern void *malloc(size_t size);
+extern void free(void *ptr);
+extern void *calloc(size_t nmemb, size_t size);
+extern void *realloc(void *ptr, size_t size);
 
 extern void _init();
 extern void _fini();
@@ -80,11 +87,31 @@ DEFN_SYSCALL2(chmod, 50, char *, mode_t);
 DEFN_SYSCALL1(umask, 51, mode_t);
 DEFN_SYSCALL1(unlink, 52, char *);
 DEFN_SYSCALL3(waitpid, 53, int, int *, int);
+DEFN_SYSCALL1(pipe, 54, int *);
+DEFN_SYSCALL5(mount, SYS_MOUNT, char *, char *, char *, unsigned long, void *);
 
-#define DEBUG_STUB(...) { char buf[512]; sprintf(buf, "\033[1;32mUserspace Debug\033[0m pid%d ", getpid()); syscall_print(buf); sprintf(buf, __VA_ARGS__); syscall_print(buf); }
+static int toaru_debug_stubs_enabled(void) {
+	static int checked = 0;
+	static int enabled = 0;
+	if (!checked) {
+		char * t = getenv("TOARU_DEBUG_STUBS");
+		checked = 1;
+		if (t && !strcmp(t,"1")) {
+			enabled = 1;
+		}
+	}
+	return enabled;
+}
+
+#define DEBUG_STUB(...) \
+	if (toaru_debug_stubs_enabled()) { \
+		fprintf(stderr, "\033[1;32mUserspace Debug\033[0m pid%d ", getpid()); fprintf(stderr, __VA_ARGS__); \
+	}
 
 
 extern char ** environ;
+
+int ioctl(int fd, int request, void * argp);
 
 #define DEFAULT_PATH ".:/bin:/usr/bin"
 
@@ -166,7 +193,7 @@ int kill(int pid, int sig) {
 }
 
 sighandler_t signal(int signum, sighandler_t handler) {
-	return syscall_signal(signum, (void *)handler);
+	return (sighandler_t)syscall_signal(signum, (void *)handler);
 }
 
 #if 0
@@ -247,7 +274,7 @@ int fstat(int file, struct stat *st) {
 }
 
 int stat(const char *file, struct stat *st){
-	int ret = syscall_stat((char *)file, (uintptr_t)st);
+	int ret = syscall_stat((char *)file, (void *)st);
 	if (ret >= 0) {
 		return ret;
 	} else {
@@ -275,10 +302,12 @@ int gettimeofday(struct timeval *p, void *z){
 }
 
 int pipe(int fildes[2]) {
-	int fd = syscall_mkpipe();
-	fildes[0] = fd;
-	fildes[1] = fd;
-	return 0;
+	int ret = syscall_pipe((int *)fildes);
+	if (ret < 0) {
+		errno = -ret;
+		return -1;
+	}
+	return ret;
 }
 
 char *getcwd(char *buf, size_t size) {
@@ -344,7 +373,6 @@ char *getlogin(void) {
 }
 
 int dup2(int oldfd, int newfd) {
-	DEBUG_STUB("dup2(%d,%d);\n", oldfd, newfd);
 	return syscall_dup2(oldfd, newfd);
 }
 
@@ -557,6 +585,10 @@ int fpathconf(int file, int name) {
 	return 0;
 }
 
+int setuid(uid_t uid) {
+	return syscall_setuid(uid);
+}
+
 int getuid() {
 	return syscall_getuid();
 }
@@ -591,6 +623,10 @@ int dup(int oldfd) {
 	return dup2(oldfd, 0);
 }
 
+int sched_yield(void) {
+	return syscall_yield();
+}
+
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
 	DEBUG_STUB("sigprocmask(%d, 0x%x, 0x%x);\n", how, set, oldset);
 	return -1;
@@ -609,12 +645,24 @@ int setpgid(pid_t pid, pid_t pgid) {
 
 int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)  {
 
-	sighandler_t old = signal(signum, act->sa_handler);
+	sighandler_t old;
+
+	if (act) {
+		old = signal(signum, act->sa_handler);
+	} else {
+		/* We don't have a way to query, so we need to set to something, then
+		 * set back to whatever it was... XXX */
+		old = signal(signum, NULL);
+		signal(signum, old);
+	}
+
 	if (oldact) {
 		oldact->sa_handler = old;
 	}
 
-	DEBUG_STUB("sigaction(%d,...,0x%x);\n", signum, act->sa_flags);
+	if (act) {
+		DEBUG_STUB("sigaction(%d,...,0x%x);\n", signum, act->sa_flags);
+	}
 
 	return 0;
 }
@@ -627,5 +675,16 @@ pid_t getppid() {
 
 void sync() {
 	DEBUG_STUB("sync();\n");
+}
+
+int mount(char * source, char * target, char * type, unsigned long flags, void * data) {
+	int r = syscall_mount(source, target, type, flags, data);
+
+	if (r < 0) {
+		errno = -r;
+		return -1;
+	}
+
+	return r;
 }
 

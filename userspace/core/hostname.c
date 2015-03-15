@@ -1,3 +1,7 @@
+/* This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2013-2014 Kevin Lange
+ */
 /* vim: tabstop=4 shiftwidth=4 noexpandtab
  *
  * hostname
@@ -10,7 +14,7 @@
 #define ROOT_UID 0
 
 int main(int argc, char * argv[]) {
-	if (argc < 2) {
+	if ((argc > 1 && argv[1][0] == '-') || (argc < 2)) {
 		char tmp[256];
 		syscall_gethostname(tmp);
 		printf("%s\n", tmp);

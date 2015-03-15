@@ -1,3 +1,8 @@
+/* vim: tabstop=4 shiftwidth=4 noexpandtab
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2014 Kevin Lange
+ */
 #include <system.h>
 #include <logging.h>
 #include <fs.h>
@@ -228,6 +233,7 @@ static fs_node_t * tmpfs_from_file(struct tmpfs_file * t) {
 	fnode->finddir = NULL;
 	fnode->chmod   = chmod_tmpfs;
 	fnode->length  = t->length;
+	fnode->nlink   = 1;
 	return fnode;
 }
 
@@ -236,6 +242,24 @@ static struct dirent * readdir_tmpfs(fs_node_t *node, uint32_t index) {
 	uint32_t i = 0;
 
 	debug_print(NOTICE, "tmpfs - readdir id=%d", index);
+
+	if (index == 0) {
+		struct dirent * out = malloc(sizeof(struct dirent));
+		memset(out, 0x00, sizeof(struct dirent));
+		out->ino = 0;
+		strcpy(out->name, ".");
+		return out;
+	}
+
+	if (index == 1) {
+		struct dirent * out = malloc(sizeof(struct dirent));
+		memset(out, 0x00, sizeof(struct dirent));
+		out->ino = 0;
+		strcpy(out->name, "..");
+		return out;
+	}
+
+	index -= 2;
 
 	if (index >= d->files->length) return NULL;
 
@@ -326,7 +350,9 @@ static void create_tmpfs(fs_node_t *parent, char *name, uint16_t permission) {
 	t->uid = current_process->user;
 	t->gid = current_process->user;
 
+	spin_lock(&tmpfs_lock);
 	list_insert(d->files, t);
+	spin_unlock(&tmpfs_lock);
 }
 
 static void mkdir_tmpfs(fs_node_t * parent, char * name, uint16_t permission) {
@@ -352,7 +378,9 @@ static void mkdir_tmpfs(fs_node_t * parent, char * name, uint16_t permission) {
 	out->uid  = current_process->user;
 	out->gid  = current_process->user;
 
+	spin_lock(&tmpfs_lock);
 	list_insert(d->files, out);
+	spin_unlock(&tmpfs_lock);
 }
 
 static fs_node_t * tmpfs_from_dir(struct tmpfs_dir * d) {
@@ -377,6 +405,7 @@ static fs_node_t * tmpfs_from_dir(struct tmpfs_dir * d) {
 	fnode->create  = create_tmpfs;
 	fnode->unlink  = unlink_tmpfs;
 	fnode->mkdir   = mkdir_tmpfs;
+	fnode->nlink   = 1; /* should be "number of children that are directories + 1" */
 
 	return fnode;
 }
@@ -390,9 +419,18 @@ fs_node_t * tmpfs_create(char * name) {
 	return tmpfs_from_dir(tmpfs_root);
 }
 
+fs_node_t * tmpfs_mount(char * device, char * mount_path) {
+	fs_node_t * fs = tmpfs_create(device);
+	return fs;
+}
+
 static int tmpfs_initialize(void) {
+
 	vfs_mount("/tmp", tmpfs_create("tmp"));
-	fs_root = tmpfs_create("/");
+	vfs_mount("/var", tmpfs_create("var"));
+
+	vfs_register("tmpfs", tmpfs_mount);
+
 	return 0;
 }
 static int tmpfs_finalize(void) {

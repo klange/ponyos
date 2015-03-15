@@ -1,4 +1,7 @@
 /* vim: tabstop=4 shiftwidth=4 noexpandtab
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2013-2014 Kevin Lange
  *
  * Terminal Emulator
  *
@@ -22,7 +25,9 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
+#include <sys/wait.h>
 #include <getopt.h>
+#include <errno.h>
 #include <ft2build.h>
 #include FT_FREETYPE_H
 #include FT_CACHE_H
@@ -32,10 +37,11 @@
 #include "lib/utf8decode.h"
 
 #include "lib/graphics.h"
-#include "lib/window.h"
+#include "lib/yutani.h"
 #include "lib/decorations.h"
 #include "lib/pthread.h"
 #include "lib/kbd.h"
+#include "lib/spinlock.h"
 
 #include "terminal-palette.h"
 #include "terminal-font.h"
@@ -62,14 +68,25 @@ term_cell_t * term_buffer    = NULL; /* The terminal cell buffer */
 uint32_t current_fg     = 7;    /* Current foreground color */
 uint32_t current_bg     = 0;    /* Current background color */
 uint8_t  cursor_on      = 1;    /* Whether or not the cursor should be rendered */
-window_t * window       = NULL; /* GUI window */
 uint8_t  _fullscreen    = 0;    /* Whether or not we are running in fullscreen mode (GUI only) */
+uint8_t  _no_frame      = 0;    /* Whether to disable decorations or not */
 uint8_t  _login_shell   = 0;    /* Whether we're going to display a login shell or not */
 uint8_t  _use_freetype  = 0;    /* Whether we should use freetype or not XXX seriously, how about some flags */
 uint8_t  _force_kernel  = 0;
 uint8_t  _hold_out      = 0;    /* state indicator on last cell ignore \n */
+uint8_t  _free_size     = 1;    /* Disable rounding when resized */
+
+static volatile int display_lock = 0;
+
+yutani_window_t * window       = NULL; /* GUI window */
+yutani_t * yctx = NULL;
 
 term_state_t * ansi_state = NULL;
+
+int32_t l_x = INT32_MAX;
+int32_t l_y = INT32_MAX;
+int32_t r_x = -1;
+int32_t r_y = -1;
 
 void reinit(); /* Defined way further down */
 void term_redraw_cursor();
@@ -78,24 +95,30 @@ void term_redraw_cursor();
 static unsigned int timer_tick = 0;
 
 /* Some GUI-only options */
-uint16_t window_width  = 640;
-uint16_t window_height = 408;
+uint32_t window_width  = 640;
+uint32_t window_height = 408;
 #define TERMINAL_TITLE_SIZE 512
 char   terminal_title[TERMINAL_TITLE_SIZE];
 size_t terminal_title_length = 0;
 gfx_context_t * ctx;
-volatile int needs_redraw = 1;
 static void render_decors();
 void term_clear();
-void resize_callback(window_t * window);
 
 void dump_buffer();
-
-wchar_t box_chars[] = L"▒␉␌␍␊°±␤␋┘┐┌└┼⎺⎻─⎼⎽├┤┴┬│≤≥";
 
 /* Trigger to exit the terminal when the child process dies or
  * we otherwise receive an exit signal */
 volatile int exit_application = 0;
+
+static void display_flip(void) {
+	if (l_x != INT32_MAX && l_y != INT32_MAX) {
+		yutani_flip_region(yctx, window, l_x, l_y, r_x - l_x, r_y - l_y);
+		l_x = INT32_MAX;
+		l_y = INT32_MAX;
+		r_x = -1;
+		r_y = -1;
+	}
+}
 
 static void set_term_font_size(float s) {
 	scale_fonts  = 1;
@@ -104,12 +127,12 @@ static void set_term_font_size(float s) {
 }
 
 /* Returns the lower of two shorts */
-uint16_t min(uint16_t a, uint16_t b) {
+int32_t min(int32_t a, int32_t b) {
 	return (a < b) ? a : b;
 }
 
 /* Returns the higher of two shorts */
-uint16_t max(uint16_t a, uint16_t b) {
+int32_t max(int32_t a, int32_t b) {
 	return (a > b) ? a : b;
 }
 
@@ -129,20 +152,26 @@ void input_buffer_stuff(char * str) {
 }
 
 static void render_decors() {
-	if (!_fullscreen) {
-		if (terminal_title_length) {
-			render_decorations(window, ctx, terminal_title);
-		} else {
-			render_decorations(window, ctx, "Terminal");
-		}
+	/* XXX Make the decorations library support Yutani windows */
+	if (_fullscreen) return;
+	if (!_no_frame) {
+		render_decorations(window, ctx, terminal_title_length ? terminal_title : "Terminal");
 	}
+	yutani_window_advertise_icon(yctx, window, terminal_title_length ? terminal_title : "Terminal", "utilities-terminal");
+	l_x = 0; l_y = 0;
+	r_x = window->width;
+	r_y = window->height;
+	display_flip();
 }
 
 static inline void term_set_point(uint16_t x, uint16_t y, uint32_t color ) {
-	if (!_fullscreen) {
+	if (_fullscreen) {
+		color = alpha_blend_rgba(premultiply(rgba(0,0,0,0xFF)), color);
+	}
+	if (!_no_frame) {
 		GFX(ctx, (x+decor_left_width),(y+decor_top_height)) = color;
 	} else {
-		GFX(ctx, x,y) = alpha_blend_rgba(premultiply(rgba(0,0,0,0xFF)), color);
+		GFX(ctx, x,y) = color;
 	}
 }
 
@@ -154,8 +183,10 @@ FT_Face      face_bold;
 FT_Face      face_italic;
 FT_Face      face_bold_italic;
 FT_Face      face_extra;
-FT_GlyphSlot slot;
-FT_UInt      glyph_index;
+FT_Face      face_symbol;
+FT_Face      face_variable;
+
+FT_Face * fallbacks[] = {&face_variable, &face_symbol, &face_extra, &face_symbol, NULL};
 
 
 void drawChar(FT_Bitmap * bitmap, int x, int y, uint32_t fg, uint32_t bg) {
@@ -196,16 +227,7 @@ void draw_semi_block(int c, int x, int y, uint32_t fg, uint32_t bg) {
 	}
 }
 
-void resize_callback(window_t * window) {
-	window_width  = window->width  - decor_left_width - decor_right_width;
-	window_height = window->height - decor_top_height - decor_bottom_height;
-
-	reinit_graphics_window(ctx, window);
-
-	reinit(1);
-}
-
-void focus_callback(window_t * window) {
+void focus_callback(yutani_window_t * yutani_window) {
 	render_decors();
 	term_redraw_cursor();
 }
@@ -259,11 +281,15 @@ term_write_char(
 			draw_semi_block(val, x, y, _fg, _bg);
 			goto _extra_stuff;
 		}
+
 		int pen_x = x;
 		int pen_y = y + char_offset;
 		int error;
+
 		FT_Face * _font = NULL;
-		
+		FT_GlyphSlot slot;
+		FT_UInt      glyph_index;
+
 		if (flags & ANSI_ALTFONT) {
 			_font = &face_extra;
 		} else if (flags & ANSI_BOLD && flags & ANSI_ITALIC) {
@@ -276,18 +302,25 @@ term_write_char(
 			_font = &face;
 		}
 		glyph_index = FT_Get_Char_Index(*_font, val);
-		if (glyph_index == 0) {
-			glyph_index = FT_Get_Char_Index(face_extra, val);
-			_font = &face_extra;
+
+		if (!glyph_index) {
+			int i = 0;
+			while (!glyph_index && fallbacks[i]) {
+				_font = fallbacks[i];
+				glyph_index = FT_Get_Char_Index(*_font, val);
+				i++;
+			}
 		}
 		error = FT_Load_Glyph(*_font, glyph_index,  FT_LOAD_DEFAULT);
 		if (error) {
 			fprintf(terminal, "Error loading glyph: %d\n", val);
+			fprintf(stderr, "Error loading glyph: %d\n", val);
 		};
 		slot = (*_font)->glyph;
 		if (slot->format == FT_GLYPH_FORMAT_OUTLINE) {
 			error = FT_Render_Glyph((*_font)->glyph, FT_RENDER_MODE_NORMAL);
 			if (error) {
+				fprintf(stderr, "Error rendering glyph: %d\n", val);
 				goto _extra_stuff;
 			}
 		}
@@ -329,10 +362,33 @@ _extra_stuff:
 			term_set_point(x + j, y + (char_height - 1), _fg);
 		}
 	}
-	needs_redraw = 1;
+
+	if (!_no_frame) {
+		l_x = min(l_x, decor_left_width + x);
+		l_y = min(l_y, decor_top_height + y);
+
+		if (flags & ANSI_WIDE) {
+			r_x = max(r_x, decor_left_width + x + char_width * 2);
+			r_y = max(r_y, decor_top_height + y + char_height * 2);
+		} else {
+			r_x = max(r_x, decor_left_width + x + char_width);
+			r_y = max(r_y, decor_top_height + y + char_height);
+		}
+	} else {
+		l_x = min(l_x, x);
+		l_y = min(l_y, y);
+
+		if (flags & ANSI_WIDE) {
+			r_x = max(r_x, x + char_width * 2);
+			r_y = max(r_y, y + char_height * 2);
+		} else {
+			r_x = max(r_x, x + char_width);
+			r_y = max(r_y, y + char_height);
+		}
+	}
 }
 
-static void cell_set(uint16_t x, uint16_t y, uint16_t c, uint32_t fg, uint32_t bg, uint8_t flags) {
+static void cell_set(uint16_t x, uint16_t y, uint32_t c, uint32_t fg, uint32_t bg, uint8_t flags) {
 	if (x >= term_width || y >= term_height) return;
 	term_cell_t * cell = (term_cell_t *)((uintptr_t)term_buffer + (y * term_width + x) * sizeof(term_cell_t));
 	cell->c     = c;
@@ -409,12 +465,12 @@ void term_scroll(int how_much) {
 		/* In graphical modes, we will shift the graphics buffer up as necessary */
 		uintptr_t dst, src;
 		size_t    siz = char_height * (term_height - how_much) * GFX_W(ctx) * GFX_B(ctx);
-		if (!_fullscreen) {
-			/* Windowed mode must take borders into account */
+		if (!_no_frame) {
+			/* Must include decorations */
 			dst = (uintptr_t)ctx->backbuffer + (GFX_W(ctx) * decor_top_height) * GFX_B(ctx);
 			src = (uintptr_t)ctx->backbuffer + (GFX_W(ctx) * (decor_top_height + char_height * how_much)) * GFX_B(ctx);
 		} else {
-			/* While fullscreen mode does not */
+			/* Can skip decorations */
 			dst = (uintptr_t)ctx->backbuffer;
 			src = (uintptr_t)ctx->backbuffer + (GFX_W(ctx) *  char_height * how_much) * GFX_B(ctx);
 		}
@@ -434,11 +490,10 @@ void term_scroll(int how_much) {
 		memset(term_buffer, 0x0, sizeof(term_cell_t) * term_width * how_much);
 		uintptr_t dst, src;
 		size_t    siz = char_height * (term_height - how_much) * GFX_W(ctx) * GFX_B(ctx);
-		if (!_fullscreen) {
+		if (!_no_frame) {
 			src = (uintptr_t)ctx->backbuffer + (GFX_W(ctx) * decor_top_height) * GFX_B(ctx);
 			dst = (uintptr_t)ctx->backbuffer + (GFX_W(ctx) * (decor_top_height + char_height * how_much)) * GFX_B(ctx);
 		} else {
-			/* While fullscreen mode does not */
 			src = (uintptr_t)ctx->backbuffer;
 			dst = (uintptr_t)ctx->backbuffer + (GFX_W(ctx) *  char_height * how_much) * GFX_B(ctx);
 		}
@@ -451,10 +506,8 @@ void term_scroll(int how_much) {
 			}
 		}
 	}
+	yutani_flip(yctx, window);
 }
-
-uint32_t codepoint;
-uint32_t unicode_state = 0;
 
 int is_wide(uint32_t codepoint) {
 	if (codepoint < 256) return 0;
@@ -474,7 +527,6 @@ uint32_t scrollback_offset = 0;
 
 void save_scrollback() {
 	/* Save the current top row for scrollback */
-	return;
 	if (!scrollback_list) {
 		scrollback_list = list_create();
 	}
@@ -493,7 +545,6 @@ void save_scrollback() {
 }
 
 void redraw_scrollback() {
-	return;
 	if (!scrollback_offset) {
 		term_redraw_all();
 		return;
@@ -564,15 +615,18 @@ void redraw_scrollback() {
 			node = node->prev;
 		}
 	}
+	display_flip();
 }
 
 void term_write(char c) {
+	static uint32_t unicode_state = 0;
+	static uint32_t codepoint = 0;
+
 	cell_redraw(csr_x, csr_y);
+
 	if (!decode(&unicode_state, &codepoint, (uint8_t)c)) {
-		if (codepoint > 0xFFFF) {
-			codepoint = '?';
-			c = '?';
-		}
+		uint32_t o = codepoint;
+		codepoint = 0;
 		if (c == '\r') {
 			csr_x = 0;
 			return;
@@ -592,6 +646,11 @@ void term_write(char c) {
 				return;
 			}
 			++csr_y;
+			if (csr_y == term_height) {
+				save_scrollback();
+				term_scroll(1);
+				csr_y = term_height - 1;
+			}
 			draw_cursor();
 		} else if (c == '\007') {
 			/* bell */
@@ -614,7 +673,7 @@ void term_write(char c) {
 			csr_x += (8 - csr_x % 8);
 			draw_cursor();
 		} else {
-			int wide = is_wide(codepoint);
+			int wide = is_wide(o);
 			uint8_t flags = ansi_state->flags;
 			if (wide && csr_x == term_width - 1) {
 				csr_x = 0;
@@ -623,7 +682,7 @@ void term_write(char c) {
 			if (wide) {
 				flags = flags | ANSI_WIDE;
 			}
-			cell_set(csr_x,csr_y, codepoint, current_fg, current_bg, flags);
+			cell_set(csr_x,csr_y, o, current_fg, current_bg, flags);
 			cell_redraw(csr_x,csr_y);
 			csr_x++;
 			if (wide && csr_x != term_width) {
@@ -635,6 +694,7 @@ void term_write(char c) {
 		}
 	} else if (unicode_state == UTF8_REJECT) {
 		unicode_state = 0;
+		codepoint = 0;
 	}
 	draw_cursor();
 }
@@ -675,16 +735,19 @@ void term_redraw_cursor() {
 
 void flip_cursor() {
 	static uint8_t cursor_flipped = 0;
+	if (scrollback_offset != 0) {
+		return; /* Don't flip cursor while drawing scrollback */
+	}
 	if (cursor_flipped) {
 		cell_redraw(csr_x, csr_y);
 	} else {
 		render_cursor();
 	}
+	display_flip();
 	cursor_flipped = 1 - cursor_flipped;
 }
 
-void
-term_set_cell(int x, int y, uint16_t c) {
+void term_set_cell(int x, int y, uint32_t c) {
 	cell_set(x, y, c, current_fg, current_bg, ansi_state->flags);
 	cell_redraw(x, y);
 }
@@ -700,7 +763,7 @@ void term_clear(int i) {
 		csr_x = 0;
 		csr_y = 0;
 		memset((void *)term_buffer, 0x00, term_width * term_height * sizeof(term_cell_t));
-		if (!_fullscreen) {
+		if (!_no_frame) {
 			render_decors();
 		}
 		term_redraw_all();
@@ -728,7 +791,10 @@ void term_clear(int i) {
 char * loadMemFont(char * name, char * ident, size_t * size) {
 	size_t s = 0;
 	int error;
-	char * font = (char *)syscall_shm_obtain(ident, &s);
+	char tmp[100];
+	snprintf(tmp, 100, "sys.%s.fonts.%s", yctx->server_ident, ident);
+
+	char * font = (char *)syscall_shm_obtain(tmp, &s);
 	*size = s;
 	return font;
 }
@@ -745,11 +811,17 @@ void clear_input() {
 uint32_t child_pid = 0;
 
 void handle_input(char c) {
+	spin_lock(&display_lock);
 	write(fd_master, &c, 1);
+	display_flip();
+	spin_unlock(&display_lock);
 }
 
 void handle_input_s(char * c) {
+	spin_lock(&display_lock);
 	write(fd_master, c, strlen(c));
+	display_flip();
+	spin_unlock(&display_lock);
 }
 
 void key_event(int ret, key_event_t * event) {
@@ -795,9 +867,15 @@ void key_event(int ret, key_event_t * event) {
 				handle_input_s("\033[23~");
 				break;
 			case KEY_F12:
-				/* XXX This is for testing only */
-				handle_input_s("テスト");
-				//handle_input_s("\033[24~");
+				/* Toggle decorations */
+				if (!_fullscreen) {
+					spin_lock(&display_lock);
+					_no_frame = !_no_frame;
+					window_width = window->width - decor_width() * (!_no_frame);
+					window_height = window->height - decor_height() * (!_no_frame);
+					reinit(1);
+					spin_unlock(&display_lock);
+				}
 				break;
 			case KEY_ARROW_UP:
 				handle_input_s("\033[A");
@@ -840,7 +918,10 @@ void key_event(int ret, key_event_t * event) {
 }
 
 void * wait_for_exit(void * garbage) {
-	syscall_wait(child_pid);
+	int pid;
+	do {
+		pid = waitpid(-1, NULL, 0);
+	} while (pid == -1 && errno == EINTR);
 	/* Clean up */
 	exit_application = 1;
 	/* Exit */
@@ -858,6 +939,8 @@ void usage(char * argv[]) {
 			" -b --bitmap     \033[3mUse the integrated bitmap font.\033[0m\n"
 			" -h --help       \033[3mShow this help message.\033[0m\n"
 			" -s --scale      \033[3mScale the font in FreeType mode by a given amount.\033[0m\n"
+			" -x --grid       \033[3mMake resizes round to nearest match for character cell size.\033[0m\n"
+			" -n --no-frame   \033[3mDisable decorations.\033[0m\n"
 			"\n"
 			" This terminal emulator provides basic support for VT220 escapes and\n"
 			" XTerm extensions, including 256 color support and font effects.\n",
@@ -914,7 +997,10 @@ void reinit(int send_sig) {
 		FT_Set_Pixel_Sizes(face_italic, font_size, font_size);
 		FT_Set_Pixel_Sizes(face_bold_italic, font_size, font_size);
 		FT_Set_Pixel_Sizes(face_extra, font_size, font_size);
+		FT_Set_Pixel_Sizes(face_symbol, font_size, font_size);
+		FT_Set_Pixel_Sizes(face_variable, font_size, font_size);
 	}
+	int i = 0;
 
 	int old_width  = term_width;
 	int old_height = term_height;
@@ -956,12 +1042,100 @@ void reinit(int send_sig) {
 	}
 }
 
+static void resize_finish(int width, int height) {
+	static int resize_attempts = 0;
+
+	int extra_x = 0;
+	int extra_y = 0;
+
+	if (!_no_frame) {
+		extra_x = decor_width();
+		extra_y = decor_height();
+	}
+
+	int t_window_width  = width  - extra_x;
+	int t_window_height = height - extra_y;
+
+	if (t_window_width < char_width * 20 || t_window_height < char_height * 10) {
+		resize_attempts++;
+		int n_width  = extra_x + max(char_width * 20, t_window_width);
+		int n_height = extra_y + max(char_height * 10, t_window_height);
+		yutani_window_resize_offer(yctx, window, n_width, n_height);
+		return;
+	}
+
+	if (!_free_size && (t_window_width % char_width != 0 || t_window_height % char_height != 0 && resize_attempts < 3)) {
+		resize_attempts++;
+		int n_width  = extra_x + t_window_width  - (t_window_width  % char_width);
+		int n_height = extra_y + t_window_height - (t_window_height % char_height);
+		yutani_window_resize_offer(yctx, window, n_width, n_height);
+		return;
+	}
+
+	resize_attempts = 0;
+
+	yutani_window_resize_accept(yctx, window, width, height);
+	window_width  = window->width  - extra_x;
+	window_height = window->height - extra_y;
+
+	spin_lock(&display_lock);
+	reinit_graphics_yutani(ctx, window);
+	reinit(1);
+	spin_unlock(&display_lock);
+
+	yutani_window_resize_done(yctx, window);
+	yutani_flip(yctx, window);
+}
+
 void * handle_incoming(void * garbage) {
 	while (!exit_application) {
-		w_keyboard_t * kbd = poll_keyboard();
-		if (kbd != NULL) {
-			key_event(kbd->ret, &kbd->event);
-			free(kbd);
+		yutani_msg_t * m = yutani_poll(yctx);
+		if (m) {
+			switch (m->type) {
+				case YUTANI_MSG_KEY_EVENT:
+					{
+						struct yutani_msg_key_event * ke = (void*)m->data;
+						int ret = (ke->event.action == KEY_ACTION_DOWN) && (ke->event.key);
+						key_event(ret, &ke->event);
+					}
+					break;
+				case YUTANI_MSG_WINDOW_FOCUS_CHANGE:
+					{
+						struct yutani_msg_window_focus_change * wf = (void*)m->data;
+						yutani_window_t * win = hashmap_get(yctx->windows, (void*)wf->wid);
+						if (win) {
+							win->focused = wf->focused;
+							render_decors();
+						}
+					}
+					break;
+				case YUTANI_MSG_SESSION_END:
+					{
+						kill(child_pid, SIGKILL);
+						exit_application = 1;
+					}
+					break;
+				case YUTANI_MSG_RESIZE_OFFER:
+					{
+						struct yutani_msg_window_resize * wr = (void*)m->data;
+						resize_finish(wr->width, wr->height);
+					}
+					break;
+				case YUTANI_MSG_WINDOW_MOUSE_EVENT:
+					{
+						struct yutani_msg_window_mouse_event * me = (void*)m->data;
+						if (!_no_frame) {
+							if (decor_handle_event(yctx, m) == DECOR_CLOSE) {
+								kill(child_pid, SIGKILL);
+								exit_application = 1;
+							}
+						}
+					}
+					break;
+				default:
+					break;
+			}
+			free(m);
 		}
 	}
 	pthread_exit(0);
@@ -972,7 +1146,9 @@ void * blink_cursor(void * garbage) {
 		timer_tick++;
 		if (timer_tick == 3) {
 			timer_tick = 0;
+			spin_lock(&display_lock);
 			flip_cursor();
+			spin_unlock(&display_lock);
 		}
 		usleep(90000);
 	}
@@ -990,6 +1166,8 @@ int main(int argc, char ** argv) {
 		{"login",      no_argument,       0, 'l'},
 		{"help",       no_argument,       0, 'h'},
 		{"kernel",     no_argument,       0, 'k'},
+		{"grid",       no_argument,       0, 'x'},
+		{"no-frame",   no_argument,       0, 'n'},
 		{"scale",      required_argument, 0, 's'},
 		{"geometry",   required_argument, 0, 'g'},
 		{0,0,0,0}
@@ -997,7 +1175,7 @@ int main(int argc, char ** argv) {
 
 	/* Read some arguments */
 	int index, c;
-	while ((c = getopt_long(argc, argv, "bhFlks:g:", long_opts, &index)) != -1) {
+	while ((c = getopt_long(argc, argv, "bhxnFlks:g:", long_opts, &index)) != -1) {
 		if (!c) {
 			if (long_opts[index].flag == 0) {
 				c = long_opts[index].val;
@@ -1007,11 +1185,18 @@ int main(int argc, char ** argv) {
 			case 'k':
 				_force_kernel = 1;
 				break;
+			case 'x':
+				_free_size = 0;
+				break;
 			case 'l':
 				_login_shell = 1;
 				break;
+			case 'n':
+				_no_frame = 1;
+				break;
 			case 'F':
 				_fullscreen = 1;
+				_no_frame = 1;
 				break;
 			case 'b':
 				_use_freetype = 0;
@@ -1045,30 +1230,34 @@ int main(int argc, char ** argv) {
 	putenv("TERM=toaru");
 
 	/* Initialize the windowing library */
-	setup_windowing();
+	yctx = yutani_init();
 
 	if (_fullscreen) {
-		window_width  = wins_globals->server_width;
-		window_height = wins_globals->server_height;
-		window = window_create(0,0, window_width, window_height);
-		window_reorder (window, 0); /* Disables movement */
-		window->focused = 1;
-	} else {
-		int x = 40, y = 40;
-		/* Create the window */
-		window = window_create(x,y, window_width + decor_left_width + decor_right_width, window_height + decor_top_height + decor_bottom_height);
-		resize_window_callback = resize_callback;
-		focus_changed_callback = focus_callback;
+		window_width = yctx->display_width;
+		window_height = yctx->display_height;
+	}
 
-		/* Initialize the decoration library */
+	if (_no_frame) {
+		window = yutani_window_create(yctx, window_width, window_height);
+	} else {
+		window = yutani_window_create(yctx, window_width + decor_left_width + decor_right_width, window_height + decor_top_height + decor_bottom_height);
 		init_decorations();
 	}
 
+	if (_fullscreen) {
+		yutani_set_stack(yctx, window, YUTANI_ZORDER_BOTTOM);
+		window->focused = 1;
+	} else {
+		window->focused = 0;
+	}
+
 	/* Initialize the graphics context */
-	ctx = init_graphics_window(window);
+	ctx = init_graphics_yutani(window);
 
 	/* Clear to black */
-	draw_fill(ctx, rgb(0,0,0));
+	draw_fill(ctx, rgba(0,0,0,0));
+
+	yutani_window_move(yctx, window, yctx->display_width / 2 - window->width / 2, yctx->display_height / 2 - window->height / 2);
 
 	if (_use_freetype) {
 		int error;
@@ -1078,19 +1267,27 @@ int main(int argc, char ** argv) {
 		char * font = NULL;
 		size_t s;
 
-		font = loadMemFont("/usr/share/fonts/DejaVuSansMono.ttf", WINS_SERVER_IDENTIFIER ".fonts.monospace", &s);
+		/* XXX Use shmemfont library */
+
+		font = loadMemFont("/usr/share/fonts/DejaVuSansMono.ttf",  "monospace", &s);
 		error = FT_New_Memory_Face(library, font, s, 0, &face); if (error) return 1;
 
-		font = loadMemFont("/usr/share/fonts/DejaVuSansMono-Bold.ttf", WINS_SERVER_IDENTIFIER ".fonts.monospace.bold", &s);
+		font = loadMemFont("/usr/share/fonts/DejaVuSansMono-Bold.ttf",  "monospace.bold", &s);
 		error = FT_New_Memory_Face(library, font, s, 0, &face_bold); if (error) return 1;
 
-		font = loadMemFont("/usr/share/fonts/DejaVuSansMono-Oblique.ttf", WINS_SERVER_IDENTIFIER ".fonts.monospace.italic", &s);
+		font = loadMemFont("/usr/share/fonts/DejaVuSansMono-Oblique.ttf",  "monospace.italic", &s);
 		error = FT_New_Memory_Face(library, font, s, 0, &face_italic); if (error) return 1;
 
-		font = loadMemFont("/usr/share/fonts/DejaVuSansMono-BoldOblique.ttf", WINS_SERVER_IDENTIFIER ".fonts.monospace.bolditalic", &s);
+		font = loadMemFont("/usr/share/fonts/DejaVuSansMono-BoldOblique.ttf",  "monospace.bolditalic", &s);
 		error = FT_New_Memory_Face(library, font, s, 0, &face_bold_italic); if (error) return 1;
 
 		error = FT_New_Face(library, "/usr/share/fonts/VLGothic.ttf", 0, &face_extra);
+
+		error = FT_New_Face(library, "/usr/share/fonts/Symbola.ttf", 0, &face_symbol);
+
+		font = loadMemFont("/usr/share/fonts/DejaVuSans.ttf",  "sans-serif", &s);
+		error = FT_New_Memory_Face(library, font, s, 0, &face_variable); if (error) return 1;
+
 	}
 
 	syscall_openpty(&fd_master, &fd_slave, NULL, NULL, NULL);
@@ -1105,25 +1302,22 @@ int main(int argc, char ** argv) {
 	uint32_t f = fork();
 
 	if (getpid() != pid) {
-		syscall_dup2(fd_slave, 0);
-		syscall_dup2(fd_slave, 1);
-		syscall_dup2(fd_slave, 2);
+		dup2(fd_slave, 0);
+		dup2(fd_slave, 1);
+		dup2(fd_slave, 2);
 
 		if (argv[optind] != NULL) {
 			char * tokens[] = {argv[optind], NULL};
 			int i = execvp(tokens[0], tokens);
-			printf("Failed to execute requested startup application `%s`!\n", argv[optind]);
-			printf("Your system is now unusable, and a restart will not be attempted.\n");
-			syscall_print("core-tests : FATAL : Failed to execute requested startup binary.\n");
+			fprintf(stderr, "Failed to launch requested startup application.\n");
 		} else {
-			/*
-			 * TODO: Check the public-readable passwd file to select which shell to run
-			 */
 			if (_login_shell) {
 				char * tokens[] = {"/bin/login",NULL};
 				int i = execvp(tokens[0], tokens);
 			} else {
-				char * tokens[] = {"/bin/sh",NULL};
+				char * shell = getenv("SHELL");
+				if (!shell) shell = "/bin/sh"; /* fallback */
+				char * tokens[] = {shell,NULL};
 				int i = execvp(tokens[0], tokens);
 			}
 		}
@@ -1152,14 +1346,17 @@ int main(int argc, char ** argv) {
 		unsigned char buf[1024];
 		while (!exit_application) {
 			int r = read(fd_master, buf, 1024);
+			spin_lock(&display_lock);
 			for (uint32_t i = 0; i < r; ++i) {
 				ansi_put(ansi_state, buf[i]);
 			}
+			display_flip();
+			spin_unlock(&display_lock);
 		}
 
 	}
 
-	teardown_windowing();
+	yutani_close(yctx, window);
 
 	return 0;
 }

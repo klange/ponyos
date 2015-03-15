@@ -1,7 +1,13 @@
+/* vim: tabstop=4 shiftwidth=4 noexpandtab
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2014 Kevin Lange
+ */
 #include <system.h>
 #include <hashmap.h>
 #include <module.h>
 #include <logging.h>
+#include <printf.h>
 
 #include <mod/shell.h>
 
@@ -16,7 +22,7 @@ int a_function(void) {
 }
 
 DEFINE_SHELL_FUNCTION(test_mod, "A function installed by a module!") {
-	fs_printf(tty, "Hello world!\n");
+	fprintf(tty, "Hello world!\n");
 	return 0;
 }
 

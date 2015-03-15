@@ -1,9 +1,15 @@
 /* vim: tabstop=4 shiftwidth=4 noexpandtab
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2012-2014 Kevin Lange
+ *
  * Buffered Pipe
+ *
  */
 
 #include <system.h>
 #include <fs.h>
+#include <printf.h>
 #include <pipe.h>
 #include <logging.h>
 
@@ -42,6 +48,11 @@ static inline size_t pipe_available(pipe_device_t * pipe) {
 	}
 }
 
+int pipe_unsize(fs_node_t * node) {
+	pipe_device_t * pipe = (pipe_device_t *)node->device;
+	return pipe_available(pipe);
+}
+
 static inline void pipe_increment_read(pipe_device_t * pipe) {
 	pipe->read_ptr++;
 	if (pipe->read_ptr == pipe->size) {
@@ -68,13 +79,13 @@ uint32_t read_pipe(fs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buf
 
 #if DEBUG_PIPES
 	if (pipe->size > 300) { /* Ignore small pipes (ie, keyboard) */
-		kprintf("[debug] Call to read from pipe 0x%x\n", node->device);
-		kprintf("        Unread bytes:    %d\n", pipe_unread(pipe));
-		kprintf("        Total size:      %d\n", pipe->size);
-		kprintf("        Request size:    %d\n", size);
-		kprintf("        Write pointer:   %d\n", pipe->write_ptr);
-		kprintf("        Read  pointer:   %d\n", pipe->read_ptr);
-		kprintf("        Buffer address:  0x%x\n", pipe->buffer);
+		debug_print(INFO, "[debug] Call to read from pipe 0x%x", node->device);
+		debug_print(INFO, "        Unread bytes:    %d", pipe_unread(pipe));
+		debug_print(INFO, "        Total size:      %d", pipe->size);
+		debug_print(INFO, "        Request size:    %d", size);
+		debug_print(INFO, "        Write pointer:   %d", pipe->write_ptr);
+		debug_print(INFO, "        Read  pointer:   %d", pipe->read_ptr);
+		debug_print(INFO, "        Buffer address:  0x%x", pipe->buffer);
 	}
 #endif
 
@@ -93,10 +104,10 @@ uint32_t read_pipe(fs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buf
 			collected++;
 		}
 		spin_unlock(&pipe->lock);
-		wakeup_queue(pipe->wait_queue);
+		wakeup_queue(pipe->wait_queue_writers);
 		/* Deschedule and switch */
 		if (collected == 0) {
-			sleep_on(pipe->wait_queue);
+			sleep_on(pipe->wait_queue_readers);
 		}
 	}
 
@@ -111,14 +122,14 @@ uint32_t write_pipe(fs_node_t *node, uint32_t offset, uint32_t size, uint8_t *bu
 
 #if DEBUG_PIPES
 	if (pipe->size > 300) { /* Ignore small pipes (ie, keyboard) */
-		kprintf("[debug] Call to write to pipe 0x%x\n", node->device);
-		kprintf("        Available space: %d\n", pipe_available(pipe));
-		kprintf("        Total size:      %d\n", pipe->size);
-		kprintf("        Request size:    %d\n", size);
-		kprintf("        Write pointer:   %d\n", pipe->write_ptr);
-		kprintf("        Read  pointer:   %d\n", pipe->read_ptr);
-		kprintf("        Buffer address:  0x%x\n", pipe->buffer);
-		kprintf(" Write: %s\n", buffer);
+		debug_print(INFO, "[debug] Call to write to pipe 0x%x", node->device);
+		debug_print(INFO, "        Available space: %d", pipe_available(pipe));
+		debug_print(INFO, "        Total size:      %d", pipe->size);
+		debug_print(INFO, "        Request size:    %d", size);
+		debug_print(INFO, "        Write pointer:   %d", pipe->write_ptr);
+		debug_print(INFO, "        Read  pointer:   %d", pipe->read_ptr);
+		debug_print(INFO, "        Buffer address:  0x%x", pipe->buffer);
+		debug_print(INFO, " Write: %s", buffer);
 	}
 #endif
 
@@ -154,9 +165,9 @@ uint32_t write_pipe(fs_node_t *node, uint32_t offset, uint32_t size, uint8_t *bu
 #endif
 
 		spin_unlock(&pipe->lock);
-		wakeup_queue(pipe->wait_queue);
+		wakeup_queue(pipe->wait_queue_readers);
 		if (written < size) {
-			sleep_on(pipe->wait_queue);
+			sleep_on(pipe->wait_queue_writers);
 		}
 	}
 
@@ -203,6 +214,7 @@ void close_pipe(fs_node_t * node) {
 fs_node_t * make_pipe(size_t size) {
 	fs_node_t * fnode = malloc(sizeof(fs_node_t));
 	pipe_device_t * pipe = malloc(sizeof(pipe_device_t));
+	memset(fnode, 0, sizeof(fs_node_t));
 
 	fnode->device = 0;
 	fnode->name[0] = '\0';
@@ -233,7 +245,8 @@ fs_node_t * make_pipe(size_t size) {
 	pipe->lock      = 0;
 	pipe->dead      = 0;
 
-	pipe->wait_queue = list_create();
+	pipe->wait_queue_writers = list_create();
+	pipe->wait_queue_readers = list_create();
 
 	return fnode;
 }

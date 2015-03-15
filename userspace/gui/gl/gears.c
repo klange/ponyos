@@ -23,28 +23,26 @@
 #include <math.h>
 #include <syscall.h>
 
+#include <sys/time.h>
+
 #include <GL/gl.h>
 #include <GL/osmesa.h>
 
-#include "lib/window.h"
+#include "lib/yutani.h"
 #include "lib/graphics.h"
-
-struct timeval {
-	unsigned int tv_sec;
-	unsigned int tv_usec;
-};
+#include "lib/pthread.h"
 
 static unsigned int frames = 0;
 static unsigned int start_time = 0;
 
 void fps() {
 	struct timeval now;
-	syscall_gettimeofday(&now, NULL); //time(NULL);
+	gettimeofday(&now, NULL); //time(NULL);
 	frames++;
 	if (!start_time) {
 		start_time = now.tv_sec;
 	} else if (now.tv_sec - start_time >= 5) {
-		syscall_gettimeofday(&now, NULL); //time(NULL);
+		gettimeofday(&now, NULL); //time(NULL);
 		GLfloat seconds = now.tv_sec - start_time;
 		GLfloat fps = frames / seconds;
 		printf("%d frames in %3.1f seconds = %6.3f FPS\n", frames, seconds, fps);
@@ -259,21 +257,27 @@ int resize(gfx_context_t * ctx, OSMesaContext gl_ctx) {
 }
 
 int main (int argc, char ** argv) {
+	yutani_t * yctx;
+	yutani_window_t * wina;
+	gfx_context_t * ctx;
+	int should_exit = 0;
+	int blur = 0;
+	int stopped = 0;
+
 	int left = 30;
 	int top  = 30;
 
 	int width  = 500;
 	int height = 500;
-	int quit = 0;
 
-
-	setup_windowing();
-
-	/* Do something with a window */
-	window_t * wina = window_create(left, top, width, height);
-	gfx_context_t * ctx = init_graphics_window_double_buffer(wina);
+	yctx = yutani_init();
+	wina = yutani_window_create(yctx, width, height);
+	yutani_window_move(yctx, wina, left, top);
+	ctx = init_graphics_yutani_double_buffer(wina);
 	draw_fill(ctx, rgb(0,0,0));
-	win_sane_events();
+	yutani_window_update_shape(yctx, wina, YUTANI_SHAPE_THRESHOLD_HALF);
+
+	yutani_window_advertise_icon(yctx, wina, "Mesa Gears", "gears");
 
 	OSMesaContext gl_ctx = OSMesaCreateContext(OSMESA_BGRA, NULL);
 	if (resize(ctx, gl_ctx)) {
@@ -283,63 +287,90 @@ int main (int argc, char ** argv) {
 
 	init();
 
-	while (!quit) {
-		wins_packet_t * event = get_window_events_async();
-		if (event) {
-			switch (event->command_type & WE_GROUP_MASK) {
-				case WE_WINDOW_EVT: {
-					w_window_t * evt = (w_window_t *)((uintptr_t)event + sizeof(wins_packet_t));
-					window_t * window = NULL;
-					switch (event->command_type) {
-						case WE_RESIZED:
-							window = wins_get_window(evt->wid);
-							if (window) {
-								/* Accept resize request */
-								resize_window_buffer_client(window, evt->left, evt->top, evt->width, evt->height);
-								/* Reinitialize core graphics library */
-								reinit_graphics_window(ctx, wina);
-								/* Fix up the GL context as well */
-								resize(ctx, gl_ctx);
+	while (!should_exit) {
+		yutani_msg_t * m = yutani_poll_async(yctx);
+		if (m) {
+			switch (m->type) {
+				case YUTANI_MSG_KEY_EVENT:
+					{
+						struct yutani_msg_key_event * ke = (void*)m->data;
+						if (ke->event.action == KEY_ACTION_DOWN) {
+							switch (ke->event.keycode) {
+								case 'q':
+									should_exit = 1;
+									free(m);
+									goto finish;
+								case 'b':
+									blur = (1-blur);
+									break;
+								case 's':
+									stopped = (1-stopped);
+									break;
+								case KEY_ARROW_LEFT:
+									view_roty += 5.0;
+									break;
+								case KEY_ARROW_RIGHT:
+									view_roty -= 5.0;
+									break;
+								case KEY_ARROW_UP:
+									view_rotx += 5.0;
+									break;
+								case KEY_ARROW_DOWN:
+									view_rotx -= 5.0;
+									break;
+								default:
+									break;
 							}
-							break;
+						}
 					}
 					break;
-				}
-				case WE_KEY_EVT: {
-					w_keyboard_t * kbd = (w_keyboard_t *)((uintptr_t)event + sizeof(wins_packet_t));
-					switch (kbd->event.keycode) {
-						case 'q':
-							free(event);
-							goto finish;
-						case KEY_ARROW_LEFT:
-							view_roty += 5.0;
-							break;
-						case KEY_ARROW_RIGHT:
-							view_roty -= 5.0;
-							break;
-						case KEY_ARROW_UP:
-							view_rotx += 5.0;
-							break;
-						case KEY_ARROW_DOWN:
-							view_rotx -= 5.0;
-							break;
+				case YUTANI_MSG_WINDOW_MOUSE_EVENT:
+					{
+						struct yutani_msg_window_mouse_event * me = (void*)m->data;
+						if (me->command == YUTANI_MOUSE_EVENT_DOWN && me->buttons & YUTANI_MOUSE_BUTTON_LEFT) {
+							yutani_window_drag_start(yctx, wina);
+						}
 					}
 					break;
-				}
+				case YUTANI_MSG_SESSION_END:
+					should_exit = 1;
+					break;
+				case YUTANI_MSG_RESIZE_OFFER:
+					{
+						struct yutani_msg_window_resize * wr = (void*)m->data;
+						yutani_window_resize_accept(yctx, wina, wr->width, wr->height);
+						reinit_graphics_yutani(ctx, wina);
+						resize(ctx, gl_ctx);
+						draw();
+						yutani_window_resize_done(yctx, wina);
+						flip(ctx);
+						yutani_flip(yctx, wina);
+						yutani_window_update_shape(yctx, wina, 1);
+						/* Reset statistics */
+						frames = 0;
+						start_time = 0;
+					}
+				default:
+					break;
 			}
-			free(event);
+			free(m);
 		}
-
 		fps();
-		angle += 0.2;
+		if (!stopped) {
+			angle += 0.2;
+		}
 		draw();
+		if (blur) {
+			blur_context_box(ctx, 20);
+		}
 		flip(ctx);
+		yutani_flip(yctx, wina);
 		syscall_yield();
 	}
 
 finish:
 	OSMesaDestroyContext(gl_ctx);
-	teardown_windowing();
+	yutani_close(yctx, wina);
 
 	return 0;
 }

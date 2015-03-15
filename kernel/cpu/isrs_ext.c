@@ -1,3 +1,8 @@
+/* vim: tabstop=4 shiftwidth=4 noexpandtab
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2013-2014 Kevin Lange
+ */
 #include <system.h>
 #include <logging.h>
 
@@ -122,7 +127,7 @@ static const char *exception_messages[32] = {
 };
 
 void fault_error(struct regs *r) {
-	kprintf("Unhandled exception: [%d] %s\n", r->int_no, exception_messages[r->int_no]);
+	debug_print(CRITICAL, "Unhandled exception: [%d] %s", r->int_no, exception_messages[r->int_no]);
 	HALT_AND_CATCH_FIRE("Process caused an unhandled exception", r);
 	STOP;
 }

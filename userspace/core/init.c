@@ -1,3 +1,7 @@
+/* This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2013-2014 Kevin Lange
+ */
 /* vim: tabstop=4 shiftwidth=4 noexpandtab
  *
  * init
@@ -10,9 +14,23 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <fcntl.h>
+#include <errno.h>
 #include <syscall.h>
+#include <sys/wait.h>
 
 #define DEFAULT_HOSTNAME "fluttershy"
+
+void set_console() {
+	int _stdin  = open("/dev/null", O_RDONLY);
+	int _stdout = open("/dev/ttyS0", O_WRONLY);
+	int _stderr = open("/dev/ttyS0", O_WRONLY);
+
+	if (_stdout < 0) {
+		_stdout = open("/dev/null", O_WRONLY);
+		_stderr = open("/dev/null", O_WRONLY);
+	}
+}
 
 /* Set the hostname to whatever is in /etc/hostname */
 void set_hostname() {
@@ -38,11 +56,16 @@ int start_options(char * args[]) {
 		int i = execvp(args[0], args);
 		exit(0);
 	} else {
-		return syscall_wait(pid);
+		int pid = 0;
+		do {
+			pid = wait(NULL);
+		} while ((pid > 0) || (pid == -1 && errno == EINTR));
 	}
 }
 
 int main(int argc, char * argv[]) {
+	/* stdin/out/err */
+	set_console();
 	/* Hostname */
 	set_hostname();
 	if (argc > 1) {
@@ -51,9 +74,9 @@ int main(int argc, char * argv[]) {
 			args = argv[2];
 		}
 		if (!strcmp(argv[1],"--single")) {
-			return start_options((char *[]){"/bin/compositor","/bin/terminal","-Fl",args,NULL});
+			return start_options((char *[]){"/bin/compositor","--","/bin/terminal","-Fl",args,NULL});
 		} else if (!strcmp(argv[1], "--vga")) {
-			return start_options((char *[]){"/bin/vga-warning",NULL});
+			return start_options((char *[]){"/bin/terminal-vga","-l",NULL});
 		}
 	}
 	return start_options((char *[]){"/bin/compositor",NULL});

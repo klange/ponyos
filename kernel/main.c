@@ -3,7 +3,9 @@
  * The ToAruOS kernel is released under the terms of the
  * University of Illinois / NCSA License.
  *
- * Copyright (c) 2011-2013 Kevin Lange.  All rights reserved.
+ * Copyright (C) 2011-2014 Kevin Lange.  All rights reserved.
+ * Copyright (C) 2012 Markus Schober
+ * Copyright (C) 2014 Lioncash
  *
  *                           Dedicated to the memory of
  *                                Dennis Ritchie
@@ -51,6 +53,22 @@ uintptr_t initial_esp = 0;
 
 fs_node_t * ramdisk_mount(uintptr_t, size_t);
 
+#ifdef EARLY_BOOT_LOG
+#define EARLY_LOG_DEVICE 0x3F8
+static uint32_t _early_log_write(fs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+	for (unsigned int i = 0; i < size; ++i) {
+		outportb(EARLY_LOG_DEVICE, buffer[i]);
+	}
+	return size;
+}
+fs_node_t _early_log = { .write = &_early_log_write };
+#define ENABLE_EARLY_BOOT_LOG(level) do { debug_file = &_early_log; debug_level = (level); } while (0)
+#define DISABLE_EARLY_BOOT_LOG() do { debug_file = NULL; debug_level = NOTICE; } while (0)
+#else
+#define ENABLE_EARLY_BOOT_LOG(level)
+#define DISABLE_EARLY_BOOT_LOG()
+#endif
+
 /*
  * multiboot i386 (pc) kernel entry point
  */
@@ -60,40 +78,64 @@ int kmain(struct multiboot *mboot, uint32_t mboot_mag, uintptr_t esp) {
 
 	uint32_t mboot_mods_count = 0;
 	mboot_mod_t * mboot_mods = NULL;
+	mboot_ptr = mboot;
 
-	if (mboot_mag == MULTIBOOT_EAX_MAGIC) {
-		/* Multiboot (GRUB, native QEMU, PXE) */
-		debug_print(NOTICE, "Relocating Multiboot structures...");
+	ENABLE_EARLY_BOOT_LOG(0);
 
-		mboot_ptr = mboot;
+	assert(mboot_mag == MULTIBOOT_EAX_MAGIC && "Didn't boot with multiboot, not sure how we got here.");
+	debug_print(NOTICE, "Processing Multiboot information.");
 
-		char cmdline_[1024];
+	/* Initialize core modules */
+	gdt_install();      /* Global descriptor table */
+	idt_install();      /* IDT */
+	isrs_install();     /* Interrupt service requests */
+	irq_install();      /* Hardware interrupt requests */
 
-		if (mboot_ptr->flags & (1 << 3)) {
-			debug_print(NOTICE, "There %s %d module%s starting at 0x%x.", mboot_ptr->mods_count == 1 ? "is" : "are", mboot_ptr->mods_count, mboot_ptr->mods_count == 1 ? "" : "s", mboot_ptr->mods_addr);
-			debug_print(NOTICE, "Current kernel heap start point would be 0x%x.", &end);
-			if (mboot_ptr->mods_count > 0) {
-				uintptr_t last_mod = (uintptr_t)&end;
-				uint32_t i;
-				mboot_mods = (mboot_mod_t *)mboot_ptr->mods_addr;
-				mboot_mods_count = mboot_ptr->mods_count;
-				for (i = 0; i < mboot_ptr->mods_count; ++i ) {
-					mboot_mod_t * mod = &mboot_mods[i];
-					uint32_t module_start = mod->mod_start;
-					uint32_t module_end   = mod->mod_end;
-					if ((uintptr_t)mod + sizeof(mboot_mod_t) > last_mod) {
-						/* Just in case some silly person put this *behind* the modules... */
-						last_mod = (uintptr_t)mod + sizeof(mboot_mod_t);
-					}
-					debug_print(NOTICE, "Module %d is at 0x%x:0x%x", i, module_start, module_end);
-					if (last_mod < module_end) {
-						last_mod = module_end;
-					}
+	if (mboot_ptr->flags & (1 << 3)) {
+		debug_print(NOTICE, "There %s %d module%s starting at 0x%x.", mboot_ptr->mods_count == 1 ? "is" : "are", mboot_ptr->mods_count, mboot_ptr->mods_count == 1 ? "" : "s", mboot_ptr->mods_addr);
+		debug_print(NOTICE, "Current kernel heap start point would be 0x%x.", &end);
+		if (mboot_ptr->mods_count > 0) {
+			uintptr_t last_mod = (uintptr_t)&end;
+			uint32_t i;
+			mboot_mods = (mboot_mod_t *)mboot_ptr->mods_addr;
+			mboot_mods_count = mboot_ptr->mods_count;
+			for (i = 0; i < mboot_ptr->mods_count; ++i ) {
+				mboot_mod_t * mod = &mboot_mods[i];
+				uint32_t module_start = mod->mod_start;
+				uint32_t module_end   = mod->mod_end;
+				if ((uintptr_t)mod + sizeof(mboot_mod_t) > last_mod) {
+					/* Just in case some silly person put this *behind* the modules... */
+					last_mod = (uintptr_t)mod + sizeof(mboot_mod_t);
 				}
-				debug_print(NOTICE, "Moving kernel heap start to 0x%x\n", last_mod);
-				kmalloc_startat(last_mod);
+				debug_print(NOTICE, "Module %d is at 0x%x:0x%x", i, module_start, module_end);
+				if (last_mod < module_end) {
+					last_mod = module_end;
+				}
 			}
+			debug_print(NOTICE, "Moving kernel heap start to 0x%x", last_mod);
+			kmalloc_startat(last_mod);
 		}
+	}
+
+	paging_install(mboot_ptr->mem_upper + mboot_ptr->mem_lower);
+	if (mboot_ptr->flags & (1 << 6)) {
+		debug_print(NOTICE, "Parsing memory map.");
+		mboot_memmap_t * mmap = (void *)mboot_ptr->mmap_addr;
+		while ((uintptr_t)mmap < mboot_ptr->mmap_addr + mboot_ptr->mmap_length) {
+			if (mmap->type == 2) {
+				for (unsigned long long int i = 0; i < mmap->length; i += 0x1000) {
+					if (mmap->base_addr + i > 0xFFFFFFFF) break; /* xxx */
+					debug_print(INFO, "Marking 0x%x", (uint32_t)(mmap->base_addr + i));
+					paging_mark_system((mmap->base_addr + i) & 0xFFFFF000);
+				}
+			}
+			mmap = (mboot_memmap_t *) ((uintptr_t)mmap + mmap->size + sizeof(uintptr_t));
+		}
+	}
+	paging_finalize();
+
+	{
+		char cmdline_[1024];
 
 		size_t len = strlen((char *)mboot_ptr->cmdline);
 		memmove(cmdline_, (char *)mboot_ptr->cmdline, len + 1);
@@ -103,14 +145,7 @@ int kmain(struct multiboot *mboot, uint32_t mboot_mag, uintptr_t esp) {
 		memcpy(cmdline, cmdline_, len + 1);
 	}
 
-	/* Initialize core modules */
-	gdt_install();      /* Global descriptor table */
-	idt_install();      /* IDT */
-	isrs_install();     /* Interrupt service requests */
-	irq_install();      /* Hardware interrupt requests */
-
 	/* Memory management */
-	paging_install(mboot_ptr->mem_upper + mboot_ptr->mem_lower);
 	heap_install();     /* Kernel heap */
 
 	if (cmdline) {
@@ -118,14 +153,14 @@ int kmain(struct multiboot *mboot, uint32_t mboot_mag, uintptr_t esp) {
 	}
 
 	vfs_install();
-
-	/* Hardware drivers */
-	timer_install();    /* PIC driver */
 	tasking_install();  /* Multi-tasking */
+	timer_install();    /* PIC driver */
 	fpu_install();      /* FPU/SSE magic */
 	syscalls_install(); /* Install the system calls */
 	shm_install();      /* Install shared memory */
 	modules_install();  /* Modules! */
+
+	DISABLE_EARLY_BOOT_LOG();
 
 	/* Load modules from bootloader */
 	debug_print(NOTICE, "%d modules to load", mboot_mods_count);
@@ -133,21 +168,27 @@ int kmain(struct multiboot *mboot, uint32_t mboot_mag, uintptr_t esp) {
 		mboot_mod_t * mod = &mboot_mods[i];
 		uint32_t module_start = mod->mod_start;
 		uint32_t module_end = mod->mod_end;
-		size_t   module_size = module_end - module_end;
+		size_t   module_size = module_end - module_start;
 
 		if (!module_quickcheck((void *)module_start)) {
 			debug_print(NOTICE, "Loading ramdisk: 0x%x:0x%x", module_start, module_end);
-			ramdisk_mount(module_start, module_end-module_start);
+			ramdisk_mount(module_start, module_size);
 		} else {
 
 			debug_print(NOTICE, "Loading a module: 0x%x:0x%x", module_start, module_end);
 			module_data_t * mod_info = (module_data_t *)module_load_direct((void *)(module_start), module_size);
-			debug_print(NOTICE, "Loaded: %s", mod_info->mod_info->name);
+			if (mod_info) {
+				debug_print(NOTICE, "Loaded: %s", mod_info->mod_info->name);
+			}
 		}
 	}
 
 	/* Map /dev to a device mapper */
 	map_vfs_directory("/dev");
+
+	if (args_present("root")) {
+		vfs_mount_type("ext2", args_value("root"), "/");
+	}
 
 	if (args_present("start")) {
 		char * c = args_value("start");
@@ -157,6 +198,12 @@ int kmain(struct multiboot *mboot, uint32_t mboot_mag, uintptr_t esp) {
 			debug_print(NOTICE, "Got start argument: %s", c);
 			boot_arg = strdup(c);
 		}
+	}
+
+	if (!fs_root) {
+		debug_print(CRITICAL, "No root filesystem is mounted. Skipping init.");
+		map_vfs_directory("/");
+		switch_task(0);
 	}
 
 	/* Prepare to run /bin/init */

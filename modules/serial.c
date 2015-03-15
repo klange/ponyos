@@ -1,4 +1,7 @@
 /* vim: tabstop=4 shiftwidth=4 noexpandtab
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2014 Kevin Lange
  *
  * Serial communication device
  *
@@ -186,7 +189,7 @@ static int serial_mount_devices(void) {
 
 	char * c;
 	if ((c = args_value("logtoserial"))) {
-		kprint_to_file = ttyS0;
+		debug_file = ttyS0;
 		debug_level = atoi(c);
 		debug_print(NOTICE, "Serial logging enabled at level %d.", debug_level);
 	}

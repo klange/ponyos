@@ -1,4 +1,7 @@
 /* vim: tabstop=4 shiftwidth=4 noexpandtab
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2011-2014 Kevin Lange
  *
  * Interrupt Requests
  *
@@ -84,7 +87,7 @@ void irq_install(void) {
 }
 
 void irq_ack(size_t irq_no) {
-	if (irq_no >= 12) {
+	if (irq_no >= 8) {
 		outportb(0xA0, 0x20);
 	}
 	outportb(0x20, 0x20);

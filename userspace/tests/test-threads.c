@@ -1,3 +1,7 @@
+/* This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2013-2014 Kevin Lange
+ */
 /*
  * threadtest
  *
@@ -10,7 +14,9 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/wait.h>
 #include "lib/pthread.h"
+#include "lib/spinlock.h"
 
 #define NUM_THREADS 5
 #define VALUE      0x1000000
@@ -19,17 +25,7 @@
 volatile uint32_t result = 0;
 int8_t use_locks = 0;
 
-volatile uint8_t the_lock = 0;
-
-void spin_lock(uint8_t volatile * lock) {
-	while(__sync_lock_test_and_set(lock, 0x01)) {
-		;; /* oh god */
-	}
-}
-
-void spin_unlock(uint8_t volatile * lock) {
-	__sync_lock_release(lock);
-}
+volatile int the_lock = 0;
 
 void *print_pid(void * garbage) {
 	int i;
@@ -69,7 +65,7 @@ int main(int argc, char * argv[]) {
 	}
 
 	for (int i = 0; i < NUM_THREADS; ++i) {
-		syscall_wait(thread[i].id);
+		waitpid(thread[i].id, NULL, 0);
 	}
 
 	printf("Done. Result of %scomputation was %d %s!!\n",

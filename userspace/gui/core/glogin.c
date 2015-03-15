@@ -1,3 +1,7 @@
+/* This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2013-2014 Kevin Lange
+ */
 /*
  * glogin
  *
@@ -10,12 +14,17 @@
 #include <string.h>
 #include <time.h>
 
-#include <sys/utsname.h>
+#include <cairo.h>
 
-#include "lib/sha2.h"
-#include "lib/window.h"
+#include <sys/utsname.h>
+#include <sys/wait.h>
+#include <sys/time.h>
+
 #include "lib/graphics.h"
 #include "lib/shmemfonts.h"
+#include "lib/kbd.h"
+#include "lib/yutani.h"
+#include "lib/toaru_auth.h"
 
 sprite_t * sprites[128];
 sprite_t alpha_tmp;
@@ -27,49 +36,7 @@ uint16_t win_height;
 
 int uid = 0;
 
-/* Timing type */
-struct timeval {
-	unsigned int tv_sec;
-	unsigned int tv_usec;
-};
-
-#define LOGO_FINAL_OFFSET 150
-
-int checkUserPass(char * user, char * pass) {
-
-	/* Generate SHA512 */
-	char hash[SHA512_DIGEST_STRING_LENGTH];
-	SHA512_Data(pass, strlen(pass), hash);
-
-	/* Open up /etc/master.passwd */
-
-	FILE * passwd = fopen("/etc/master.passwd", "r");
-	char line[2048];
-
-	while (fgets(line, 2048, passwd) != NULL) {
-
-		line[strlen(line)-1] = '\0';
-
-		char *p, *tokens[4], *last;
-		int i = 0;
-		for ((p = strtok_r(line, ":", &last)); p;
-				(p = strtok_r(NULL, ":", &last)), i++) {
-			if (i < 511) tokens[i] = p;
-		}
-		tokens[i] = NULL;
-		
-		if (strcmp(tokens[0],user) != 0) {
-			continue;
-		}
-		if (!strcmp(tokens[1],hash)) {
-			fclose(passwd);
-			return atoi(tokens[2]);
-		}
-		}
-	fclose(passwd);
-	return -1;
-
-}
+#define LOGO_FINAL_OFFSET 100
 
 int center_x(int x) {
 	return (win_width - x) / 2;
@@ -143,31 +110,85 @@ void draw_box_border(gfx_context_t * ctx, int32_t x, int32_t y, int32_t w, int32
 	draw_line(ctx, _max_x, _max_x, _min_y, _max_y, color);
 }
 
-
 int main (int argc, char ** argv) {
 	init_sprite_png(0, "/usr/share/logo_login.png");
+	init_sprite_png(1, "/usr/share/wallpaper.png");
 	init_shmemfonts();
 
+	fprintf(stderr, "glogin here, hello world.\n");
+
+	yutani_t * y = yutani_init();
+
+	if (!y) {
+		fprintf(stderr, "[demo-client] Connection to server failed.\n");
+		return 1;
+	}
+
+	/* Generate surface for background */
+	sprite_t * bg_sprite;
+	cairo_surface_t * bg_surf;
+
+	int width  = y->display_width;
+	int height = y->display_height;
+
+	win_width = width;
+	win_height = height;
+
+	/* Do something with a window */
+	yutani_window_t * wina = yutani_window_create(y, width, height);
+	assert(wina);
+	yutani_set_stack(y, wina, 0);
+	ctx = init_graphics_yutani_double_buffer(wina);
+	draw_fill(ctx, rgba(0,0,0,0));
+	yutani_flip(y, wina);
+
+	{
+		float x = (float)width  / (float)sprites[1]->width;
+		float y = (float)height / (float)sprites[1]->height;
+
+		int nh = (int)(x * (float)sprites[1]->height);
+		int nw = (int)(y * (float)sprites[1]->width);;
+
+		bg_sprite = create_sprite(width, height, ALPHA_OPAQUE);
+		gfx_context_t * bg = init_graphics_sprite(bg_sprite);
+
+		if (nw > width) {
+			draw_sprite_scaled(bg, sprites[1], (width - nw) / 2, 0, nw, height);
+		} else {
+			draw_sprite_scaled(bg, sprites[1], 0, (height - nh) / 2, width, nh);
+		}
+
+		/* Three box blurs = good enough approximation of a guassian, but faster*/
+		blur_context_box(bg, 20);
+		blur_context_box(bg, 20);
+		blur_context_box(bg, 20);
+
+		free(bg);
+	}
+
+	bg_surf = cairo_image_surface_create_for_data((void*)bg_sprite->bitmap, CAIRO_FORMAT_ARGB32, bg_sprite->width, bg_sprite->height, cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32, bg_sprite->width));
+
+	cairo_surface_t * cs = cairo_image_surface_create_for_data((void*)ctx->backbuffer, CAIRO_FORMAT_ARGB32, ctx->width, ctx->height, cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32, ctx->width));
+	cairo_t * cr = cairo_create(cs);
+
 	while (1) {
-		syscall_print("Setup...\n");
-		setup_windowing();
 
-		int width  = wins_globals->server_width;
-		int height = wins_globals->server_height;
+		yutani_set_stack(y, wina, 0);
 
-		win_width = width;
-		win_height = height;
+		draw_fill(ctx, rgb(0,0,0));
+		draw_sprite(ctx, bg_sprite, center_x(width), center_y(height));
+		flip(ctx);
+		yutani_flip(y, wina);
 
-		/* Do something with a window */
-		window_t * wina = window_create(0,0, width, height);
-		assert(wina);
-		window_reorder (wina, 0); /* Disables movement */
-		ctx = init_graphics_window_double_buffer(wina);
+		char * foo = malloc(sizeof(uint32_t) * width * height);
+		memcpy(foo, ctx->backbuffer, sizeof(uint32_t) * width * height);
 
-		for (int i = 0; i < LOGO_FINAL_OFFSET; ++i) {
-			draw_fill(ctx, rgb(39,55,113));
+		for (int i = 0; i < LOGO_FINAL_OFFSET; i += 2) {
+			memcpy(ctx->backbuffer, foo, sizeof(uint32_t) * width * height);
 			draw_sprite(ctx, sprites[0], center_x(sprites[0]->width), center_y(sprites[0]->height) - i);
 			flip(ctx);
+			yutani_flip_region(y, wina, center_x(sprites[0]->width), center_y(sprites[0]->height) - i, sprites[0]->width, sprites[0]->height + 5);
+			usleep(10000);
 		}
 
 		size_t buf_size = wina->width * wina->height * sizeof(uint32_t);
@@ -194,7 +215,7 @@ int main (int argc, char ** argv) {
 
 			struct tm * timeinfo;
 			struct timeval now;
-			syscall_gettimeofday(&now, NULL); //time(NULL);
+			gettimeofday(&now, NULL); //time(NULL);
 			timeinfo = localtime((time_t *)&now.tv_sec);
 
 			char _date[256];
@@ -251,12 +272,11 @@ int main (int argc, char ** argv) {
 					strcat(password_circles, "●");
 				}
 
-				/* Redraw the background */
-				draw_fill(ctx, rgb(39,55,113));
+				memcpy(ctx->backbuffer, foo, sizeof(uint32_t) * width * height);
 				draw_sprite(ctx, sprites[0], center_x(sprites[0]->width), center_y(sprites[0]->height) - LOGO_FINAL_OFFSET);
 
-				draw_string(ctx, hostname_label_left, height - 12, white, hostname);
-				draw_string(ctx, kernel_v_label_left, height - 12, white, kernel_v);
+				draw_string_shadow(ctx, hostname_label_left, height - 12, white, hostname, rgb(0,0,0), 2, 1, 1, 3.0);
+				draw_string_shadow(ctx, kernel_v_label_left, height - 12, white, kernel_v, rgb(0,0,0), 2, 1, 1, 3.0);
 
 				/* Draw backdrops */
 				draw_box(ctx, box_x, box_y, BOX_WIDTH, BOX_HEIGHT, rgb(180,124,205));
@@ -284,43 +304,49 @@ int main (int argc, char ** argv) {
 				}
 
 				flip(ctx);
+				yutani_flip(y, wina);
 
-				w_keyboard_t * kbd = NULL;
+				struct yutani_msg_key_event kbd;
+				int tmp = 0;
 				do {
-					kbd = poll_keyboard();
-				} while (!kbd);
+					yutani_msg_t * msg = yutani_poll(y);
+					if (msg->type == YUTANI_MSG_KEY_EVENT) {
+						struct yutani_msg_key_event * ke = (void*)msg->data;
+						if (ke->event.action == KEY_ACTION_DOWN) {
+							memcpy(&kbd, ke, sizeof(struct yutani_msg_key_event));
+							tmp = 1;
+						}
+					}
+					free(msg);
+				} while (!tmp);
 
-				if (kbd->key == '\n') {
+				if (kbd.event.keycode == '\n') {
 					if (focus == USERNAME_BOX) {
-						free(kbd);
 						focus = PASSWORD_BOX;
 						continue;
 					} else if (focus == PASSWORD_BOX) {
-						free(kbd);
 						break;
 					}
 				}
 
-				if (kbd->key == '\t') {
+				if (kbd.event.keycode == '\t') {
 					if (focus == USERNAME_BOX) {
 						focus = PASSWORD_BOX;
 					} else if (focus == PASSWORD_BOX) {
 						focus = USERNAME_BOX;
 					}
-					free(kbd);
 					continue;
 				}
 
 				if (focus == USERNAME_BOX) {
-					buffer_put(username, kbd->key);
+					buffer_put(username, kbd.event.keycode);
 				} else if (focus == PASSWORD_BOX) {
-					buffer_put(password, kbd->key);
+					buffer_put(password, kbd.event.keycode);
 				}
-				free(kbd);
 
 			}
 
-			uid = checkUserPass(username, password);
+			uid = toaru_auth_check_pass(username, password);
 
 			if (uid >= 0) {
 				break;
@@ -328,26 +354,26 @@ int main (int argc, char ** argv) {
 			show_error = 1;
 		}
 
-		draw_fill(ctx, rgb(39,55,113));
-		draw_sprite(ctx, sprites[0], center_x(sprites[0]->width), center_y(sprites[0]->height) - LOGO_FINAL_OFFSET);
+		memcpy(ctx->backbuffer, foo, sizeof(uint32_t) * width * height);
 		flip(ctx);
-
-		teardown_windowing();
+		yutani_flip(y, wina);
 
 		pid_t _session_pid = fork();
 		if (!_session_pid) {
-			setenv("PATH", "/usr/bin:/bin", 0);
-			syscall_setuid(uid);
+			setuid(uid);
+			toaru_auth_set_vars();
 			char * args[] = {"/bin/gsession", NULL};
 			execvp(args[0], args);
 		}
 
+		free(foo);
 		free(buf);
-		free(ctx->backbuffer);
-		free(ctx);
 
-		syscall_wait(_session_pid);
+		waitpid(_session_pid, NULL, 0);
 	}
+
+	yutani_close(y, wina);
+
 
 	return 0;
 }

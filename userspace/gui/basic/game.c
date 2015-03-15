@@ -1,3 +1,7 @@
+/* This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2013-2014 Kevin Lange
+ */
 /*
  * The ToAru Sample Game
  *
@@ -11,14 +15,14 @@
 #include <stdlib.h>
 #include <time.h>
 
-#include "lib/window.h"
+#include "lib/yutani.h"
 #include "lib/graphics.h"
 #include "lib/decorations.h"
 
-sprite_t * sprites[128];
-window_t * window;
-
-gfx_context_t * ctx;
+static sprite_t * sprites[128];
+static yutani_t * yctx;
+static yutani_window_t * window;
+static gfx_context_t * ctx;
 
 #define WINDOW_SIZE 224
 int out_of_bounds(int x, int y) {
@@ -113,6 +117,7 @@ void display() {
 	draw_sprite(ctx, sprites[124 + direction], decor_left_width + raw_x_offset + map_x + CELL_SIZE * 4, decor_top_height + raw_y_offset + map_y + CELL_SIZE * 4);
 	render_decorations(window, ctx, "RPG Demo");
 	flip(ctx);
+	yutani_flip(yctx, window);
 }
 
 void transition(int nx, int ny) {
@@ -199,6 +204,7 @@ void init_sprite(int i, char * filename, char * alpha) {
 	sprites[i]->blank = 0x0;
 }
 
+#if 0
 void resize_callback(window_t * win) {
 	int _width  = win->width  - decor_left_width - decor_right_width;
 	int _height = win->height - decor_top_height - decor_bottom_height;
@@ -211,58 +217,95 @@ void resize_callback(window_t * win) {
 	draw_fill(ctx, rgb(0,0,0));
 	display();
 }
+#endif
 
-void focus_callback() {
-	display();
+char handle_event(yutani_msg_t * m) {
+	if (m) {
+		switch (m->type) {
+			case YUTANI_MSG_KEY_EVENT:
+				{
+					struct yutani_msg_key_event * ke = (void*)m->data;
+					if (ke->event.action == KEY_ACTION_DOWN) {
+						return ke->event.keycode;
+					}
+				}
+				break;
+			case YUTANI_MSG_WINDOW_FOCUS_CHANGE:
+				{
+					struct yutani_msg_window_focus_change * wf = (void*)m->data;
+					yutani_window_t * win = hashmap_get(yctx->windows, (void*)wf->wid);
+					if (win) {
+						win->focused = wf->focused;
+						display();
+					}
+				}
+				break;
+			case YUTANI_MSG_WINDOW_MOUSE_EVENT:
+				if (decor_handle_event(yctx, m) == DECOR_CLOSE) {
+					return 'q';
+				}
+				break;
+			case YUTANI_MSG_SESSION_END:
+				return 'q';
+			default:
+				break;
+		}
+		free(m);
+	}
+	return 0;
 }
 
 int main(int argc, char ** argv) {
-	setup_windowing();
 
-	resize_window_callback = resize_callback;
-	window = window_create(10,10, 2 * WINDOW_SIZE, 2 * WINDOW_SIZE);
-	ctx = init_graphics_window_double_buffer(window);
+	yctx = yutani_init();
+	window = yutani_window_create(yctx, 2 * WINDOW_SIZE, 2 * WINDOW_SIZE);
+	yutani_window_move(yctx, window, 10, 10);
+	ctx = init_graphics_yutani_double_buffer(window);
 	draw_fill(ctx,rgb(0,0,0));
 	flip(ctx);
+	yutani_flip(yctx, window);
+
+	yutani_window_advertise_icon(yctx, window, "RPG Demo", "applications-simulation");
 
 	init_decorations();
-	focus_changed_callback = focus_callback;
 
 	map_x = WINDOW_SIZE - (64 * 9) / 2;
 	map_y = WINDOW_SIZE - (64 * 9) / 2;
 
 	printf("Loading sprites...\n");
-	init_sprite(0, "/etc/game/0.bmp", NULL);
-	init_sprite(1, "/etc/game/1.bmp", NULL);
-	init_sprite(2, "/etc/game/2.bmp", NULL);
-	init_sprite(3, "/etc/game/3.bmp", NULL);
-	init_sprite(4, "/etc/game/4.bmp", NULL);
-	init_sprite(5, "/etc/game/5.bmp", NULL);
-	init_sprite(6, "/etc/game/6.bmp", NULL);
-	init_sprite(7, "/etc/game/7.bmp", NULL);
-	init_sprite(124, "/etc/game/remilia.bmp", NULL);
-	init_sprite(125, "/etc/game/remilia_r.bmp", NULL);
-	init_sprite(126, "/etc/game/remilia_l.bmp", NULL);
-	init_sprite(127, "/etc/game/remilia_f.bmp", NULL);
-	load_map("/etc/game/map");
+
+#define GAME_PATH "/usr/share/game/"
+
+	init_sprite(0, GAME_PATH "0.bmp", NULL);
+	init_sprite(1, GAME_PATH "1.bmp", NULL);
+	init_sprite(2, GAME_PATH "2.bmp", NULL);
+	init_sprite(3, GAME_PATH "3.bmp", NULL);
+	init_sprite(4, GAME_PATH "4.bmp", NULL);
+	init_sprite(5, GAME_PATH "5.bmp", NULL);
+	init_sprite(6, GAME_PATH "6.bmp", NULL);
+	init_sprite(7, GAME_PATH "7.bmp", NULL);
+	init_sprite(124, GAME_PATH "remilia.bmp", NULL);
+	init_sprite(125, GAME_PATH "remilia_r.bmp", NULL);
+	init_sprite(126, GAME_PATH "remilia_l.bmp", NULL);
+	init_sprite(127, GAME_PATH "remilia_f.bmp", NULL);
+	load_map(GAME_PATH "map");
 	printf("%d x %d\n", map.width, map.height);
 
 	display();
 
-
 	int playing = 1;
 	while (playing) {
 
-		char ch = 0;
-		w_keyboard_t * kbd;
+		char ch = '\0';
 
-		while (kbd = poll_keyboard_async()) {
-			free(kbd);
-		}
+		yutani_msg_t * m = NULL;
+		do {
+			m = yutani_poll_async(yctx);
+			handle_event(m);
+		} while (m);
 
-		kbd = poll_keyboard();
-		ch = kbd->key;
-		free(kbd);
+		m = yutani_poll(yctx);
+		ch = handle_event(m);
 
 		switch (ch) {
 			case 'q':
@@ -289,7 +332,7 @@ int main(int argc, char ** argv) {
 		}
 	}
 
-	teardown_windowing();
+	yutani_close(yctx, window);
 
 	return 0;
 }

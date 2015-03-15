@@ -1,6 +1,12 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
+/* This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2012-2014 Kevin Lange
  *
- * Graphics library
+ * Guassian context blurring:
+ * Copyright (C) 2008 Kristian Høgsberg
+ * Copyright (C) 2009 Chris Wilson
+ *
+ * Generic Graphics library for ToaruOS
  */
 
 #include <syscall.h>
@@ -9,7 +15,6 @@
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include "graphics.h"
-#include "window.h"
 #include "../../kernel/include/video.h"
 
 #define PNG_DEBUG 3
@@ -49,6 +54,7 @@ gfx_context_t * init_graphics_fullscreen() {
 	int fd = open("/dev/fb0", O_RDONLY);
 	if (fd < 0) {
 		/* oh shit */
+		free(out);
 		return NULL;
 	}
 
@@ -64,39 +70,9 @@ gfx_context_t * init_graphics_fullscreen() {
 
 gfx_context_t * init_graphics_fullscreen_double_buffer() {
 	gfx_context_t * out = init_graphics_fullscreen();
+	if (!out) return NULL;
 	out->backbuffer = malloc(sizeof(uint32_t) * GFX_W(out) * GFX_H(out));
 	return out;
-}
-
-gfx_context_t * init_graphics_window(window_t * window) {
-	gfx_context_t * out = malloc(sizeof(gfx_context_t));
-	out->width  = window->width;
-	out->height = window->height;
-	out->depth  = 32;
-	out->size   = GFX_H(out) * GFX_W(out) * GFX_B(out);
-	out->buffer = window->buffer;
-	out->backbuffer = out->buffer;
-	return out;
-}
-
-gfx_context_t *  init_graphics_window_double_buffer(window_t * window) {
-	gfx_context_t * out = init_graphics_window(window);
-	out->backbuffer = malloc(sizeof(uint32_t) * GFX_W(out) * GFX_H(out));
-	return out;
-}
-
-void reinit_graphics_window(gfx_context_t * out, window_t * window) {
-	out->width  = window->width;
-	out->height = window->height;
-	out->depth  = 32;
-	out->size   = GFX_H(out) * GFX_W(out) * GFX_B(out);
-	if (out->buffer == out->backbuffer) {
-		out->buffer = window->buffer;
-		out->backbuffer = out->buffer;
-	} else {
-		out->buffer = window->buffer;
-		out->backbuffer = realloc(out->backbuffer, sizeof(uint32_t) * GFX_W(out) * GFX_H(out));
-	}
 }
 
 gfx_context_t * init_graphics_sprite(sprite_t * sprite) {
@@ -193,17 +169,12 @@ uint32_t premultiply(uint32_t color) {
 	uint16_t g = _GRE(color);
 	uint16_t b = _BLU(color);
 
-	r = r * a / 256;
-	g = g * a / 256;
-	b = b * a / 256;
+	r = r * a / 255;
+	g = g * a / 255;
+	b = b * a / 255;
 	return rgba(r,g,b,a);
 }
 
-/*
- * based on the blur.c demo for Cairo
- * Copyright © 2008 Kristian Høgsberg
- * Copyright © 2009 Chris Wilson
- */
 #define ARRAY_LENGTH(a) (sizeof (a) / sizeof (a)[0])
 
 void blur_context(gfx_context_t * _dst, gfx_context_t * _src, double amount) {
@@ -270,6 +241,200 @@ void blur_context(gfx_context_t * _dst, gfx_context_t * _src, double amount) {
 	}
 }
 
+void blur_context_no_vignette(gfx_context_t * _dst, gfx_context_t * _src, double amount) {
+	int width, height;
+	int x, y, z, w, i, j, k;
+	uint32_t *s, *d, a, p;
+	uint8_t * src, * dst;
+	uint8_t kernel[17];
+	const int size = ARRAY_LENGTH(kernel);
+	const int half = size / 2;
+
+	width  = _src->width;
+	height = _src->height;
+
+	src = _src->backbuffer;
+	dst = _dst->backbuffer;
+
+	a = 0;
+	for (i = 0; i < size; ++i) {
+		double f = i - half;
+		a += kernel[i] = exp (- f * f / amount) * 80;
+	}
+
+	for (i = 0; i < height; ++i) {
+		s = (uint32_t *) (src + i * (_src->width * 4));
+		d = (uint32_t *) (dst + i * (_dst->width * 4));
+		for (j = 0; j < width; ++j) {
+			x = y = z = w = 0;
+			for (k = 0; k < size; ++k) {
+				int j_ = j;
+				if (j_ - half + k < 0) {
+					j_ = half - k;
+				} else if (j_ - half + k >= width) {
+					j_ = width - k + half - 1;
+				}
+				p = s[j_ - half + k];
+
+				x += ((p >> 24) & 0xFF) * kernel[k];
+				y += ((p >> 16) & 0xFF) * kernel[k];
+				z += ((p >>  8) & 0xFF) * kernel[k];
+				w += ((p >>  0) & 0xFF) * kernel[k];
+			}
+
+			d[j] = (x / a << 24) | (y / a << 16) | (z / a << 8) | w / a;
+		}
+	}
+
+	for (i = 0; i < height; ++i) {
+		s = (uint32_t *) (src + i * (_src->width * 4));
+		d = (uint32_t *) (dst + i * (_dst->width * 4));
+		for (j = 0; j < width; ++j) {
+			x = y = z = w = 0;
+			for (k = 0; k < size; ++k) {
+				int i_ = i;
+				if (i_ - half + k < 0) {
+					i_ = half - k;
+				} else if (i_ - half + k >= height) {
+					i_ = height - k + half - 1;
+				}
+
+				s = (uint32_t *) (dst + (i_ - half + k) * (_dst->width * 4));
+				p = s[j];
+
+				x += ((p >> 24) & 0xFF) * kernel[k];
+				y += ((p >> 16) & 0xFF) * kernel[k];
+				z += ((p >>  8) & 0xFF) * kernel[k];
+				w += ((p >>  0) & 0xFF) * kernel[k];
+			}
+
+			d[j] = (x / a << 24) | (y / a << 16) | (z / a << 8) | w / a;
+		}
+	}
+}
+
+static int clamp(int a, int l, int h) {
+	return a < l ? l : (a > h ? h : a);
+}
+
+static void _box_blur_horizontal(gfx_context_t * _src, int radius) {
+	uint32_t * p = (uint32_t *)_src->backbuffer;
+	int w = _src->width;
+	int h = _src->height;
+	int half_radius = radius / 2;
+	int index = 0;
+	uint32_t * out_color = calloc(sizeof(uint32_t), w);
+
+	for (int y = 0; y < h; y++) {
+		int hits = 0;
+		int r = 0;
+		int g = 0;
+		int b = 0;
+		int a = 0;
+		for (int x = -half_radius; x < w; x++) {
+			int old_p = x - half_radius - 1;
+			if (old_p >= 0)
+			{
+				uint32_t col = p[clamp(index + old_p, 0, w*h-1)];
+				if (col) {
+					r -= _RED(col);
+					g -= _GRE(col);
+					b -= _BLU(col);
+					a -= _ALP(col);
+				}
+				hits--;
+			}
+
+			int newPixel = x + half_radius;
+			if (newPixel < w) {
+				int col = p[clamp(index + newPixel, 0, w*h-1)];
+				if (col != 0) {
+					r += _RED(col);
+					g += _GRE(col);
+					b += _BLU(col);
+					a += _ALP(col);
+				}
+				hits++;
+			}
+
+			if (x >= 0) {
+				out_color[x] = rgba(r / hits, g / hits, b / hits, a / hits);
+			}
+		}
+
+		for (int x = 0; x < w; x++) {
+			p[index + x] = out_color[x];
+		}
+
+		index += w;
+	}
+
+	free(out_color);
+}
+
+static void _box_blur_vertical(gfx_context_t * _src, int radius) {
+	uint32_t * p = (uint32_t *)_src->backbuffer;
+	int w = _src->width;
+	int h = _src->height;
+	int half_radius = radius / 2;
+
+	uint32_t * out_color = calloc(sizeof(uint32_t), h);
+	int old_offset = -(half_radius + 1) * w;
+	int new_offset = (half_radius) * w;
+
+	for (int x = 0; x < w; x++) {
+		int hits = 0;
+		int r = 0;
+		int g = 0;
+		int b = 0;
+		int a = 0;
+		int index = -half_radius * w + x;
+		for (int y = -half_radius; y < h; y++) {
+			int old_p = y - half_radius - 1;
+			if (old_p >= 0) {
+				uint32_t col = p[clamp(index + old_offset, 0, w*h-1)];
+				if (col != 0) {
+					r -= _RED(col);
+					g -= _GRE(col);
+					b -= _BLU(col);
+					a -= _ALP(col);
+				}
+				hits--;
+			}
+
+			int newPixel = y + half_radius;
+			if (newPixel < h) {
+				uint32_t col = p[clamp(index + new_offset, 0, w*h-1)];
+				if (col != 0)
+				{
+					r += _RED(col);
+					g += _GRE(col);
+					b += _BLU(col);
+					a += _ALP(col);
+				}
+				hits++;
+			}
+
+			if (y >= 0) {
+				out_color[y] = rgba(r / hits, g / hits, b / hits, a / hits);
+			}
+
+			index += w;
+		}
+
+		for (int y = 0; y < h; y++) {
+			p[y * w + x] = out_color[y];
+		}
+	}
+
+	free(out_color);
+}
+
+void blur_context_box(gfx_context_t * _src, int radius) {
+	_box_blur_horizontal(_src,radius);
+	_box_blur_vertical(_src,radius);
+}
+
 void load_sprite(sprite_t * sprite, char * filename) {
 	/* Open the requested binary */
 	FILE * image = fopen(filename, "r");
@@ -299,7 +464,7 @@ void load_sprite(sprite_t * sprite, char * filename) {
 
 	for (y = 0; y < height; ++y) {
 		for (x = 0; x < width; ++x) {
-			if (i > image_size) return;
+			if (i > image_size) goto _cleanup_sprite;
 			/* Extract the color */
 			uint32_t color;
 			if (bpp == 24) {
@@ -317,6 +482,9 @@ void load_sprite(sprite_t * sprite, char * filename) {
 		}
 		i += row_width;
 	}
+
+_cleanup_sprite:
+	fclose(image);
 	free(bufferb);
 }
 
@@ -339,12 +507,14 @@ int load_sprite_png(sprite_t * sprite, char * file) {
 	}
 	fread(header, 1, 8, fp);
 	if (png_sig_cmp(header, 0, 8)) {
+		fclose(fp);
 		printf("Oh dear. Bad signature.\n");
 		return 1;
 	}
 
 	png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
 	if (!png_ptr) {
+		fclose(fp);
 		printf("Oh dear. Couldn't make a read struct.\n");
 		return 1;
 	}

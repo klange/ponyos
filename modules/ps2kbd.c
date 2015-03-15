@@ -1,12 +1,13 @@
 /* vim: tabstop=4 shiftwidth=4 noexpandtab
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2011-2015 Kevin Lange
  *
  * Low-level keyboard interrupt driver.
  *
  * Creates a device file (keyboard_pipe) that can be read
  * to retreive keyboard events.
  *
- * Part of the ToAruOS Kernel
- * Copyright 2011-2014 Kevin Lange
  */
 
 #include <system.h>
@@ -17,23 +18,11 @@
 
 #include <module.h>
 
-#define KEY_DEVICE    0x60
-#define KEY_PENDING   0x64
-
-#define KEYBOARD_NOTICES 0
-#define KEYBOARD_IRQ 1
+#define KEY_DEVICE  0x60
+#define KEY_PENDING 0x64
+#define KEY_IRQ     1
 
 static fs_node_t * keyboard_pipe;
-
-/*
- * Add a character to the device buffer.
- */
-static void putch(unsigned char c) {
-	uint8_t buf[2];
-	buf[0] = c;
-	buf[1] = '\0';
-	write_fs(keyboard_pipe, 0, 1, buf);
-}
 
 /*
  * Wait on the keyboard.
@@ -42,13 +31,16 @@ static void keyboard_wait(void) {
 	while(inportb(KEY_PENDING) & 2);
 }
 
+/*
+ * Keyboard interrupt callback
+ */
 static void keyboard_handler(struct regs *r) {
 	unsigned char scancode;
 	keyboard_wait();
 	scancode = inportb(KEY_DEVICE);
-	irq_ack(KEYBOARD_IRQ);
+	irq_ack(KEY_IRQ);
 
-	putch(scancode);
+	write_fs(keyboard_pipe, 0, 1, (uint8_t []){scancode});
 }
 
 /*
@@ -67,7 +59,7 @@ static int keyboard_install(void) {
 	vfs_mount("/dev/kbd", keyboard_pipe);
 
 	/* Install the interrupt handler */
-	irq_install_handler(KEYBOARD_IRQ, keyboard_handler);
+	irq_install_handler(KEY_IRQ, keyboard_handler);
 
 	return 0;
 }

@@ -1,3 +1,8 @@
+/* vim: tabstop=4 shiftwidth=4 noexpandtab
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2013-2014 Kevin Lange
+ */
 #include <system.h>
 #include <ringbuffer.h>
 
@@ -53,12 +58,15 @@ size_t ring_buffer_read(ring_buffer_t * ring_buffer, size_t size, uint8_t * buff
 			collected++;
 		}
 		spin_unlock(&ring_buffer->lock);
+		wakeup_queue(ring_buffer->wait_queue_writers);
 		if (collected == 0) {
-			wakeup_queue(ring_buffer->wait_queue);
-			sleep_on(ring_buffer->wait_queue);
+			if (sleep_on(ring_buffer->wait_queue_readers) && ring_buffer->internal_stop) {
+				ring_buffer->internal_stop = 0;
+				break;
+			}
 		}
 	}
-	wakeup_queue(ring_buffer->wait_queue);
+	wakeup_queue(ring_buffer->wait_queue_writers);
 	return collected;
 }
 
@@ -74,13 +82,16 @@ size_t ring_buffer_write(ring_buffer_t * ring_buffer, size_t size, uint8_t * buf
 		}
 
 		spin_unlock(&ring_buffer->lock);
+		wakeup_queue(ring_buffer->wait_queue_readers);
 		if (written < size) {
-			wakeup_queue(ring_buffer->wait_queue);
-			sleep_on(ring_buffer->wait_queue);
+			if (sleep_on(ring_buffer->wait_queue_writers) && ring_buffer->internal_stop) {
+				ring_buffer->internal_stop = 0;
+				break;
+			}
 		}
 	}
 
-	wakeup_queue(ring_buffer->wait_queue);
+	wakeup_queue(ring_buffer->wait_queue_readers);
 	return written;
 }
 
@@ -91,8 +102,32 @@ ring_buffer_t * ring_buffer_create(size_t size) {
 	out->write_ptr  = 0;
 	out->read_ptr   = 0;
 	out->lock       = 0;
-	out->wait_queue = list_create();
 	out->size       = size;
+
+	out->internal_stop = 0;
+
+	out->wait_queue_readers = list_create();
+	out->wait_queue_writers = list_create();
 
 	return out;
 }
+
+void ring_buffer_destroy(ring_buffer_t * ring_buffer) {
+	free(ring_buffer->buffer);
+
+	wakeup_queue(ring_buffer->wait_queue_writers);
+	wakeup_queue(ring_buffer->wait_queue_readers);
+
+	list_free(ring_buffer->wait_queue_writers);
+	list_free(ring_buffer->wait_queue_readers);
+
+	free(ring_buffer->wait_queue_writers);
+	free(ring_buffer->wait_queue_readers);
+}
+
+void ring_buffer_interrupt(ring_buffer_t * ring_buffer) {
+	ring_buffer->internal_stop = 1;
+	wakeup_queue_interrupted(ring_buffer->wait_queue_readers);
+	wakeup_queue_interrupted(ring_buffer->wait_queue_writers);
+}
+

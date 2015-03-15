@@ -1,4 +1,8 @@
-/*
+/* vim: tabstop=4 shiftwidth=4 noexpandtab
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2014 Kevin Lange
+  *
  * ATA Disk Driver
  *
  * Provides raw block access to an (Parallel) ATA drive.
@@ -8,6 +12,7 @@
 #include <logging.h>
 #include <module.h>
 #include <fs.h>
+#include <printf.h>
 
 /* TODO: Move this to mod/ata.h */
 #include <ata.h>
@@ -21,6 +26,8 @@ struct ata_device {
 	ata_identify_t identity;
 };
 
+static volatile uint8_t ata_lock = 0;
+
 /* TODO support other sector sizes */
 #define ATA_SECTOR_SIZE 512
 
@@ -31,6 +38,16 @@ static uint32_t write_ata(fs_node_t *node, uint32_t offset, uint32_t size, uint8
 static void     open_ata(fs_node_t *node, unsigned int flags);
 static void     close_ata(fs_node_t *node);
 
+static size_t ata_max_offset(struct ata_device * dev) {
+	size_t sectors = dev->identity.sectors_48;
+	if (!sectors) {
+		/* Fall back to sectors_28 */
+		sectors = dev->identity.sectors_28;
+	}
+
+	return sectors * ATA_SECTOR_SIZE;
+}
+
 static uint32_t read_ata(fs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
 
 	struct ata_device * dev = (struct ata_device *)node->device;
@@ -40,12 +57,12 @@ static uint32_t read_ata(fs_node_t *node, uint32_t offset, uint32_t size, uint8_
 
 	unsigned int x_offset = 0;
 
-	if (offset > dev->identity.sectors_48 * ATA_SECTOR_SIZE) {
+	if (offset > ata_max_offset(dev)) {
 		return 0;
 	}
 
-	if (offset + size > dev->identity.sectors_48 * ATA_SECTOR_SIZE) {
-		unsigned int i = dev->identity.sectors_48 * ATA_SECTOR_SIZE - offset;
+	if (offset + size > ata_max_offset(dev)) {
+		unsigned int i = ata_max_offset(dev) - offset;
 		size = i;
 	}
 
@@ -91,12 +108,12 @@ static uint32_t write_ata(fs_node_t *node, uint32_t offset, uint32_t size, uint8
 
 	unsigned int x_offset = 0;
 
-	if (offset > dev->identity.sectors_48 * ATA_SECTOR_SIZE) {
+	if (offset > ata_max_offset(dev)) {
 		return 0;
 	}
 
-	if (offset + size > dev->identity.sectors_48 * ATA_SECTOR_SIZE) {
-		unsigned int i = dev->identity.sectors_48 * ATA_SECTOR_SIZE - offset;
+	if (offset + size > ata_max_offset(dev)) {
+		unsigned int i = ata_max_offset(dev) - offset;
 		size = i;
 	}
 
@@ -157,7 +174,7 @@ static fs_node_t * ata_device_create(struct ata_device * device) {
 	fnode->device  = device;
 	fnode->uid = 0;
 	fnode->gid = 0;
-	fnode->length  = device->identity.sectors_48 * ATA_SECTOR_SIZE; /* TODO */
+	fnode->length  = ata_max_offset(device); /* TODO */
 	fnode->flags   = FS_BLOCKDEVICE;
 	fnode->read    = read_ata;
 	fnode->write   = write_ata;
@@ -176,13 +193,23 @@ static void ata_io_wait(struct ata_device * dev) {
 	inportb(dev->io_base + ATA_REG_ALTSTATUS);
 }
 
+static int ata_status_wait(struct ata_device * dev, int timeout) {
+	int status;
+	if (timeout > 0) {
+		int i = 0;
+		while ((status = inportb(dev->io_base + ATA_REG_STATUS)) & ATA_SR_BSY && (i < timeout)) i++;
+	} else {
+		while ((status = inportb(dev->io_base + ATA_REG_STATUS)) & ATA_SR_BSY);
+	}
+	return status;
+}
 
 static int ata_wait(struct ata_device * dev, int advanced) {
 	uint8_t status = 0;
 
 	ata_io_wait(dev);
 
-	while ((status = inportb(dev->io_base + ATA_REG_STATUS)) & ATA_SR_BSY);
+	status = ata_status_wait(dev, -1);
 
 	if (advanced) {
 		status = inportb(dev->io_base + ATA_REG_STATUS);
@@ -196,6 +223,7 @@ static int ata_wait(struct ata_device * dev, int advanced) {
 
 static void ata_soft_reset(struct ata_device * dev) {
 	outportb(dev->control, 0x04);
+	ata_io_wait(dev);
 	outportb(dev->control, 0x00);
 }
 
@@ -239,8 +267,10 @@ static void ata_device_init(struct ata_device * dev) {
 
 static int ata_device_detect(struct ata_device * dev) {
 	ata_soft_reset(dev);
+	ata_io_wait(dev);
 	outportb(dev->io_base + ATA_REG_HDDEVSEL, 0xA0 | dev->slave << 4);
 	ata_io_wait(dev);
+	ata_status_wait(dev, 10000);
 
 	unsigned char cl = inportb(dev->io_base + ATA_REG_LBA1); /* CYL_LO */
 	unsigned char ch = inportb(dev->io_base + ATA_REG_LBA2); /* CYL_HI */
@@ -272,6 +302,8 @@ static void ata_device_read_sector(struct ata_device * dev, uint32_t lba, uint8_
 	uint16_t bus = dev->io_base;
 	uint8_t slave = dev->slave;
 
+	spin_lock(&ata_lock);
+
 	int errors = 0;
 try_again:
 	outportb(bus + ATA_REG_CONTROL, 0x02);
@@ -291,6 +323,7 @@ try_again:
 		errors++;
 		if (errors > 4) {
 			debug_print(WARNING, "-- Too many errors trying to read this block. Bailing.");
+			spin_unlock(&ata_lock);
 			return;
 		}
 		goto try_again;
@@ -299,11 +332,14 @@ try_again:
 	int size = 256;
 	inportsm(bus,buf,size);
 	ata_wait(dev, 0);
+	spin_unlock(&ata_lock);
 }
 
 static void ata_device_write_sector(struct ata_device * dev, uint32_t lba, uint8_t * buf) {
 	uint16_t bus = dev->io_base;
 	uint8_t slave = dev->slave;
+
+	spin_lock(&ata_lock);
 
 	outportb(bus + ATA_REG_CONTROL, 0x02);
 
@@ -322,6 +358,7 @@ static void ata_device_write_sector(struct ata_device * dev, uint32_t lba, uint8
 	outportsm(bus,buf,size);
 	outportb(bus + 0x07, ATA_CMD_CACHE_FLUSH);
 	ata_wait(dev, 0);
+	spin_unlock(&ata_lock);
 }
 
 static int buffer_compare(uint32_t * ptr1, uint32_t * ptr2, size_t size) {

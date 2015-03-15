@@ -1,3 +1,7 @@
+/* This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2012-2014 Kevin Lange
+ */
 /* vim: tabstop=4 shiftwidth=4 noexpandtab
  *
  *
@@ -10,6 +14,7 @@
 #include FT_FREETYPE_H
 #include FT_CACHE_H
 
+#include "yutani.h"
 #include "graphics.h"
 #include "shmemfonts.h"
 #include "utf8decode.h"
@@ -25,7 +30,7 @@ static int selected_face = 0;
 #define SGFX(CTX,x,y,WIDTH) *((uint32_t *)&CTX[((WIDTH) * (y) + (x)) * 4])
 #define FONT_SIZE 12
 
-#define FALLBACK FONT_JAPANESE
+static int fallbacks[] = {FONT_JAPANESE, FONT_SYMBOLA, -1};
 
 /*
  * XXX: take font name as an argument / allow multiple fonts
@@ -34,7 +39,10 @@ static void _load_font(int i, char * name) {
 	char * font;
 	size_t s = 0;
 	int error;
-	font = (char *)syscall_shm_obtain(name, &s);
+	char tmp[100];
+	snprintf(tmp, 100, "sys.%s%s", getenv("DISPLAY"), name);
+
+	font = (char *)syscall_shm_obtain(tmp, &s);
 	error = FT_New_Memory_Face(library, font, s, 0, &faces[i]);
 	error = FT_Set_Pixel_Sizes(faces[i], FONT_SIZE, FONT_SIZE);
 }
@@ -46,15 +54,16 @@ static void _load_font_f(int i, char * path) {
 }
 
 static void _load_fonts() {
-	_load_font(FONT_SANS_SERIF,             WINS_SERVER_IDENTIFIER ".fonts.sans-serif");
-	_load_font(FONT_SANS_SERIF_BOLD,        WINS_SERVER_IDENTIFIER ".fonts.sans-serif.bold");
-	_load_font(FONT_SANS_SERIF_ITALIC,      WINS_SERVER_IDENTIFIER ".fonts.sans-serif.italic");
-	_load_font(FONT_SANS_SERIF_BOLD_ITALIC, WINS_SERVER_IDENTIFIER ".fonts.sans-serif.bolditalic");
-	_load_font(FONT_MONOSPACE,              WINS_SERVER_IDENTIFIER ".fonts.monospace");
-	_load_font(FONT_MONOSPACE_BOLD,         WINS_SERVER_IDENTIFIER ".fonts.monospace.bold");
-	_load_font(FONT_MONOSPACE_ITALIC,       WINS_SERVER_IDENTIFIER ".fonts.monospace.italic");
-	_load_font(FONT_MONOSPACE_BOLD_ITALIC,  WINS_SERVER_IDENTIFIER ".fonts.monospace.bolditalic");
+	_load_font(FONT_SANS_SERIF,             ".fonts.sans-serif");
+	_load_font(FONT_SANS_SERIF_BOLD,        ".fonts.sans-serif.bold");
+	_load_font(FONT_SANS_SERIF_ITALIC,      ".fonts.sans-serif.italic");
+	_load_font(FONT_SANS_SERIF_BOLD_ITALIC, ".fonts.sans-serif.bolditalic");
+	_load_font(FONT_MONOSPACE,              ".fonts.monospace");
+	_load_font(FONT_MONOSPACE_BOLD,         ".fonts.monospace.bold");
+	_load_font(FONT_MONOSPACE_ITALIC,       ".fonts.monospace.italic");
+	_load_font(FONT_MONOSPACE_BOLD_ITALIC,  ".fonts.monospace.bolditalic");
 	_load_font_f(FONT_JAPANESE, "/usr/share/fonts/VLGothic.ttf");
+	_load_font_f(FONT_SYMBOLA, "/usr/share/fonts/Symbola.ttf");
 }
 
 void init_shmemfonts() {
@@ -108,10 +117,10 @@ uint32_t draw_string_width(char * string) {
 	uint32_t state = 0;
 
 	while (*s) {
-		uint16_t o = 0;
+		uint32_t o = 0;
 		while (*s) {
-			if (!decode(&state, &codepoint, *s)) {
-				o = (uint16_t)codepoint;
+			if (!decode(&state, &codepoint, (uint8_t)*s)) {
+				o = (uint32_t)codepoint;
 				s++;
 				goto finished_width;
 			} else if (state == UTF8_REJECT) {
@@ -134,13 +143,17 @@ finished_width:
 			}
 			slot = (faces[selected_face])->glyph;
 		} else {
-			glyph_index = FT_Get_Char_Index( faces[FALLBACK], o);
-			error = FT_Load_Glyph(faces[FALLBACK], glyph_index, FT_LOAD_DEFAULT);
-			if (error) {
-				fprintf(stderr, "Error loading glyph for '%d'\n", o);
-				continue;
+			int i = 0;
+			while (!glyph_index && fallbacks[i] != -1) {
+				int fallback = fallbacks[i++];
+				glyph_index = FT_Get_Char_Index( faces[fallback], o);
+				error = FT_Load_Glyph(faces[fallback], glyph_index, FT_LOAD_DEFAULT);
+				if (error) {
+					fprintf(stderr, "Error loading glyph for '%d'\n", o);
+					continue;
+				}
+				slot = (faces[fallback])->glyph;
 			}
-			slot = (faces[FALLBACK])->glyph;
 		}
 		pen_x += slot->advance.x >> 6;
 	}
@@ -158,10 +171,10 @@ void draw_string(gfx_context_t * ctx, int x, int y, uint32_t fg, char * string) 
 	uint32_t state = 0;
 
 	while (*s) {
-		uint16_t o = 0;
+		uint32_t o = 0;
 		while (*s) {
-			if (!decode(&state, &codepoint, *s)) {
-				o = (uint16_t)codepoint;
+			if (!decode(&state, &codepoint, (uint8_t)*s)) {
+				o = (uint32_t)codepoint;
 				s++;
 				goto finished;
 			} else if (state == UTF8_REJECT) {
@@ -191,18 +204,22 @@ finished:
 				}
 			}
 		} else {
-			glyph_index = FT_Get_Char_Index( faces[FALLBACK], o);
-			error = FT_Load_Glyph(faces[FALLBACK], glyph_index, FT_LOAD_DEFAULT);
-			if (error) {
-				fprintf(stderr, "Error loading glyph for '%d'\n", o);
-				continue;
-			}
-			slot = (faces[FALLBACK])->glyph;
-			if (slot->format == FT_GLYPH_FORMAT_OUTLINE) {
-				error = FT_Render_Glyph((faces[FALLBACK])->glyph, FT_RENDER_MODE_NORMAL);
+			int i = 0;
+			while (!glyph_index && fallbacks[i] != -1) {
+				int fallback = fallbacks[i++];
+				glyph_index = FT_Get_Char_Index( faces[fallback], o);
+				error = FT_Load_Glyph(faces[fallback], glyph_index, FT_LOAD_DEFAULT);
 				if (error) {
-					fprintf(stderr, "Error rendering glyph for '%d'\n", o);
+					fprintf(stderr, "Error loading glyph for '%d'\n", o);
 					continue;
+				}
+				slot = (faces[fallback])->glyph;
+				if (slot->format == FT_GLYPH_FORMAT_OUTLINE) {
+					error = FT_Render_Glyph((faces[fallback])->glyph, FT_RENDER_MODE_NORMAL);
+					if (error) {
+						fprintf(stderr, "Error rendering glyph for '%d'\n", o);
+						continue;
+					}
 				}
 			}
 

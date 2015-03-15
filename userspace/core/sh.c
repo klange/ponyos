@@ -1,4 +1,8 @@
 /* vim: tabstop=4 shiftwidth=4 noexpandtab
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2013-2014 Kevin Lange
+ *
  * E-Shell
  *
  * This is the "experimental shell". It provides
@@ -20,6 +24,7 @@
 #include <signal.h>
 #include <getopt.h>
 #include <termios.h>
+#include <errno.h>
 
 #include <sys/time.h>
 #include <sys/wait.h>
@@ -27,6 +32,8 @@
 
 #include "lib/list.h"
 #include "lib/kbd.h"
+
+#define PIPE_TOKEN "\xFF\xFFPIPE\xFF\xFF"
 
 /* A shell command is like a C program */
 typedef uint32_t(*shell_command_t) (int argc, char ** argv);
@@ -145,28 +152,12 @@ char _hostname[256];
 
 /* function to update the cached username */
 void getuser() {
-	FILE * passwd = fopen("/etc/passwd", "r");
-	char line[LINE_LEN];
-	
-	int uid = getuid();
-
-	while (fgets(line, LINE_LEN, passwd) != NULL) {
-
-		line[strlen(line)-1] = '\0';
-
-		char *p, *tokens[10], *last;
-		int i = 0;
-		for ((p = strtok_r(line, ":", &last)); p;
-				(p = strtok_r(NULL, ":", &last)), i++) {
-			if (i < 511) tokens[i] = p;
-		}
-		tokens[i] = NULL;
-
-		if (atoi(tokens[2]) == uid) {
-			memcpy(username, tokens[0], strlen(tokens[0]) + 1);
-		}
+	char * tmp = getenv("USER");
+	if (tmp) {
+		strcpy(username, tmp);
+	} else {
+		sprintf(username, "%d", getuid());
 	}
-	fclose(passwd);
 }
 
 /* function to update the cached hostname */
@@ -193,17 +184,29 @@ void draw_prompt(int ret) {
 	char time_buffer[80];
 	strftime(time_buffer, 80, "%H:%M:%S", timeinfo);
 
+	/* Print the working directory in there, too */
+	getcwd(cwd, 512);
+	char _cwd[512];
+	strncpy(_cwd, cwd, 512);
+
+	char * home = getenv("HOME");
+	if (home && strstr(cwd, home) == cwd) {
+		char * c = cwd + strlen(home);
+		if (*c == '/' || *c == 0) {
+			sprintf(_cwd, "~%s", c);
+		}
+	}
+
 	/* Print the prompt. */
-	printf("\033]1;%s@%s:%s\007", username, _hostname, cwd);
-	printf("\033[400C\033[16D\033[1m\033[38;5;59m[\033[38;5;173m%s \033[38;5;167m%s\033[38;5;59m]\033[1G\033[38;5;221m%s\033[38;5;59m@\033[38;5;81m%s ",
+	printf("\033]1;%s@%s:%s\007", username, _hostname, _cwd);
+	printf("\033[s\033[400C\033[16D\033[1m\033[38;5;59m[\033[38;5;173m%s \033[38;5;167m%s\033[38;5;59m]\033[u\033[38;5;221m%s\033[38;5;59m@\033[38;5;81m%s ",
 			date_buffer, time_buffer,
 			username, _hostname);
 	if (ret != 0) {
 		printf("\033[38;5;167m%d ", ret);
 	}
-	/* Print the working directory in there, too */
-	getcwd(cwd, 1024);
-	printf("\033[0m%s\033[1;38;5;47m$\033[0m ", cwd);
+
+	printf("\033[0m%s%s\033[0m ", _cwd, getuid() == 0 ? "\033[1;38;5;196m#" : "\033[1;38;5;47m$");
 	fflush(stdout);
 }
 
@@ -274,15 +277,24 @@ int rline(char * buffer, int buf_size, rline_callbacks_t * callbacks) {
 	printf("\033[s");
 	fflush(stdout);
 
+	key_event_state_t kbd_state = {0};
+
 	/* Read keys */
 	while ((context.collected < context.requested) && (!context.newline)) {
-		uint32_t key_sym = kbd_key(fgetc(stdin));
+		uint32_t key_sym = kbd_key(&kbd_state, fgetc(stdin));
 		if (key_sym == KEY_NONE) continue;
 		switch (key_sym) {
 			case KEY_CTRL_C:
 				printf("^C\n");
 				context.buffer[0] = '\0';
 				return 0;
+			case KEY_CTRL_D:
+				if (context.collected == 0) {
+					printf("exit\n");
+					sprintf(context.buffer, "exit\n");
+					return strlen(context.buffer);
+				}
+				continue;
 			case KEY_CTRL_R:
 				if (callbacks->rev_search) {
 					callbacks->rev_search(&context);
@@ -547,7 +559,6 @@ void tab_complete_func(rline_context_t * context) {
 		}
 	} else {
 		/* XXX Should complete to file names here */
-		fprintf(stderr, "%d\n", argc);
 	}
 }
 
@@ -557,6 +568,7 @@ void reverse_search(rline_context_t * context) {
 	int start_at = 0;
 	fprintf(stderr, "\033[G\033[s");
 	fflush(stderr);
+	key_event_state_t kbd_state = {0};
 	while (1) {
 		/* Find matches */
 		char * match = "";
@@ -585,7 +597,8 @@ try_rev_search_again:
 		}
 		fprintf(stderr, "\033[u(reverse-i-search)`%s': %s\033[K", input, match);
 		fflush(stderr);
-		uint32_t key_sym = kbd_key(fgetc(stdin));
+
+		uint32_t key_sym = kbd_key(&kbd_state, fgetc(stdin));
 		switch (key_sym) {
 			case KEY_BACKSPACE:
 				if (collected > 0) {
@@ -704,6 +717,24 @@ int variable_char(uint8_t c) {
 	return 0;
 }
 
+void run_cmd(char ** args) {
+	int i = execvp(*args, args);
+	shell_command_t func = shell_find(*args);
+	if (func) {
+		int argc = 0;
+		while (args[argc]) {
+			argc++;
+		}
+		i = func(argc, args);
+	} else {
+		if (i != 0) {
+			fprintf(stderr, "%s: Command not found\n", *args);
+			i = 127;
+		}
+	}
+	exit(i);
+}
+
 int shell_exec(char * buffer, int buffer_size) {
 
 	/* Read previous history entries */
@@ -732,7 +763,6 @@ int shell_exec(char * buffer, int buffer_size) {
 
 	char quoted = 0;
 	char backtick = 0;
-	int _argc = 0;
 	char buffer_[512] = {0};
 	int collected = 0;
 
@@ -823,6 +853,11 @@ int shell_exec(char * buffer, int buffer_size) {
 						goto _done;
 					}
 					goto _just_add;
+				case '|':
+					if (!quoted && !backtick && !collected) {
+						collected = sprintf(buffer_, "%s", PIPE_TOKEN);
+						goto _new_arg;
+					}
 				default:
 					if (backtick) {
 						buffer_[collected] = '\\';
@@ -843,7 +878,6 @@ _new_arg:
 				add_argument(args, buffer_);
 				buffer_[0] = '\0';
 				collected = 0;
-				_argc++;
 			}
 
 _next:
@@ -872,13 +906,27 @@ _done:
 		break;
 	}
 
+	int cmdi = 0;
+	char ** arg_starts[100] = { &argv[0], NULL };
+	int argcs[100] = {0};
+
 	int i = 0;
 	foreach(node, args) {
 		char * c = node->value;
 
+		if (!strcmp(c, PIPE_TOKEN)) {
+			argv[i] = 0;
+			i++;
+			cmdi++;
+			arg_starts[cmdi] = &argv[i];
+			continue;
+		}
+
 		argv[i] = c;
 		i++;
+		argcs[cmdi]++;
 	}
+	argv[i] = NULL;
 
 	if (i == 0) {
 		return 0;
@@ -886,45 +934,78 @@ _done:
 
 	list_free(args);
 
-	argv[i] = NULL;
-	char * cmd = argv[0];
+	char * cmd = *arg_starts[0];
 	tokenid = i;
 
-	shell_command_t func = shell_find(argv[0]);
+	unsigned int child_pid;
+
+	int nowait = (!strcmp(argv[tokenid-1],"&"));
+	if (nowait) {
+		argv[tokenid-1] = NULL;
+	}
 
 	if (shell_force_raw) set_unbuffered();
 
-	if (func) {
-		return func(tokenid, argv);
-	} else {
-
-		int nowait = (!strcmp(argv[tokenid-1],"&"));
-		if (nowait) {
-			argv[tokenid-1] = NULL;
+	if (cmdi > 0) {
+		int last_output[2];
+		pipe(last_output);
+		child_pid = fork();
+		if (!child_pid) {
+			dup2(last_output[1], STDOUT_FILENO);
+			close(last_output[0]);
+			run_cmd(arg_starts[0]);
 		}
 
+		for (int j = 1; j < cmdi; ++j) {
+			int tmp_out[2];
+			pipe(tmp_out);
+			if (!fork()) {
+				dup2(tmp_out[1], STDOUT_FILENO);
+				dup2(last_output[0], STDIN_FILENO);
+				close(tmp_out[0]);
+				close(last_output[1]);
+				run_cmd(arg_starts[j]);
+			}
+			close(last_output[0]);
+			close(last_output[1]);
+			last_output[0] = tmp_out[0];
+			last_output[1] = tmp_out[1];
+		}
 
-		uint32_t f = fork();
-		if (getpid() != pid) {
-			int i = execvp(cmd, argv);
-			if (i != 0) {
-				fprintf(stderr, "%s: Command not found\n", argv[0]);
-				i = 127; /* Should be set to this anyway... */
-			}
-			exit(i);
+		if (!fork()) {
+			dup2(last_output[0], STDIN_FILENO);
+			close(last_output[1]);
+			run_cmd(arg_starts[cmdi]);
+		}
+		close(last_output[0]);
+		close(last_output[1]);
+
+		/* Now execute the last piece and wait on all of them */
+	} else {
+		shell_command_t func = shell_find(*arg_starts[0]);
+		if (func) {
+			return func(argcs[0], arg_starts[0]);
 		} else {
-			tcsetpgrp(0, f);
-			int ret_code = 0;
-			if (!nowait) {
-				child = f;
-				waitpid(f, &ret_code, 0);
-				child = 0;
+			child_pid = fork();
+			if (!child_pid) {
+				run_cmd(arg_starts[0]);
 			}
-			tcsetpgrp(0, getpid());
-			free(cmd);
-			return ret_code;
 		}
 	}
+
+	tcsetpgrp(STDIN_FILENO, child_pid);
+	int ret_code = 0;
+	if (!nowait) {
+		child = child_pid;
+		int pid;
+		do {
+			pid = waitpid(-1, &ret_code, 0);
+		} while (pid != -1 || (pid == -1 && errno != ECHILD));
+		child = 0;
+	}
+	tcsetpgrp(STDIN_FILENO, getpid());
+	free(cmd);
+	return ret_code;
 }
 
 void add_path_contents() {
@@ -1038,10 +1119,17 @@ uint32_t shell_cmd_cd(int argc, char * argv[]) {
 			goto cd_error;
 		} /* else success */
 	} else /* argc < 2 */ {
-		char home_path[512];
-		sprintf(home_path, "/home/%s", username);
-		if (chdir(home_path)) {
-			goto cd_error;
+		char * home = getenv("HOME");
+		if (home) {
+			if (chdir(home)) {
+				goto cd_error;
+			}
+		} else {
+			char home_path[512];
+			sprintf(home_path, "/home/%s", username);
+			if (chdir(home_path)) {
+				goto cd_error;
+			}
 		}
 	}
 	return 0;
@@ -1133,11 +1221,6 @@ uint32_t shell_cmd_set(int argc, char * argv[]) {
 	}
 }
 
-uint32_t shell_cmd_test_break(int argc, char * argv[]) {
-	fprintf(stderr, "This is a test.\n");
-	return 0;
-}
-
 void install_commands() {
 	shell_install_command("cd",      shell_cmd_cd);
 	shell_install_command("history", shell_cmd_history);
@@ -1145,5 +1228,4 @@ void install_commands() {
 	shell_install_command("test",    shell_cmd_test);
 	shell_install_command("exit",    shell_cmd_exit);
 	shell_install_command("set",     shell_cmd_set);
-	shell_install_command("test-break", shell_cmd_test_break);
 }

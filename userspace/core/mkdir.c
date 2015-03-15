@@ -1,3 +1,7 @@
+/* This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2013-2014 Kevin Lange
+ */
 /* vim:tabstop=4 shiftwidth=4 noexpandtab
  *
  * mkdir
@@ -5,8 +9,10 @@
  * Create a directory.
  */
 #include <stdio.h>
-#include <syscall.h>
 #include <stdint.h>
+
+#include <sys/stat.h>
+#include <sys/types.h>
 
 int main(int argc, char ** argv) {
 	if (argc < 2) {
@@ -14,7 +20,7 @@ int main(int argc, char ** argv) {
 		return 1;
 	}
 
-	syscall_mkdir(argv[1], 0x00);
+	mkdir(argv[1], 0x00);
 
 	return 0;
 }

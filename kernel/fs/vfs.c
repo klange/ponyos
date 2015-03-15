@@ -1,20 +1,31 @@
-/* vim: shiftwidth=4 tabstop=4 noexpandtab
+/* vim: tabstop=4 shiftwidth=4 noexpandtab
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2011-2014 Kevin Lange
+ * Copyright (C) 2014 Lioncash
+ * Copyright (C) 2012 Tianyi Wang
  *
  * Virtual File System
  *
  */
 #include <system.h>
 #include <fs.h>
+#include <printf.h>
 #include <list.h>
 #include <process.h>
 #include <logging.h>
+#include <hashmap.h>
 
 tree_t    * fs_tree = NULL; /* File system mountpoint tree */
 fs_node_t * fs_root = NULL; /* Pointer to the root mount fs_node (must be some form of filesystem, even ramdisk) */
 
+hashmap_t * fs_types = NULL;
+
 
 static struct dirent * readdir_mapper(fs_node_t *node, uint32_t index) {
 	tree_node_t * d = (tree_node_t *)node->device;
+
+	if (!d) return NULL;
 
 	if (index == 0) {
 		struct dirent * dir = malloc(sizeof(struct dirent));
@@ -67,11 +78,13 @@ static fs_node_t * vfs_mapper(void) {
  * @returns Bytes read
  */
 uint32_t read_fs(fs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+	if (!node) return -1;
+
 	if (node->read) {
 		uint32_t ret = node->read(node, offset, size, buffer);
 		return ret;
 	} else {
-		return 0;
+		return -1;
 	}
 }
 
@@ -85,12 +98,22 @@ uint32_t read_fs(fs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffe
  * @returns Bytes written
  */
 uint32_t write_fs(fs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+	if (!node) return -1;
+
 	if (node->write) {
 		uint32_t ret = node->write(node, offset, size, buffer);
 		return ret;
 	} else {
-		return 0;
+		return -1;
 	}
+}
+
+volatile uint8_t tmp_refcount_lock = 0;
+
+void vfs_lock(fs_node_t * node) {
+	spin_lock(&tmp_refcount_lock);
+	node->refcount = -1;
+	spin_unlock(&tmp_refcount_lock);
 }
 
 /**
@@ -100,6 +123,15 @@ uint32_t write_fs(fs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buff
  * @param flags Same as open, specifies read/write/append/truncate
  */
 void open_fs(fs_node_t *node, unsigned int flags) {
+
+	if (!node) return;
+
+	if (node->refcount >= 0) {
+		spin_lock(&tmp_refcount_lock);
+		node->refcount++;
+		spin_unlock(&tmp_refcount_lock);
+	}
+
 	if (node->open) {
 		node->open(node, flags);
 	}
@@ -112,9 +144,26 @@ void open_fs(fs_node_t *node, unsigned int flags) {
  */
 void close_fs(fs_node_t *node) {
 	assert(node != fs_root && "Attempted to close the filesystem root. kablooey");
-	if (node->close) {
-		node->close(node);
+
+	if (!node) {
+		debug_print(WARNING, "Double close? This isn't an fs_node.");
+		return;
 	}
+
+	if (node->refcount == -1) return;
+
+	spin_lock(&tmp_refcount_lock);
+	node->refcount--;
+	if (node->refcount == 0) {
+		debug_print(NOTICE, "Node refcount [%s] is now 0: %d", node->name, node->refcount);
+
+		if (node->close) {
+			node->close(node);
+		}
+
+		free(node);
+	}
+	spin_unlock(&tmp_refcount_lock);
 }
 
 /**
@@ -135,6 +184,8 @@ int chmod_fs(fs_node_t *node, int mode) {
  * @returns A dirent object.
  */
 struct dirent *readdir_fs(fs_node_t *node, uint32_t index) {
+	if (!node) return NULL;
+
 	if ((node->flags & FS_DIRECTORY) && node->readdir) {
 		struct dirent *ret = node->readdir(node, index);
 		return ret;
@@ -151,6 +202,8 @@ struct dirent *readdir_fs(fs_node_t *node, uint32_t index) {
  * @returns An fs_node that the caller can free
  */
 fs_node_t *finddir_fs(fs_node_t *node, char *name) {
+	if (!node) return NULL;
+
 	if ((node->flags & FS_DIRECTORY) && node->finddir) {
 		fs_node_t *ret = node->finddir(node, name);
 		return ret;
@@ -170,6 +223,8 @@ fs_node_t *finddir_fs(fs_node_t *node, char *name) {
  * @returns Depends on `request`
  */
 int ioctl_fs(fs_node_t *node, int request, void * argp) {
+	if (!node) return -1;
+
 	if (node->ioctl) {
 		return node->ioctl(node, request, argp);
 	} else {
@@ -291,18 +346,21 @@ int mkdir_fs(char *name, uint16_t permission) {
 	}
 
 	free(path);
-	free(parent);
+	close_fs(parent);
 
 	return 0;
 }
 
 fs_node_t *clone_fs(fs_node_t *source) {
-	if (!source) {
-		return NULL;
+	if (!source) return NULL;
+
+	if (source->refcount >= 0) {
+		spin_lock(&tmp_refcount_lock);
+		source->refcount++;
+		spin_unlock(&tmp_refcount_lock);
 	}
-	fs_node_t *n = malloc(sizeof(fs_node_t));
-	memcpy(n, source, sizeof(fs_node_t));
-	return n;
+
+	return source;
 }
 
 /**
@@ -432,8 +490,37 @@ void vfs_install(void) {
 	root->file = NULL; /* Nothing mounted as root */
 
 	tree_set_root(fs_tree, root);
+
+	fs_types = hashmap_create(5);
 }
 
+int vfs_register(char * name, vfs_mount_callback callback) {
+	if (hashmap_get(fs_types, name)) return 1;
+	hashmap_set(fs_types, name, (void *)(uintptr_t)callback);
+	return 0;
+}
+
+int vfs_mount_type(char * type, char * arg, char * mountpoint) {
+
+	vfs_mount_callback t = (vfs_mount_callback)(uintptr_t)hashmap_get(fs_types, type);
+	if (!t) {
+		debug_print(WARNING, "Unknown filesystem type: %s", type);
+		return -ENODEV;
+	}
+
+	fs_node_t * n = t(arg, mountpoint);
+
+	if (!n) return -EINVAL;
+
+	vfs_mount(mountpoint, n);
+
+	debug_print(NOTICE, "Mounted %s[%s] to %s: 0x%x", type, arg, mountpoint, n);
+	debug_print_vfs_tree();
+
+	return 0;
+}
+
+volatile uint8_t tmp_vfs_lock = 0;
 /**
  * vfs_mount - Mount a file system to the specified path.
  *
@@ -454,6 +541,10 @@ void * vfs_mount(char * path, fs_node_t * local_root) {
 		debug_print(ERROR, "Path must be absolute for mountpoint.");
 		return NULL;
 	}
+
+	spin_lock(&tmp_vfs_lock);
+
+	local_root->refcount = -1;
 
 	tree_node_t * ret_val = NULL;
 
@@ -481,12 +572,11 @@ void * vfs_mount(char * path, fs_node_t * local_root) {
 		struct vfs_entry * root = (struct vfs_entry *)root_node->value;
 		if (root->file) {
 			debug_print(WARNING, "Path %s already mounted, unmount before trying to mount something else.", path);
-			ret_val = root_node;
-			goto _vfs_cleanup;
 		}
 		root->file = local_root;
 		/* We also keep a legacy shortcut around for that */
 		fs_root = local_root;
+		ret_val = root_node;
 	} else {
 		tree_node_t * node = root_node;
 		char * at = i;
@@ -495,7 +585,7 @@ void * vfs_mount(char * path, fs_node_t * local_root) {
 				break;
 			}
 			int found = 0;
-			debug_print(INFO, "Searching for %s", at);
+			debug_print(NOTICE, "Searching for %s", at);
 			foreach(child, node->children) {
 				tree_node_t * tchild = (tree_node_t *)child->value;
 				struct vfs_entry * ent = (struct vfs_entry *)tchild->value;
@@ -507,7 +597,7 @@ void * vfs_mount(char * path, fs_node_t * local_root) {
 				}
 			}
 			if (!found) {
-				debug_print(INFO, "Did not find %s, making it.", at);
+				debug_print(NOTICE, "Did not find %s, making it.", at);
 				struct vfs_entry * ent = malloc(sizeof(struct vfs_entry));
 				ent->name = strdup(at);
 				ent->file = NULL;
@@ -518,40 +608,48 @@ void * vfs_mount(char * path, fs_node_t * local_root) {
 		struct vfs_entry * ent = (struct vfs_entry *)node->value;
 		if (ent->file) {
 			debug_print(WARNING, "Path %s already mounted, unmount before trying to mount something else.", path);
-			ret_val = node;
-			goto _vfs_cleanup;
 		}
 		ent->file = local_root;
+		ret_val = node;
 	}
 
-_vfs_cleanup:
 	free(p);
+	spin_unlock(&tmp_vfs_lock);
 	return ret_val;
 }
 
 void map_vfs_directory(char * c) {
 	fs_node_t * f = vfs_mapper();
 	struct vfs_entry * e = vfs_mount(c, f);
-	strcpy(f->name, e->name);
-	f->device = e;
+	if (!strcmp(c, "/")) {
+		f->device = fs_tree->root;
+	} else {
+		f->device = e;
+	}
 }
 
 
 void debug_print_vfs_tree_node(tree_node_t * node, size_t height) {
 	/* End recursion on a blank entry */
 	if (!node) return;
+	char * tmp = malloc(512);
+	memset(tmp, 0, 512);
+	char * c = tmp;
 	/* Indent output */
-	for (uint32_t i = 0; i < height; ++i) { kprintf("  "); }
+	for (uint32_t i = 0; i < height; ++i) {
+		c += sprintf(c, "  ");
+	}
 	/* Get the current process */
 	struct vfs_entry * fnode = (struct vfs_entry *)node->value;
 	/* Print the process name */
 	if (fnode->file) {
-		kprintf("%s → 0x%x (%s)", fnode->name, fnode->file, fnode->file->name);
+		c += sprintf(c, "%s → 0x%x (%s)", fnode->name, fnode->file, fnode->file->name);
 	} else {
-		kprintf("%s → (empty)", fnode->name);
+		c += sprintf(c, "%s → (empty)", fnode->name);
 	}
 	/* Linefeed */
-	kprintf("\n");
+	debug_print(NOTICE, "%s", tmp);
+	free(tmp);
 	foreach(child, node->children) {
 		/* Recursively print the children */
 		debug_print_vfs_tree_node(child->value, height + 1);
@@ -635,7 +733,7 @@ fs_node_t *get_mount_point(char * path, unsigned int path_depth, char **outpath,
  */
 fs_node_t *kopen(char *filename, uint32_t flags) {
 	/* Simple sanity checks that we actually have a file system */
-	if (!fs_root || !filename) {
+	if (!filename) {
 		return NULL;
 	}
 
@@ -656,6 +754,8 @@ fs_node_t *kopen(char *filename, uint32_t flags) {
 
 		/* Free the path */
 		free(path);
+
+		open_fs(root_clone, flags);
 
 		/* And return the clone */
 		return root_clone;
@@ -686,16 +786,16 @@ fs_node_t *kopen(char *filename, uint32_t flags) {
 	 * Dig through the (real) tree to find the file
 	 */
 	unsigned int depth = 0;
-	fs_node_t *node_ptr = malloc(sizeof(fs_node_t));
 	/* Find the mountpoint for this file */
-	fs_node_t *mount_point = get_mount_point(path, path_depth, &path_offset, &depth);
+	fs_node_t *node_ptr = get_mount_point(path, path_depth, &path_offset, &depth);
+
+	if (!node_ptr) return NULL;
 
 	if (path_offset >= path+path_len) {
 		free(path);
-		return mount_point;
+		open_fs(node_ptr, flags);
+		return node_ptr;
 	}
-	/* Set the active directory to the mountpoint */
-	memcpy(node_ptr, mount_point, sizeof(fs_node_t));
 	fs_node_t *node_next = NULL;
 	for (; depth < path_depth; ++depth) {
 		/* Search the active directory for the requested directory */

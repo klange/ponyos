@@ -1,7 +1,23 @@
-/* stty - set terminal mode	  	Author: Andy Tanenbaum */
-
 /*
-	Adapted to POSIX 1003.2 by Philip Homburg.
+ * This is the Minix implementation of stty.
+ *
+ * Author: Andy Tanenbaum
+ * Adapted to POSIX 1003.2 by: Philip Homburg
+ *
+ * Copyright (c) 1987,1997, 2006, Vrije Universiteit, Amsterdam, The
+ * Netherlands All rights reserved. Redistribution and use of the MINIX 3
+ * operating system in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
+ *
+ * Redistributions of source code must retain the above copyright notice, this
+ * list of conditions and the following disclaimer.  Redistributions in binary
+ * form must reproduce the above copyright notice, this list of conditions and
+ * the following disclaimer in the documentation and/or other materials
+ * provided with the distribution.  Neither the name of the Vrije Universiteit
+ * nor the names of the software authors or contributors may be used to
+ * endorse or promote products derived from this software without specific
+ * prior written permission.  Any deviations from these conditions require
+ * written permission from the copyright holder in advance
  */
 
 #ifdef __minix_vmd

@@ -1,4 +1,7 @@
 /* vim: tabstop=4 shiftwidth=4 noexpandtab
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2011-2014 Kevin Lange
  */
 
 #include <version.h>
@@ -13,7 +16,7 @@ char * __kernel_name = "ponyos";
 char * __kernel_version_format = "%d.%d.%d-%s";
 
 /* Version numbers X.Y.Z */
-int    __kernel_version_major = 2;
+int    __kernel_version_major = 3;
 int    __kernel_version_minor = 0;
 int    __kernel_version_lower = 0;
 
@@ -30,7 +33,7 @@ char * __kernel_version_suffix   = "mlp";
  *  * 0.5.X+ branches make up the "neopolitan flavors" family.
  *    0.5.0  is strawberry
  */
-char * __kernel_version_codename = "spike";
+char * __kernel_version_codename = "scootaloo";
 
 /* Build architecture (should probably not be
  * here as a string, but rather some sort of

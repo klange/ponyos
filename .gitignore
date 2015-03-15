@@ -19,6 +19,9 @@ kernel/symbols.s
 .ramdisk_size
 tmp/
 ramdisk_source/
+util/*.img
+util/*.vmdk
+util/*.vdi
 bootdisk.img
 bootloader/stage1.bin
 bootloader/stage2.bin
@@ -63,3 +66,5 @@ util/bin/*
 util/toaru-toolchain
 util/toaru-toolchain/*
 _hdd
+qemu-vlan0.pcap
+contrib

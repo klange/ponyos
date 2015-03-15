@@ -1,3 +1,7 @@
+/* This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2013-2014 Kevin Lange
+ */
 /*
  * clock-win
  *
@@ -9,56 +13,30 @@
 #include <assert.h>
 #include <math.h>
 #include <time.h>
-#include <syscall.h>
 #include <cairo.h>
-
-struct timeval {
-	unsigned int tv_sec;
-	unsigned int tv_usec;
-};
+#include <unistd.h>
+#include <sys/time.h>
 
 #define PI 3.14159265
 
-#include <ft2build.h>
-#include FT_FREETYPE_H
-#include FT_CACHE_H
-
-#include "lib/window.h"
+#include "lib/yutani.h"
 #include "lib/graphics.h"
 
-sprite_t * sprites[128];
-sprite_t alpha_tmp;
+static yutani_t * yctx;
+static yutani_window_t * window;
+static gfx_context_t * w_ctx;
+static int should_exit = 0;
 
-window_t * window;
-gfx_context_t * w_ctx;
-
-void init_sprite(int i, char * filename, char * alpha) {
-	sprites[i] = malloc(sizeof(sprite_t));
-	load_sprite(sprites[i], filename);
-	if (alpha) {
-		sprites[i]->alpha = 1;
-		load_sprite(&alpha_tmp, alpha);
-		sprites[i]->masks = alpha_tmp.bitmap;
-	} else {
-		sprites[i]->alpha = 0;
-	}
-	sprites[i]->blank = 0x0;
-}
-
-int32_t min(int32_t a, int32_t b) {
+static int32_t min(int32_t a, int32_t b) {
 	return (a < b) ? a : b;
 }
 
-int32_t max(int32_t a, int32_t b) {
+static int32_t max(int32_t a, int32_t b) {
 	return (a > b) ? a : b;
 }
-void draw(int secs) {
+
+static void draw(int secs) {
 	struct tm * timeinfo = localtime((time_t *)&secs);
-#if 0
-	printf("Hour: %d\n", timeinfo->tm_hour);
-	printf("Min:  %d\n", timeinfo->tm_min);
-	printf("Sec:  %d\n", timeinfo->tm_sec);
-#endif
 	draw_fill(w_ctx, rgba(0,0,0,0));
 
 	int stride = cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32, w_ctx->width);
@@ -127,53 +105,56 @@ void draw(int secs) {
 	cairo_surface_destroy(surface);
 
 	flip(w_ctx);
-}
-
-void resize_callback(window_t * win) {
-	reinit_graphics_window(w_ctx, window);
+	yutani_flip(yctx, window);
 }
 
 int main (int argc, char ** argv) {
-	setup_windowing();
-
 	int left   = 100;
 	int top    = 100;
 	int width  = 200;
 	int height = 200;
 
-	resize_window_callback = resize_callback;
+	yctx = yutani_init();
+	window = yutani_window_create(yctx, width, height);
+	yutani_window_move(yctx, window, left, top);
+	w_ctx = init_graphics_yutani_double_buffer(window);
+	yutani_window_update_shape(yctx, window, YUTANI_SHAPE_THRESHOLD_CLEAR);
 
-	/* Do something with a window */
-	window = window_create(left, top, width, height);
-	w_ctx = init_graphics_window_double_buffer(window);
+	while (!should_exit) {
+		yutani_msg_t * m = yutani_poll_async(yctx);
+		if (m) {
+			switch (m->type) {
+				case YUTANI_MSG_KEY_EVENT:
+					{
+						struct yutani_msg_key_event * ke = (void*)m->data;
+						if (ke->event.action == KEY_ACTION_DOWN && ke->event.keycode == 'q') {
+							should_exit = 1;
+							goto done;
+						}
+					}
+					break;
+				case YUTANI_MSG_SESSION_END:
+					should_exit = 1;
+					goto done;
+				default:
+					break;
+			}
+			free(m);
+		}
+		struct timeval now;
+		int last = 0;
 
-	struct timeval now;
-	int last = 0;
-
-	while (1) {
-		syscall_gettimeofday(&now, NULL); //time(NULL);
+		gettimeofday(&now, NULL); //time(NULL);
 		if (now.tv_sec != last) {
 			last = now.tv_sec;
 			draw(last);
 		}
-		char ch = 0;
-		w_keyboard_t * kbd;
-		do {
-			kbd = poll_keyboard_async();
-			if (kbd != NULL) {
-				ch = kbd->key;
-				free(kbd);
-			}
-		} while (kbd != NULL);
-		if (ch == 'q') {
-			goto done;
-			break;
-		}
-		syscall_nanosleep(0,50);
+		usleep(10000);
 	}
 done:
 
-	teardown_windowing();
+	yutani_close(yctx, window);
 
 	return 0;
 }
+

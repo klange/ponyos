@@ -1,7 +1,13 @@
+/* vim: tabstop=4 shiftwidth=4 noexpandtab
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2013-2014 Kevin Lange
+ */
 #include <system.h>
 #include <fs.h>
 #include <pipe.h>
 #include <logging.h>
+#include <printf.h>
 
 #include <ioctl.h>
 #include <termios.h>
@@ -65,7 +71,6 @@ static void output_process(pty_t * pty, uint8_t c) {
 
 static void input_process(pty_t * pty, uint8_t c) {
 	if (pty->tios.c_lflag & ICANON) {
-		debug_print(INFO, "Processing for character %d in canon mode", c);
 		if (c == pty->tios.c_cc[VKILL]) {
 			while (pty->canon_buflen > 0) {
 				pty->canon_buflen--;
@@ -115,6 +120,14 @@ static void input_process(pty_t * pty, uint8_t c) {
 			}
 			return;
 		}
+		if (c == pty->tios.c_cc[VEOF]) {
+			if (pty->canon_buflen) {
+				dump_input_buffer(pty);
+			} else {
+				ring_buffer_interrupt(pty->in);
+			}
+			return;
+		}
 		pty->canon_buffer[pty->canon_buflen] = c;
 		if (pty->tios.c_lflag & ECHO) {
 			output_process(pty, c);
@@ -137,7 +150,6 @@ static void input_process(pty_t * pty, uint8_t c) {
 }
 
 int pty_ioctl(pty_t * pty, int request, void * argp) {
-	debug_print(INFO, "Incoming IOCTL request %d", request);
 	switch (request) {
 		case IOCTLDTYPE:
 			/*
@@ -186,9 +198,8 @@ int pty_ioctl(pty_t * pty, int request, void * argp) {
 			memcpy(&pty->tios, argp, sizeof(struct termios));
 			return 0;
 		default:
-			return -1; /* TODO EINV... something or other */
+			return -EINVAL;
 	}
-	return -1;
 }
 
 #define MIN(a,b) ((a) < (b) ? (a) : (b))
@@ -372,21 +383,11 @@ pty_t * pty_new(struct winsize * size) {
 	return pty;
 }
 
-int openpty(int * master, int * slave, char * name, void * _ign0, void * size) {
-	/* We require a place to put these when we are done. */
-	if (!master || !slave) return -1;
-	if (validate_safe(master) || validate_safe(slave)) return -1;
-	if (validate_safe(size)) return -1;
-
-	/* Create a new pseudo terminal */
+int pty_create(void *size, fs_node_t ** fs_master, fs_node_t ** fs_slave) {
 	pty_t * pty = pty_new(size);
 
-	/* Append the master and slave to the calling process */
-	*master = process_append_fd((process_t *)current_process, pty->master);
-	*slave  = process_append_fd((process_t *)current_process, pty->slave);
+	*fs_master = pty->master;
+	*fs_slave  = pty->slave;
 
-	/* Return success */
 	return 0;
 }
-
-

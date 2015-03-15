@@ -1,5 +1,8 @@
 /* vim: tabstop=4 shiftwidth=4 noexpandtab
- * 
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2011-2014 Kevin Lange
+ *
  * General-purpose tree implementation
  */
 
@@ -149,6 +152,20 @@ void tree_remove(tree_t * tree, tree_node_t * node) {
 		((tree_node_t *)child->value)->parent = parent;
 	}
 	list_merge(parent->children, node->children);
+	free(node);
+}
+
+void tree_remove_reparent_root(tree_t * tree, tree_node_t * node) {
+	/* Remove this node and move its children into the root children */
+	tree_node_t * parent = node->parent;
+	if (!parent) return;
+	tree->nodes--;
+	list_delete(parent->children, list_find(parent->children, node));
+	foreach(child, node->children) {
+		/* Reassign the parents */
+		((tree_node_t *)child->value)->parent = tree->root;
+	}
+	list_merge(tree->root->children, node->children);
 	free(node);
 }
 

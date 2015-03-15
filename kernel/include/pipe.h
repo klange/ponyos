@@ -15,11 +15,13 @@ typedef struct _pipe_device {
 	size_t size;
 	size_t refcount;
 	uint8_t volatile lock;
-	list_t * wait_queue;
+	list_t * wait_queue_readers;
+	list_t * wait_queue_writers;
 	int dead;
 } pipe_device_t;
 
 fs_node_t * make_pipe(size_t size);
 int pipe_size(fs_node_t * node);
+int pipe_unsize(fs_node_t * node);
 
 #endif

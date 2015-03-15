@@ -1,4 +1,8 @@
 /* vim: tabstop=4 shiftwidth=4 noexpandtab
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2011-2014 Kevin Lange
+ * Copyright (C) 2012 Markus Schober
  *
  * Task Switching and Management Functions
  *
@@ -37,10 +41,8 @@ clone_directory(
 	memset(dir, 0, sizeof(page_directory_t));
 	dir->ref_count = 1;
 
-	/* Calculate the physical address offset */
-	uintptr_t offset = (uintptr_t)dir->physical_tables - (uintptr_t)dir;
 	/* And store it... */
-	dir->physical_address = phys + offset;
+	dir->physical_address = phys;
 	uint32_t i;
 	for (i = 0; i < 1024; ++i) {
 		/* Copy each table */
@@ -90,46 +92,29 @@ void release_directory(page_directory_t * dir) {
 	}
 }
 
-extern char * default_name;
-
-void reap_process(process_t * proc) {
-	debug_print(INFO, "Reaping process %d; mem before = %d", proc->id, memory_use());
-	list_free(proc->wait_queue);
-	free(proc->wait_queue);
-	list_free(proc->signal_queue);
-	free(proc->signal_queue);
-	free(proc->wd_name);
-	debug_print(INFO, "Releasing shared memory for %d", proc->id);
-	shm_release_all(proc);
-	free(proc->shm_mappings);
-	debug_print(INFO, "Freeing more mems %d", proc->id);
-	free(proc->name);
-	if (proc->signal_kstack) {
-		free(proc->signal_kstack);
-	}
-	debug_print(INFO, "Dec'ing fds for %d", proc->id);
-	proc->fds->refs--;
-	if (proc->fds->refs == 0) {
-		debug_print(INFO, "Reached 0, all dependencies are closed for %d's file descriptors and page directories", proc->id);
-		release_directory(proc->thread.page_directory);
-		debug_print(INFO, "Going to clear out the file descriptors %d", proc->id);
-		for (uint32_t i = 0; i < proc->fds->length; ++i) {
-			if (proc->fds->entries[i]) {
-				//close_fs(proc->fds->entries[i]);
-				//free(proc->fds->entries[i]);
-			}
-			//close_fs(proc->fds->entries[i]);
+void release_directory_for_exec(page_directory_t * dir) {
+	uint32_t i;
+	/* This better be the only owner of this directory... */
+	for (i = 0; i < 1024; ++i) {
+		if (!dir->tables[i] || (uintptr_t)dir->tables[i] == (uintptr_t)0xFFFFFFFF) {
+			continue;
 		}
-		debug_print(INFO, "... and their storage %d", proc->id);
-		free(proc->fds->entries);
-		free(proc->fds);
-		debug_print(INFO, "... and the kernel stack (hope this ain't us) %d", proc->id);
-		free((void *)(proc->image.stack - KERNEL_STACK_SIZE));
+		if (kernel_directory->tables[i] != dir->tables[i]) {
+			if (i * 0x1000 * 1024 < USER_STACK_BOTTOM) {
+				for (uint32_t j = 0; j < 1024; ++j) {
+					if (dir->tables[i]->pages[j].frame) {
+						free_frame(&(dir->tables[i]->pages[j]));
+					}
+				}
+				dir->physical_tables[i] = 0;
+				free(dir->tables[i]);
+				dir->tables[i] = 0;
+			}
+		}
 	}
-	debug_print(INFO, "Reaped  process %d; mem after = %d", proc->id, memory_use());
-	debug_print_process_tree();
-	set_reaped(proc);
 }
+
+extern char * default_name;
 
 /*
  * Clone a page table
@@ -180,6 +165,7 @@ void tasking_install(void) {
 	initialize_process_tree();
 	/* Spawn the initial process */
 	current_process = spawn_init();
+	kernel_idle_task = spawn_kidle();
 	/* Initialize the paging environment */
 #if 0
 	set_process_environment((process_t *)current_process, current_directory);
@@ -237,28 +223,6 @@ uint32_t fork(void) {
 
 	new_proc->thread.eip = (uintptr_t)&return_to_userspace;
 
-	/* Clear page table tie-ins for shared memory mappings */
-#if 0
-	assert((new_proc->shm_mappings->length == 0) && "Spawned process had shared memory mappings!");
-	foreach (n, current_process->shm_mappings) {
-		shm_mapping_t * mapping = (shm_mapping_t *)n->value;
-
-		for (uint32_t i = 0; i < mapping->num_vaddrs; i++) {
-			/* Get the vpage address (it's the same for the cloned directory)... */
-			uintptr_t vpage = mapping->vaddrs[i];
-			assert(!(vpage & 0xFFF) && "shm_mapping_t contained a ptr to the middle of a page (bad)");
-
-			/* ...and from that, the cloned dir's page entry... */
-			page_t * page = get_page(vpage, 0, new_proc->thread.page_directory);
-			assert(test_frame(page->frame * 0x1000) && "ptr wasn't mapped in?");
-
-			/* ...which refers to a bogus frame that we don't want. */
-			clear_frame(page->frame * 0x1000);
-			memset(page, 0, sizeof(page_t));
-		}
-	}
-#endif
-
 	/* Add the new process to the ready queue */
 	make_process_ready(new_proc);
 
@@ -273,7 +237,9 @@ int create_kernel_tasklet(tasklet_t tasklet, char * name, void * argp) {
 
 	uintptr_t esp, ebp;
 
-	current_process->syscall_registers->eax = 0;
+	if (current_process->syscall_registers) {
+		current_process->syscall_registers->eax = 0;
+	}
 
 	page_directory_t * directory = kernel_directory;
 	/* Spawn a new process from this one */
@@ -285,14 +251,18 @@ int create_kernel_tasklet(tasklet_t tasklet, char * name, void * argp) {
 	/* Read the instruction pointer */
 
 
-	struct regs r;
-	memcpy(&r, current_process->syscall_registers, sizeof(struct regs));
-	new_proc->syscall_registers = &r;
+	if (current_process->syscall_registers) {
+		struct regs r;
+		memcpy(&r, current_process->syscall_registers, sizeof(struct regs));
+		new_proc->syscall_registers = &r;
+	}
 
 	esp = new_proc->image.stack;
 	ebp = esp;
 
-	new_proc->syscall_registers->eax = 0;
+	if (current_process->syscall_registers) {
+		new_proc->syscall_registers->eax = 0;
+	}
 	new_proc->is_tasklet = 1;
 	new_proc->name = name;
 
@@ -406,24 +376,9 @@ uint32_t getpid(void) {
  * perform standard task switching.
  */
 void switch_task(uint8_t reschedule) {
-	int pause_after = 0;
 	if (!current_process) {
 		/* Tasking is not yet installed. */
 		return;
-	}
-	if (!process_available()) {
-		/* There is no process available in the queue, do not bother switching */
-		if (!current_process->running) {
-			while (1) {
-				IRQ_RES;
-				PAUSE;
-			}
-		}
-		if (!reschedule) {
-			pause_after = 1;
-		} else {
-			return;
-		}
 	}
 	if (!current_process->running) {
 		switch_next();
@@ -437,12 +392,6 @@ void switch_task(uint8_t reschedule) {
 	if (eip == 0x10000) {
 		/* Returned from EIP after task switch, we have
 		 * finished switching. */
-		while (should_reap()) {
-			process_t * proc = next_reapable_process();
-			if (proc) {
-				reap_process(proc);
-			}
-		}
 		fix_signal_stacks();
 
 		/* XXX: Signals */
@@ -467,15 +416,9 @@ void switch_task(uint8_t reschedule) {
 	/* Save floating point state */
 	switch_fpu();
 
-	if (reschedule) {
+	if (reschedule && current_process != kernel_idle_task) {
 		/* And reinsert it into the ready queue */
 		make_process_ready((process_t *)current_process);
-	} else if (pause_after) {
-		set_kernel_stack(frozen_stack);
-		while (1) {
-			IRQ_RES;
-			PAUSE;
-		}
 	}
 
 	/* Switch to the next task */
@@ -490,12 +433,6 @@ void switch_task(uint8_t reschedule) {
 void switch_next(void) {
 	uintptr_t esp, ebp, eip;
 	/* Get the next available process */
-	while (!process_available()) {
-		/* Uh, no. */
-		IRQ_RES;
-		PAUSE;
-		return;
-	}
 	current_process = next_ready_process();
 	/* Retreive the ESP/EBP/EIP */
 	eip = current_process->thread.eip;
@@ -565,7 +502,7 @@ enter_user_jmp(uintptr_t location, int argc, char ** argv, uintptr_t stack) {
 	PUSH(stack, int, argc);
 
 	asm volatile(
-			"mov %3, %%esp\n"
+			"mov %1, %%esp\n"
 			"pushl $0xDECADE21\n"  /* Magic */
 			"mov $0x23, %%ax\n"    /* Segment selector */
 			"mov %%ax, %%ds\n"
@@ -582,7 +519,7 @@ enter_user_jmp(uintptr_t location, int argc, char ** argv, uintptr_t stack) {
 			"pushl $0x1B\n"
 			"pushl %0\n"           /* Push the entry point */
 			"iret\n"
-			: : "m"(location), "r"(argc), "r"(argv), "r"(stack) : "%ax", "%esp", "%eax");
+			: : "m"(location), "r"(stack) : "%ax", "%esp", "%eax");
 }
 
 /*
@@ -597,11 +534,14 @@ void task_exit(int retval) {
 		switch_next();
 		return;
 	}
-	current_process->status   = retval;
-	current_process->finished = 1;
-	debug_print(INFO, "[%d] Waking up %d processes...", getpid(), current_process->wait_queue->length);
-	wakeup_queue(current_process->wait_queue);
-	make_process_reapable((process_t *)current_process);
+	cleanup_process((process_t *)current_process, retval);
+
+	process_t * parent = process_get_parent((process_t *)current_process);
+
+	if (parent) {
+		wakeup_queue(parent->wait_queue);
+	}
+
 	switch_next();
 }
 

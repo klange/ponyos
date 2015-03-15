@@ -1,5 +1,8 @@
 /* vim: tabstop=4 shiftwidth=4 noexpandtab
- * 
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2011-2014 Kevin Lange
+ *
  * General-purpose list implementations.
  */
 
@@ -32,15 +35,20 @@ void list_free(list_t * list) {
 }
 
 void list_append(list_t * list, node_t * node) {
+	assert(!(node->next || node->prev) && "Node is already in a list.");
 	node->next = NULL;
 	/* Insert a node onto the end of a list */
-	if (!list->tail) {
+	node->owner = list;
+	if (!list->length) {
 		list->head = node;
+		list->tail = node;
 		node->prev = NULL;
-	} else {
-		list->tail->next = node;
-		node->prev = list->tail;
+		node->next = NULL;
+		list->length++;
+		return;
 	}
+	list->tail->next = node;
+	node->prev = list->tail;
 	list->tail = node;
 	list->length++;
 }
@@ -51,18 +59,22 @@ node_t * list_insert(list_t * list, void * item) {
 	node->value = item;
 	node->next  = NULL;
 	node->prev  = NULL;
+	node->owner = NULL;
 	list_append(list, node);
 
 	return node;
 }
 
 void list_append_after(list_t * list, node_t * before, node_t * node) {
-	if (!list->tail) {
+	assert(!(node->next || node->prev) && "Node is already in a list.");
+	node->owner = list;
+	if (!list->length) {
 		list_append(list, node);
 		return;
 	}
 	if (before == NULL) {
 		node->next = list->head;
+		node->prev = NULL;
 		list->head->prev = node;
 		list->head = node;
 		list->length++;
@@ -84,7 +96,44 @@ node_t * list_insert_after(list_t * list, node_t * before, void * item) {
 	node->value = item;
 	node->next  = NULL;
 	node->prev  = NULL;
+	node->owner = NULL;
 	list_append_after(list, before, node);
+	return node;
+}
+
+void list_append_before(list_t * list, node_t * after, node_t * node) {
+	assert(!(node->next || node->prev) && "Node is already in a list.");
+	node->owner = list;
+	if (!list->length) {
+		list_append(list, node);
+		return;
+	}
+	if (after == NULL) {
+		node->next = NULL;
+		node->prev = list->tail;
+		list->tail->next = node;
+		list->tail = node;
+		list->length++;
+		return;
+	}
+	if (after == list->head) {
+		list->head = node;
+	} else {
+		after->prev->next = node;
+		node->prev = after->prev;
+	}
+	node->next = after;
+	after->prev = node;
+	list->length++;
+}
+
+node_t * list_insert_before(list_t * list, node_t * after, void * item) {
+	node_t * node = malloc(sizeof(node_t));
+	node->value = item;
+	node->next  = NULL;
+	node->prev  = NULL;
+	node->owner = NULL;
+	list_append_before(list, after, node);
 	return node;
 }
 
@@ -131,6 +180,7 @@ void list_remove(list_t * list, size_t index) {
 
 void list_delete(list_t * list, node_t * node) {
 	/* remove node from the list */
+	assert(node->owner == list && "Tried to remove a list node from a list it does not belong to.");
 	if (node == list->head) {
 		list->head = node->next;
 	}
@@ -145,6 +195,7 @@ void list_delete(list_t * list, node_t * node) {
 	}
 	node->prev = NULL;
 	node->next = NULL;
+	node->owner = NULL;
 	list->length--;
 }
 
@@ -155,14 +206,14 @@ node_t * list_pop(list_t * list) {
 	 * */
 	if (!list->tail) return NULL;
 	node_t * out = list->tail;
-	list_delete(list, list->tail);
+	list_delete(list, out);
 	return out;
 }
 
 node_t * list_dequeue(list_t * list) {
 	if (!list->head) return NULL;
 	node_t * out = list->head;
-	list_delete(list, list->head);
+	list_delete(list, out);
 	return out;
 }
 
@@ -178,6 +229,12 @@ list_t * list_copy(list_t * original) {
 
 void list_merge(list_t * target, list_t * source) {
 	/* Destructively merges source into target */
+	foreach(node, source) {
+		node->owner = target;
+	}
+	if (source->head) {
+		source->head->prev = target->tail;
+	}
 	if (target->tail) {
 		target->tail->next = source->head;
 	} else {
