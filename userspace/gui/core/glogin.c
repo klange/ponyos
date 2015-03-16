@@ -36,7 +36,7 @@ uint16_t win_height;
 
 int uid = 0;
 
-#define LOGO_FINAL_OFFSET 100
+#define LOGO_FINAL_OFFSET 150
 
 int center_x(int x) {
 	return (win_width - x) / 2;
