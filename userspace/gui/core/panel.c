@@ -49,7 +49,7 @@
 #define FOCUS_COLOR   rgb(255,255,255)
 #define TEXT_COLOR    rgb(230,230,230)
 
-#define GRADIENT_AT(y) premultiply(rgba(72, 167, 255, ((24-(y))*160)/24))
+#define GRADIENT_AT(y) premultiply(rgba(180, 133, 223, ((24-(y))*160)/24))
 
 #define ALTTAB_WIDTH  250
 #define ALTTAB_HEIGHT 70
@@ -65,7 +65,7 @@
 #define APPMENU_PAD_RIGHT 1
 #define APPMENU_PAD_BOTTOM 1
 #define APPMENU_BACKGROUND premultiply(rgba(255,255,255,240))
-#define APPMENU_HIGHLIGHT rgb(50,50,200)
+#define APPMENU_HIGHLIGHT rgb(201,169,208)
 #define APPMENU_ITEM_HEIGHT 24
 
 static yutani_t * yctx;
