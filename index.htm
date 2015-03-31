@@ -39,8 +39,8 @@
 		<div class="container">
 			<div class="hero-unit">
 				<center>
-					<h1>PonyOS 2.0</h1>
-					<p>A Hobby Operating System for Everypony!</p>
+					<h1>PonyOS 3.0</h1>
+					<p>BFG Edition</p>
 					<img src="assets/img/logo.png">
 				</center>
 			</div>
@@ -48,33 +48,31 @@
 
 		<div class="container">
 			<h1>What is PonyOS?</h1>
-			<p>PonyOS is a <s>new</s> year-old Unix-like operating system.</p>
+			<p>PonyOS is a hobby Unix-like operating system.</p>
 
 			<h2>Is PonyOS a Linux distribution?</h2>
 			<p>No! PonyOS uses its own kernel, built from scratch.</p>
 
 			<a name="screenshots"></a>
 			<h2>Screenshots</h2>
-			<iframe class="imgur-album" width="100%" height="550" frameborder="0" src="http://imgur.com/a/qbQ5U/embed"></iframe>
+			<iframe class="imgur-album" width="100%" height="550" frameborder="0" src="http://imgur.com/a/vZ6tV/embed"></iframe>
 
 			<div></div>
 
 			<a name="whats_new"></a>
-			<h2>What's New in 2.0?</h2>
-			<p>We wanted to make sure that this year's PonyOS offered the best in pony operating system experience, so here's what we've added:</p>
-
+			<h2>What's New in 3.0?</h2>
+			<p>PonyOS 3.0 is the biggest improvement in PonyOS history:</p>
 			<ul>
-				<li><b>GCC</b> - Compile your own PonyOS apps, right from within PonyOS!</li>
-				<li><b>2048</b> - Play the most addicting game of the past three weeks, from your PonyOS terminal!</li>
-				<li><b>New Modular Kernel</b> - It's like the old kernel, but modular!</li>
-				<li><b>Security Fixes</b> - Experts agree, security holes suck, and we fixed some of them!</li>
+				<li><b>Brand New Window Compositor</b> - This one doesn't eat your CPU.</li>
+				<li><b>All Sorts of Unix Stuff</b> - Like pipes and whatnot.</li>
+				<li><b>Python</b> - The language, not the snake. No snakes are included in PonyOS.</li>
+				<li><b>Satantic Rituals</b> - Now shipping with shareware Doom!</li>
 			</ul>
 
 			<a name="downloads"></a>
 			<h2>Downloads</h2>
 			<h3><img src="assets/img/elementary-disk-icon.png"> Hard Disk Images</h3>
-			<p><a href="https://dl.dropboxusercontent.com/u/44305966/ponyos2-disk.tar.gz">Raw disk image in a tarball (1GB)</a> - 154MB download; MD5: b14d7ce7bc6879d38bd8a2ce74bf4900</p>
-			<p><a href="http://frayed.lostcarrier.net/ponyos2-disk.tar.gz">Mirror #1</a></p>
+			<p><a href="https://www.dropbox.com/s/j1ejdldnfj8z39i/ponyos3-disk.tar.gz?dl=0">Raw disk image in a tarball (1GB)</a> - 189MB download; MD5: 022bdf425d06ee44c6b1c81a27d9aa81</p>
 
 			<h2>Using the Disk Image</h2>
 			<p>The raw disk image can be used with QEMU. Other emulators may work but are not supported.</p>
@@ -86,8 +84,8 @@
 
 			<h2>Building from Scratch</h2>
 			<p>To build PonyOS from scratch, please use an Ubuntu or Debian-derived host.</p>
-			<p>Clone from <a href="https://github.com/klange/ponyos">our git repository</a> and then run <code>./build.sh</code>. Note that we do not support building PonyOS from scratch and this process may not work. Complete builds may take anywhere from thirty minutes to many hours, depending on your hardware.</p>
-			<p>The standard build set up does not include GCC or Vim. Extra scripts are available to build these, but they take work.</p>
+			<p>Clone from <a href="https://github.com/klange/ponyos">our git repository</a> and then run <code>make toolchain</code>. Note that we do not support building PonyOS from scratch and this process may not work. Complete builds may take anywhere from thirty minutes to many hours, depending on your hardware.</p>
+			<p>The standard build set up does not include GCC. Use the additional <code>toolchain/cross-gcc.sh</code> to build a native GCC if you so desire.</p>
 
 			<h2>Git Repository</h2>
 			<p>PonyOS is developed through Github. You can find our repository at <a href="http://github.com/klange/ponyos">klange/ponyos</a>.</p>
@@ -97,25 +95,23 @@
 			<p>Yes! PonyOS works on many different machines.</p>
 
 			<h3>Is this <i>really</i> not a Linux distro?</h3>
-			<p>Yes! PonyOS uses a fully custom kernel, which is why it doesn't support things like networking or USB drives.</p>
+			<p>It's been two years - if you still don't believe us, we're not sure what to do.</p>
 
 			<h3>Does PonyOS come with a compiler?</h3>
 			<p>Yes! PonyOS comes with a fully functioning installation of GCC!</p>
-
-			<h3>Does PonyOS come with a PDF viewer?</h3>
-			<p>No.</p>
+			<p>PonyOS 3.0 BFG Edition also comes with Python 2.7.</p>
 
 			<h3>Can I put this on a bootable USB drive?</h3>
-			<p>No.</p>
+			<p>No. Please stop asking this.</p>
 
-			<h3>Can I send you hatemail?</h3>
-			<p>No.</p>
+			<h3>How do I move windows?</h3>
+			<p>You can drag them by their title bars or hold <code>Alt</code> and the click and drag anywhere.</p>
 
-			<h3>Why is this release so much bigger than the last one?</h3>
-			<p>GCC is, like, really big.</p>
+			<h3>Does PonyOS support networking?</h3>
+			<p>Experimental kernel support for TCP is included in this release, but you can't use it for anything.</p>
 
-			<h3>When can we expect the next release of PonyOS?</h3>
-			<p>PonyOS has an annual release cycle.</p>
+			<h3>I started an application and it doesn't have a title bar, how do I exit it?</h3>
+			<p>Try mashing <code>q</code> or <code>esc</code> or possibly even <code>Alt+F4</code>. One of those should work. If all else fails, <code>kill</code> it.</p>
 
 		</div>
 
@@ -152,26 +148,15 @@
 			<a name="contact"></a>
 			<h2>Contact</h2>
 			<p>You can find me on Twitter <a href="http://twitter.profile.dakko.us">@kevinlange</a>.</p>
-			<p>PonyOS is based on <a href="http://toaruos.org">とあるOS</a>.</p>
+			<p>PonyOS is a distribution of <a href="http://toaruos.org">とあるOS</a>.</p>
 			<p style="color: #555555">Happy April Fools Day</p>
 			<center>
-				<small>Copyright 2013-2014 Kevin Lange</small>
+				<small>Copyright 2013-2015 Kevin Lange</small>
 			</center>
 		</div>
 
 		<script src="assets/js/jquery.js"></script>
-		<script src="assets/js/bootstrap-transition.js"></script>
-		<script src="assets/js/bootstrap-alert.js"></script>
-		<script src="assets/js/bootstrap-modal.js"></script>
-		<script src="assets/js/bootstrap-dropdown.js"></script>
-		<script src="assets/js/bootstrap-scrollspy.js"></script>
-		<script src="assets/js/bootstrap-tab.js"></script>
-		<script src="assets/js/bootstrap-tooltip.js"></script>
-		<script src="assets/js/bootstrap-popover.js"></script>
-		<script src="assets/js/bootstrap-button.js"></script>
-		<script src="assets/js/bootstrap-collapse.js"></script>
-		<script src="assets/js/bootstrap-carousel.js"></script>
-		<script src="assets/js/bootstrap-typeahead.js"></script>
+		<script src="assets/js/bootstrap.js"></script>
 		<script>
 			(function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
 			(i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
