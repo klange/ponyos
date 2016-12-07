@@ -26,7 +26,7 @@ page_directory_t *current_directory;
 /*
  * Clone a page directory and its contents.
  * (If you do not intend to clone the contents, do it yourself!)
- * 
+ *
  * @param  src Pointer to source directory to clone from.
  * @return A pointer to a new directory.
  */
@@ -143,8 +143,8 @@ clone_table(
 		if (src->pages[i].present)	table->pages[i].present = 1;
 		if (src->pages[i].rw)		table->pages[i].rw = 1;
 		if (src->pages[i].user)		table->pages[i].user = 1;
-		if (src->pages[i].accessed)	table->pages[i].accessed = 1;
-		if (src->pages[i].dirty)	table->pages[i].dirty = 1;
+		if (src->pages[i].writethrough)	table->pages[i].writethrough = 1;
+		if (src->pages[i].cachedisable)	table->pages[i].cachedisable = 1;
 		/* Copy the contents of the page from the old table to the new one */
 		copy_page_physical(src->pages[i].frame * 0x1000, table->pages[i].frame * 0x1000);
 	}
@@ -199,7 +199,7 @@ uint32_t fork(void) {
 	assert(directory && "Could not allocate a new page directory!");
 	/* Spawn a new process from this one */
 	debug_print(INFO,"\033[1;32mALLOC {\033[0m");
-	process_t * new_proc = spawn_process(current_process);
+	process_t * new_proc = spawn_process(current_process, 0);
 	debug_print(INFO,"\033[1;32m}\033[0m");
 	assert(new_proc && "Could not allocate a new process!");
 	/* Set the new process' page directory to clone */
@@ -243,7 +243,7 @@ int create_kernel_tasklet(tasklet_t tasklet, char * name, void * argp) {
 
 	page_directory_t * directory = kernel_directory;
 	/* Spawn a new process from this one */
-	process_t * new_proc = spawn_process(current_process);
+	process_t * new_proc = spawn_process(current_process, 0);
 	assert(new_proc && "Could not allocate a new process!");
 	/* Set the new process' page directory to the original process' */
 	set_process_environment(new_proc, directory);
@@ -302,7 +302,7 @@ clone(uintptr_t new_stack, uintptr_t thread_func, uintptr_t arg) {
 	assert(parent && "Cloned from nothing??");
 	page_directory_t * directory = current_directory;
 	/* Spawn a new process from this one */
-	process_t * new_proc = spawn_process(current_process);
+	process_t * new_proc = spawn_process(current_process, 1);
 	assert(new_proc && "Could not allocate a new process!");
 	/* Set the new process' page directory to the original process' */
 	set_process_environment(new_proc, directory);
@@ -328,10 +328,8 @@ clone(uintptr_t new_stack, uintptr_t thread_func, uintptr_t arg) {
 	new_proc->syscall_registers->eip = thread_func;
 
 	/* Push arg, bogus return address onto the new thread's stack */
-	new_stack -= sizeof(uintptr_t);
-	*((uintptr_t *)new_stack) = arg;
-	new_stack -= sizeof(uintptr_t);
-	*((uintptr_t *)new_stack) = THREAD_RETURN;
+	PUSH(new_stack, uintptr_t, arg);
+	PUSH(new_stack, uintptr_t, THREAD_RETURN);
 
 	/* Set esp, ebp, and eip for the new thread */
 	new_proc->syscall_registers->esp = new_stack;
@@ -343,10 +341,6 @@ clone(uintptr_t new_stack, uintptr_t thread_func, uintptr_t arg) {
 	new_proc->thread.ebp = ebp;
 
 	new_proc->is_tasklet = parent->is_tasklet;
-
-	free(new_proc->fds);
-	new_proc->fds = current_process->fds;
-	new_proc->fds->refs++;
 
 	new_proc->thread.eip = (uintptr_t)&return_to_userspace;
 
@@ -438,6 +432,7 @@ void switch_next(void) {
 	eip = current_process->thread.eip;
 	esp = current_process->thread.esp;
 	ebp = current_process->thread.ebp;
+	unswitch_fpu();
 
 	/* Validate */
 	if ((eip < (uintptr_t)&code) || (eip > (uintptr_t)heap_end)) {
@@ -482,8 +477,9 @@ void switch_next(void) {
 			"jmp *%%ebx"
 			: : "r" (eip), "r" (esp), "r" (ebp), "r" (current_directory->physical_address)
 			: "%ebx", "%esp", "%eax");
-
 }
+
+extern void enter_userspace(uintptr_t location, uintptr_t stack);
 
 /*
  * Enter ring 3 and jump to `location`.
@@ -500,26 +496,7 @@ enter_user_jmp(uintptr_t location, int argc, char ** argv, uintptr_t stack) {
 
 	PUSH(stack, uintptr_t, (uintptr_t)argv);
 	PUSH(stack, int, argc);
-
-	asm volatile(
-			"mov %1, %%esp\n"
-			"pushl $0xDECADE21\n"  /* Magic */
-			"mov $0x23, %%ax\n"    /* Segment selector */
-			"mov %%ax, %%ds\n"
-			"mov %%ax, %%es\n"
-			"mov %%ax, %%fs\n"
-			"mov %%ax, %%gs\n"
-			"mov %%esp, %%eax\n"   /* Stack -> EAX */
-			"pushl $0x23\n"        /* Segment selector again */
-			"pushl %%eax\n"
-			"pushf\n"              /* Push flags */
-			"popl %%eax\n"         /* Fix the Interrupt flag */
-			"orl  $0x200, %%eax\n"
-			"pushl %%eax\n"
-			"pushl $0x1B\n"
-			"pushl %0\n"           /* Push the entry point */
-			"iret\n"
-			: : "m"(location), "r"(stack) : "%ax", "%esp", "%eax");
+	enter_userspace(location, stack);
 }
 
 /*

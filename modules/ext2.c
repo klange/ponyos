@@ -19,6 +19,9 @@
 #define E_NOSPACE   2
 #define E_BADPARENT 3
 
+#undef _symlink
+#define _symlink(inode) ((char *)(inode)->block)
+
 /*
  * EXT2 filesystem object
  */
@@ -38,11 +41,13 @@ typedef struct {
 	unsigned int              cache_entries;       /* Size of ->disk_cache */
 	unsigned int              cache_time;          /* "timer" that increments with each cache read/write */
 
-	uint8_t volatile          lock;                /* Synchronization lock point */
+	spin_lock_t               lock;                /* Synchronization lock point */
 
 	uint8_t                   bgd_block_span;
 	uint8_t                   bgd_offset;
 	unsigned int              inode_size;
+
+	uint8_t *                 cache_data;
 } ext2_fs_t;
 
 /*
@@ -120,14 +125,14 @@ static int read_block(ext2_fs_t * this, unsigned int block_no, uint8_t * buf) {
 	}
 
 	/* This operation requires the filesystem lock to be obtained */
-	spin_lock(&this->lock);
+	spin_lock(this->lock);
 
 	/* We can make reads without a cache in place. */
 	if (!DC) {
 		/* In such cases, we read directly from the block device */
 		read_fs(this->block_device, block_no * this->block_size, this->block_size, (uint8_t *)buf);
 		/* We are done, release the lock */
-		spin_unlock(&this->lock);
+		spin_unlock(this->lock);
 		/* And return SUCCESS */
 		return E_SUCCESS;
 	}
@@ -145,7 +150,7 @@ static int read_block(ext2_fs_t * this, unsigned int block_no, uint8_t * buf) {
 			/* Read the block */
 			memcpy(buf, DC[i].block, this->block_size);
 			/* Release the lock */
-			spin_unlock(&this->lock);
+			spin_unlock(this->lock);
 			/* Success! */
 			return E_SUCCESS;
 		}
@@ -178,7 +183,7 @@ static int read_block(ext2_fs_t * this, unsigned int block_no, uint8_t * buf) {
 	DC[oldest].dirty = 0;
 
 	/* Release the lock */
-	spin_unlock(&this->lock);
+	spin_unlock(this->lock);
 
 	/* And return success */
 	return E_SUCCESS;
@@ -199,7 +204,13 @@ static int write_block(ext2_fs_t * this, unsigned int block_no, uint8_t *buf) {
 	}
 
 	/* This operation requires the filesystem lock */
-	spin_lock(&this->lock);
+	spin_lock(this->lock);
+
+	if (!DC) {
+		write_fs(this->block_device, block_no * this->block_size, this->block_size, buf);
+		spin_unlock(this->lock);
+		return E_SUCCESS;
+	}
 
 	/* Find the entry in the cache */
 	int oldest = -1;
@@ -210,7 +221,7 @@ static int write_block(ext2_fs_t * this, unsigned int block_no, uint8_t *buf) {
 			DC[i].last_use = get_cache_time(this);
 			DC[i].dirty = 1;
 			memcpy(DC[i].block, buf, this->block_size);
-			spin_unlock(&this->lock);
+			spin_unlock(this->lock);
 			return E_SUCCESS;
 		}
 		if (DC[i].last_use < oldest_age) {
@@ -233,7 +244,7 @@ static int write_block(ext2_fs_t * this, unsigned int block_no, uint8_t *buf) {
 	DC[oldest].dirty = 1;
 
 	/* Release the lock */
-	spin_unlock(&this->lock);
+	spin_unlock(this->lock);
 
 	/* We're done. */
 	return E_SUCCESS;
@@ -241,7 +252,7 @@ static int write_block(ext2_fs_t * this, unsigned int block_no, uint8_t *buf) {
 
 static unsigned int ext2_sync(ext2_fs_t * this) {
 	/* This operation requires the filesystem lock */
-	spin_lock(&this->lock);
+	spin_lock(this->lock);
 
 	/* Flush each cache entry. */
 	for (unsigned int i = 0; i < this->cache_entries; ++i) {
@@ -251,7 +262,7 @@ static unsigned int ext2_sync(ext2_fs_t * this) {
 	}
 
 	/* Release the lock */
-	spin_unlock(&this->lock);
+	spin_unlock(this->lock);
 
 	return 0;
 }
@@ -450,7 +461,7 @@ static int write_inode(ext2_fs_t * this, ext2_inodetable_t *inode, uint32_t inde
 	if (group > BGDS) {
 		return E_BADBLOCK;
 	}
-	
+
 	uint32_t inode_table_block = BGD[group].inode_table;
 	index -= group * this->inodes_per_group;
 	uint32_t block_offset = ((index - 1) * this->inode_size) / this->block_size;
@@ -953,7 +964,7 @@ static ext2_dir_t * direntry_ext2(ext2_fs_t * this, ext2_inodetable_t * inode, u
 			inode_read_block(this, inode, block_nr, block);
 		}
 	}
-	
+
 	free(block);
 	return NULL;
 }
@@ -981,7 +992,7 @@ static fs_node_t * finddir_ext2(fs_node_t *node, char *name) {
 			inode_read_block(this, inode, block_nr, block);
 		}
 		ext2_dir_t *d_ent = (ext2_dir_t *)((uintptr_t)block + dir_offset);
-		
+
 		if (d_ent->inode == 0 || strlen(name) != d_ent->name_len) {
 			dir_offset += d_ent->rec_len;
 			total_offset += d_ent->rec_len;
@@ -1043,7 +1054,7 @@ static void unlink_ext2(fs_node_t * node, char * name) {
 			inode_read_block(this, inode, block_nr, block);
 		}
 		ext2_dir_t *d_ent = (ext2_dir_t *)((uintptr_t)block + dir_offset);
-		
+
 		if (d_ent->inode == 0 || strlen(name) != d_ent->name_len) {
 			dir_offset += d_ent->rec_len;
 			total_offset += d_ent->rec_len;
@@ -1123,9 +1134,7 @@ static uint32_t read_ext2(fs_node_t *node, uint32_t offset, uint32_t size, uint8
 	uint32_t end_block    = end / this->block_size;
 	uint32_t end_size     = end - end_block * this->block_size;
 	uint32_t size_to_read = end - offset;
-	if (end_size == 0) {
-		end_block--;
-	}
+
 	uint8_t * buf = malloc(this->block_size);
 	if (start_block == end_block) {
 		inode_read_block(this, inode, start_block, buf);
@@ -1142,10 +1151,58 @@ static uint32_t read_ext2(fs_node_t *node, uint32_t offset, uint32_t size, uint8
 				memcpy(buffer + this->block_size * blocks_read - (offset % this->block_size), buf, this->block_size);
 			}
 		}
-		inode_read_block(this, inode, end_block, buf);
-		memcpy(buffer + this->block_size * blocks_read - (offset % this->block_size), buf, end_size);
+		if (end_size) {
+			inode_read_block(this, inode, end_block, buf);
+			memcpy(buffer + this->block_size * blocks_read - (offset % this->block_size), buf, end_size);
+		}
 	}
 	free(inode);
+	free(buf);
+	return size_to_read;
+}
+
+static uint32_t write_inode_buffer(ext2_fs_t * this, ext2_inodetable_t * inode, uint32_t inode_number, uint32_t offset, uint32_t size, uint8_t *buffer) {
+	uint32_t end = offset + size;
+	if (end > inode->size) {
+		inode->size = end;
+		write_inode(this, inode, inode_number);
+	}
+
+	uint32_t start_block  = offset / this->block_size;
+	uint32_t end_block    = end / this->block_size;
+	uint32_t end_size     = end - end_block * this->block_size;
+	uint32_t size_to_read = end - offset;
+	uint8_t * buf = malloc(this->block_size);
+	if (start_block == end_block) {
+		inode_read_block(this, inode, start_block, buf);
+		memcpy((uint8_t *)(((uint32_t)buf) + (offset % this->block_size)), buffer, size_to_read);
+		inode_write_block(this, inode, inode_number, start_block, buf);
+	} else {
+		uint32_t block_offset;
+		uint32_t blocks_read = 0;
+		for (block_offset = start_block; block_offset < end_block; block_offset++, blocks_read++) {
+			if (block_offset == start_block) {
+				int b = inode_read_block(this, inode, block_offset, buf);
+				memcpy((uint8_t *)(((uint32_t)buf) + (offset % this->block_size)), buffer, this->block_size - (offset % this->block_size));
+				inode_write_block(this, inode, inode_number, block_offset, buf);
+				if (!b) {
+					refresh_inode(this, inode, inode_number);
+				}
+			} else {
+				int b = inode_read_block(this, inode, block_offset, buf);
+				memcpy(buf, buffer + this->block_size * blocks_read - (offset % this->block_size), this->block_size);
+				inode_write_block(this, inode, inode_number, block_offset, buf);
+				if (!b) {
+					refresh_inode(this, inode, inode_number);
+				}
+			}
+		}
+		if (end_size) {
+			inode_read_block(this, inode, end_block, buf);
+			memcpy(buf, buffer + this->block_size * blocks_read - (offset % this->block_size), end_size);
+			inode_write_block(this, inode, inode_number, end_block, buf);
+		}
+	}
 	free(buf);
 	return size_to_read;
 }
@@ -1154,51 +1211,9 @@ static uint32_t write_ext2(fs_node_t *node, uint32_t offset, uint32_t size, uint
 	ext2_fs_t * this = (ext2_fs_t *)node->device;
 	ext2_inodetable_t * inode = read_inode(this, node->inode);
 
-	uint32_t end = offset + size;
-	if (end > inode->size) {
-		inode->size = end;
-		write_inode(this, inode, node->inode);
-	}
-
-	uint32_t start_block  = offset / this->block_size;
-	uint32_t end_block    = end / this->block_size;
-	uint32_t end_size     = end - end_block * this->block_size;
-	uint32_t size_to_read = end - offset;
-	if (end_size == 0) {
-		end_block--;
-	}
-	uint8_t * buf = malloc(this->block_size);
-	if (start_block == end_block) {
-		inode_read_block(this, inode, start_block, buf);
-		memcpy((uint8_t *)(((uint32_t)buf) + (offset % this->block_size)), buffer, size_to_read);
-		inode_write_block(this, inode, node->inode, start_block, buf);
-	} else {
-		uint32_t block_offset;
-		uint32_t blocks_read = 0;
-		for (block_offset = start_block; block_offset < end_block; block_offset++, blocks_read++) {
-			if (block_offset == start_block) {
-				int b = inode_read_block(this, inode, block_offset, buf);
-				memcpy((uint8_t *)(((uint32_t)buf) + (offset % this->block_size)), buffer, this->block_size - (offset % this->block_size));
-				inode_write_block(this, inode, node->inode, block_offset, buf);
-				if (!b) {
-					refresh_inode(this, inode, node->inode);
-				}
-			} else {
-				int b = inode_read_block(this, inode, block_offset, buf);
-				memcpy(buf, buffer + this->block_size * blocks_read - (offset % this->block_size), this->block_size);
-				inode_write_block(this, inode, node->inode, block_offset, buf);
-				if (!b) {
-					refresh_inode(this, inode, node->inode);
-				}
-			}
-		}
-		inode_read_block(this, inode, end_block, buf);
-		memcpy(buf, buffer + this->block_size * blocks_read - (offset % this->block_size), end_size);
-		inode_write_block(this, inode, node->inode, end_block, buf);
-	}
+	uint32_t rv = write_inode_buffer(this, inode, node->inode, offset, size, buffer);
 	free(inode);
-	free(buf);
-	return size_to_read;
+	return rv;
 }
 
 static void open_ext2(fs_node_t *node, unsigned int flags) {
@@ -1240,6 +1255,99 @@ static struct dirent * readdir_ext2(fs_node_t *node, uint32_t index) {
 	return dirent;
 }
 
+static void symlink_ext2(fs_node_t * parent, char * target, char * name) {
+	if (!name) return;
+
+	ext2_fs_t * this = parent->device;
+
+	/* first off, check if it exists */
+	fs_node_t * check = finddir_ext2(parent, name);
+	if (check) {
+		debug_print(WARNING, "A file by this name already exists: %s", name);
+		free(check);
+		return; /* this should probably have a return value... */
+	}
+
+	/* Allocate an inode for it */
+	unsigned int inode_no = allocate_inode(this);
+	ext2_inodetable_t * inode = read_inode(this,inode_no);
+
+	/* Set the access and creation times to now */
+	inode->atime = now();
+	inode->ctime = inode->atime;
+	inode->mtime = inode->atime;
+	inode->dtime = 0; /* This inode was never deleted */
+
+	/* Empty the file */
+	memset(inode->block, 0x00, sizeof(inode->block));
+	inode->blocks = 0;
+	inode->size = 0; /* empty */
+
+	/* Assign it to current user */
+	inode->uid = current_process->user;
+	inode->gid = current_process->user;
+
+	/* misc */
+	inode->faddr = 0;
+	inode->links_count = 1; /* The one we're about to create. */
+	inode->flags = 0;
+	inode->osd1 = 0;
+	inode->generation = 0;
+	inode->file_acl = 0;
+	inode->dir_acl = 0;
+
+	inode->mode = EXT2_S_IFLNK;
+
+	/* I *think* this is what you're supposed to do with symlinks */
+	inode->mode |= 0777;
+
+	/* Write the osd blocks to 0 */
+	memset(inode->osd2, 0x00, sizeof(inode->osd2));
+
+	size_t target_len = strlen(target);
+	int embedded = target_len <= 60; // sizeof(_symlink(inode));
+	if (embedded) {
+		memcpy(_symlink(inode), target, target_len);
+		inode->size = target_len;
+	}
+
+	/* Write out inode changes */
+	write_inode(this, inode, inode_no);
+
+	/* Now append the entry to the parent */
+	create_entry(parent, name, inode_no);
+
+
+	/* If we didn't embed it in the inode just use write_inode_buffer to finish the job */
+	if (!embedded) {
+		write_inode_buffer(parent->device, inode, inode_no, 0, target_len, (uint8_t *)target);
+	}
+	free(inode);
+
+	ext2_sync(this);
+}
+
+static int readlink_ext2(fs_node_t * node, char * buf, size_t size) {
+	ext2_fs_t * this = (ext2_fs_t *)node->device;
+	ext2_inodetable_t * inode = read_inode(this, node->inode);
+	size_t read_size = inode->size < size ? inode->size : size;
+	if (inode->size > 60) { //sizeof(_symlink(inode))) {
+		read_ext2(node, 0, read_size, (uint8_t *)buf);
+	} else {
+		memcpy(buf, _symlink(inode), read_size);
+	}
+
+	/* Believe it or not, we actually aren't supposed to include the nul in the length. */
+	if (read_size < size) {
+		buf[read_size] = '\0';
+	}
+
+	free(inode);
+	return read_size;
+}
+
+
+
 static uint32_t node_from_file(ext2_fs_t * this, ext2_inodetable_t *inode, ext2_dir_t *direntry,  fs_node_t *fnode) {
 	if (!fnode) {
 		/* You didn't give me a node to write into, go **** yourself */
@@ -1259,22 +1367,26 @@ static uint32_t node_from_file(ext2_fs_t * this, ext2_inodetable_t *inode, ext2_
 	/* File Flags */
 	fnode->flags = 0;
 	if ((inode->mode & EXT2_S_IFREG) == EXT2_S_IFREG) {
-		fnode->flags |= FS_FILE;
-		fnode->read    = read_ext2;
-		fnode->write   = write_ext2;
-		fnode->create  = NULL;
-		fnode->mkdir   = NULL;
-		fnode->readdir = NULL;
-		fnode->finddir = NULL;
+		fnode->flags   |= FS_FILE;
+		fnode->read     = read_ext2;
+		fnode->write    = write_ext2;
+		fnode->create   = NULL;
+		fnode->mkdir    = NULL;
+		fnode->readdir  = NULL;
+		fnode->finddir  = NULL;
+		fnode->symlink  = NULL;
+		fnode->readlink = NULL;
 	}
 	if ((inode->mode & EXT2_S_IFDIR) == EXT2_S_IFDIR) {
-		fnode->flags |= FS_DIRECTORY;
-		fnode->create  = create_ext2;
-		fnode->mkdir   = mkdir_ext2;
-		fnode->readdir = readdir_ext2;
-		fnode->finddir = finddir_ext2;
-		fnode->unlink  = unlink_ext2;
-		fnode->write   = NULL;
+		fnode->flags   |= FS_DIRECTORY;
+		fnode->create   = create_ext2;
+		fnode->mkdir    = mkdir_ext2;
+		fnode->readdir  = readdir_ext2;
+		fnode->finddir  = finddir_ext2;
+		fnode->unlink   = unlink_ext2;
+		fnode->write    = NULL;
+		fnode->symlink  = symlink_ext2;
+		fnode->readlink = NULL;
 	}
 	if ((inode->mode & EXT2_S_IFBLK) == EXT2_S_IFBLK) {
 		fnode->flags |= FS_BLOCKDEVICE;
@@ -1286,7 +1398,14 @@ static uint32_t node_from_file(ext2_fs_t * this, ext2_inodetable_t *inode, ext2_
 		fnode->flags |= FS_PIPE;
 	}
 	if ((inode->mode & EXT2_S_IFLNK) == EXT2_S_IFLNK) {
-		fnode->flags |= FS_SYMLINK;
+		fnode->flags   |= FS_SYMLINK;
+		fnode->read     = NULL;
+		fnode->write    = NULL;
+		fnode->create   = NULL;
+		fnode->mkdir    = NULL;
+		fnode->readdir  = NULL;
+		fnode->finddir  = NULL;
+		fnode->readlink = readlink_ext2;
 	}
 
 	fnode->atime   = inode->atime;
@@ -1406,18 +1525,24 @@ static fs_node_t * mount_ext2(fs_node_t * block_device) {
 	}
 	this->inodes_per_group = SB->inodes_count / BGDS;
 
-	debug_print(INFO, "Allocating cache...");
-	DC = malloc(sizeof(ext2_disk_cache_entry_t) * this->cache_entries);
-	for (uint32_t i = 0; i < this->cache_entries; ++i) {
-		DC[i].block_no = 0;
-		DC[i].dirty = 0;
-		DC[i].last_use = 0;
-		DC[i].block = malloc(this->block_size);
-		if (i % 128 == 0) {
-			debug_print(INFO, "Allocated cache block #%d", i+1);
+	if (!args_present("noext2cache")) {
+		debug_print(INFO, "Allocating cache...");
+		DC = malloc(sizeof(ext2_disk_cache_entry_t) * this->cache_entries);
+		this->cache_data = calloc(this->block_size, this->cache_entries);
+		for (uint32_t i = 0; i < this->cache_entries; ++i) {
+			DC[i].block_no = 0;
+			DC[i].dirty = 0;
+			DC[i].last_use = 0;
+			DC[i].block = this->cache_data + i * this->block_size;
+			if (i % 128 == 0) {
+				debug_print(INFO, "Allocated cache block #%d", i+1);
+			}
 		}
+		debug_print(INFO, "Allocated cache.");
+	} else {
+		DC = NULL;
+		debug_print(NOTICE, "ext2 cache is disabled (noext2cache)");
 	}
-	debug_print(INFO, "Allocated cache.");
 
 	// load the block group descriptors
 	this->bgd_block_span = sizeof(ext2_bgdescriptor_t) * BGDS / this->block_size + 1;
@@ -1439,7 +1564,7 @@ static fs_node_t * mount_ext2(fs_node_t * block_device) {
 	char * bg_buffer = malloc(this->block_size * sizeof(char));
 	for (uint32_t i = 0; i < BGDS; ++i) {
 		debug_print(INFO, "Block Group Descriptor #%d @ %d", i, this->bgd_offset + i * SB->blocks_per_group);
-		debug_print(INFO, "\tBlock Bitmap @ %d", BGD[i].block_bitmap); { 
+		debug_print(INFO, "\tBlock Bitmap @ %d", BGD[i].block_bitmap); {
 			debug_print(INFO, "\t\tExamining block bitmap at %d", BGD[i].block_bitmap);
 			read_block(this, BGD[i].block_bitmap, (uint8_t *)bg_buffer);
 			uint32_t j = 0;

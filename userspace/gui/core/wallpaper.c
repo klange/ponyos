@@ -1,7 +1,7 @@
 /* vim: tabstop=4 shiftwidth=4 noexpandtab
  * This file is part of ToaruOS and is released under the terms
  * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2013-2014 Kevin Lange
+ * Copyright (C) 2013-2015 Kevin Lange
  *
  * Wallpaper renderer.
  *
@@ -10,12 +10,21 @@
 #include <assert.h>
 #include <unistd.h>
 #include <math.h>
+#include <time.h>
+#include <signal.h>
 #include <sys/wait.h>
+#include <sys/time.h>
 
 #include "lib/yutani.h"
 #include "lib/graphics.h"
 #include "lib/shmemfonts.h"
 #include "lib/hashmap.h"
+#include "lib/confreader.h"
+
+#include "lib/trace.h"
+#define TRACE_APP_NAME "wallpaper"
+
+#define DEFAULT_WALLPAPER "/usr/share/wallpapers/default"
 
 #define ICON_X         24
 #define ICON_TOP_Y     40
@@ -23,20 +32,23 @@
 #define ICON_WIDTH     48
 #define EXTRA_WIDTH    24
 
-static uint16_t win_width;
-static uint16_t win_height;
+static int width;
+static int height;
 static yutani_t * yctx;
 static yutani_window_t * wina;
 static gfx_context_t * ctx;
 static sprite_t * wallpaper;
 static hashmap_t * icon_cache;
 
+static char f_name[512];
+
+
 static int center_x(int x) {
-	return (win_width - x) / 2;
+	return (width - x) / 2;
 }
 
 static int center_y(int y) {
-	return (win_height - y) / 2;
+	return (height - y) / 2;
 }
 
 typedef struct {
@@ -53,8 +65,11 @@ static volatile int _continue = 1;
 /* Default search paths for icons, in order of preference */
 static char * icon_directories[] = {
 	"/usr/share/icons/48",
+	"/usr/share/icons/external/48",
 	"/usr/share/icons/24",
+	"/usr/share/icons/external/24",
 	"/usr/share/icons",
+	"/usr/share/icons/external",
 	NULL
 };
 
@@ -80,7 +95,6 @@ static sprite_t * icon_get(char * name) {
 		while (icon_directories[i]) {
 			/* Check each path... */
 			sprintf(path, "%s/%s.png", icon_directories[i], name);
-			fprintf(stderr, "Checking %s for icon\n", path);
 			if (access(path, R_OK) == 0) {
 				/* And if we find one, cache it */
 				icon = malloc(sizeof(sprite_t));
@@ -102,7 +116,6 @@ static sprite_t * icon_get(char * name) {
 
 static void launch_application(char * app) {
 	if (!fork()) {
-		printf("Starting %s\n", app);
 		char * args[] = {"/bin/sh", "-c", app, NULL};
 		execvp(args[0], args);
 		exit(1);
@@ -112,9 +125,7 @@ static void launch_application(char * app) {
 char * next_run_activate = NULL;
 int focused_app = -1;
 
-static void redraw_apps(void) {
-	draw_sprite(ctx, wallpaper, 0, 0);
-
+static void redraw_apps_x(int should_flip) {
 	/* Load Application Shortcuts */
 	uint32_t i = 0;
 	while (1) {
@@ -137,14 +148,21 @@ static void redraw_apps(void) {
 		++i;
 	}
 
-	flip(ctx);
+	if (should_flip) {
+		flip(ctx);
+	}
+}
+
+static void redraw_apps(int should_flip) {
+	draw_sprite(ctx, wallpaper, 0, 0);
+	redraw_apps_x(should_flip);
 }
 
 static void set_focused(int i) {
 	if (focused_app != i) {
 		int old_focused = focused_app;
 		focused_app = i;
-		redraw_apps();
+		redraw_apps(1);
 		if (old_focused >= 0) {
 			yutani_flip_region(yctx, wina, 0, ICON_TOP_Y + ICON_SPACING_Y * old_focused, ICON_WIDTH + 2 * EXTRA_WIDTH, ICON_SPACING_Y);
 		}
@@ -154,9 +172,54 @@ static void set_focused(int i) {
 	}
 }
 
+#define ANIMATION_TICKS 500
+#define SCALE_MAX 2.0f
+static void play_animation(int i) {
+
+	struct timeval start;
+	gettimeofday(&start, NULL);
+
+	sprite_t * sprite = applications[i].icon_sprite;
+
+	int x = ICON_X;
+	int y = ICON_TOP_Y + ICON_SPACING_Y * i;
+
+	while (1) {
+		uint32_t tick;
+		struct timeval t;
+		gettimeofday(&t, NULL);
+
+		uint32_t sec_diff = t.tv_sec - start.tv_sec;
+		uint32_t usec_diff = t.tv_usec - start.tv_usec;
+
+		if (t.tv_usec < start.tv_usec) {
+			sec_diff -= 1;
+			usec_diff = (1000000 + t.tv_usec) - start.tv_usec;
+		}
+
+		tick = (uint32_t)(sec_diff * 1000 + usec_diff / 1000);
+		if (tick > ANIMATION_TICKS) break;
+
+		float percent = (float)tick / (float)ANIMATION_TICKS;
+		float scale = 1.0f + (SCALE_MAX - 1.0f) * percent;
+		float opacity = 1.0f - 1.0f * percent;
+
+		int offset_x = sprite->width / 2 - scale * (sprite->width / 2);
+		int offset_y = sprite->height / 2 - scale * (sprite->height / 2);
+
+		redraw_apps(0);
+		draw_sprite_scaled_alpha(ctx, sprite, x + offset_x, y + offset_y, sprite->width * scale, sprite->height * scale, opacity);
+		flip(ctx);
+		yutani_flip_region(yctx, wina, 0, y - sprite->height, x + sprite->width * 2, y + sprite->height * 2);
+
+	}
+
+	redraw_apps(1);
+	yutani_flip_region(yctx, wina, 0, y - sprite->height, x + sprite->width * 2, y + sprite->height * 2);
+}
+
 static void wallpaper_check_click(struct yutani_msg_window_mouse_event * evt) {
 	if (evt->command == YUTANI_MOUSE_EVENT_CLICK) {
-		printf("Click!\n");
 		if (evt->new_x > ICON_X && evt->new_x < ICON_X + ICON_WIDTH) {
 			uint32_t i = 0;
 			while (1) {
@@ -165,8 +228,8 @@ static void wallpaper_check_click(struct yutani_msg_window_mouse_event * evt) {
 				}
 				if ((evt->new_y > ICON_TOP_Y + ICON_SPACING_Y * i) &&
 					(evt->new_y < ICON_TOP_Y + ICON_SPACING_Y + ICON_SPACING_Y * i)) {
-					printf("Launching application \"%s\"...\n", applications[i].title);
 					launch_application(applications[i].appname);
+					play_animation(i);
 				}
 				++i;
 			}
@@ -243,8 +306,6 @@ static void read_applications(FILE * f) {
 		char * tmp = strstr(title, "\n");
 		if (tmp) *tmp = '\0';
 
-		fprintf(stderr, "Icon: %s %s %s\n", icon, name, title);
-
 		applications[i].icon = strdup(icon);
 		applications[i].appname = strdup(name);
 		applications[i].title = strdup(title);
@@ -255,23 +316,112 @@ static void read_applications(FILE * f) {
 	fclose(f);
 }
 
+sprite_t * load_wallpaper(void) {
+	sprite_t * o_wallpaper = NULL;
+
+	sprite_t * wallpaper_tmp = calloc(1,sizeof(sprite_t));
+
+	sprintf(f_name, "%s/.desktop.conf", getenv("HOME"));
+
+	confreader_t * conf = confreader_load(f_name);
+
+	load_sprite_png(wallpaper_tmp, confreader_getd(conf, "", "wallpaper", DEFAULT_WALLPAPER));
+
+	confreader_free(conf);
+
+	float x = (float)width  / (float)wallpaper_tmp->width;
+	float y = (float)height / (float)wallpaper_tmp->height;
+
+	int nh = (int)(x * (float)wallpaper_tmp->height);
+	int nw = (int)(y * (float)wallpaper_tmp->width);;
+
+	o_wallpaper = create_sprite(width, height, ALPHA_OPAQUE);
+
+	gfx_context_t * tmp = init_graphics_sprite(o_wallpaper);
+
+	if (nw > width) {
+		draw_sprite_scaled(tmp, wallpaper_tmp, (width - nw) / 2, 0, nw, height);
+	} else {
+		draw_sprite_scaled(tmp, wallpaper_tmp, 0, (height - nh) / 2, width, nh);
+	}
+
+	free(tmp);
+
+	sprite_free(wallpaper_tmp);
+
+	return o_wallpaper;
+}
+
+void sig_usr(int sig) {
+	sprite_t * new_wallpaper = load_wallpaper();
+
+	struct timeval start;
+	gettimeofday(&start, NULL);
+
+	while (1) {
+		uint32_t tick;
+		struct timeval t;
+		gettimeofday(&t, NULL);
+
+		uint32_t sec_diff = t.tv_sec - start.tv_sec;
+		uint32_t usec_diff = t.tv_usec - start.tv_usec;
+
+		if (t.tv_usec < start.tv_usec) {
+			sec_diff -= 1;
+			usec_diff = (1000000 + t.tv_usec) - start.tv_usec;
+		}
+
+		tick = (uint32_t)(sec_diff * 1000 + usec_diff / 1000);
+		if (tick > ANIMATION_TICKS) break;
+
+		float percent = (float)tick / (float)ANIMATION_TICKS;
+
+		draw_sprite(ctx, wallpaper, 0, 0);
+		draw_sprite_alpha(ctx, new_wallpaper, 0, 0, percent);
+		redraw_apps_x(1);
+		yutani_flip(yctx, wina);
+	}
+
+	sprite_free(wallpaper);
+	wallpaper = new_wallpaper;
+	draw_sprite(ctx, wallpaper, 0, 0);
+	redraw_apps_x(1);
+
+	yutani_flip(yctx, wina);
+}
+
+static void resize_finish(int xwidth, int xheight) {
+	width = xwidth;
+	height = xheight;
+	yutani_window_resize_accept(yctx, wina, width, height);
+
+	sprite_t * new_wallpaper = load_wallpaper();
+	sprite_free(wallpaper);
+	wallpaper = new_wallpaper;
+
+	reinit_graphics_yutani(ctx, wina);
+	yutani_window_resize_done(yctx, wina);
+
+	draw_sprite(ctx, wallpaper, 0, 0);
+	redraw_apps_x(1);
+	yutani_flip(yctx, wina);
+}
+
+
 int main (int argc, char ** argv) {
 	yctx = yutani_init();
 
-	int width  = yctx->display_width;
-	int height = yctx->display_height;
+	width  = yctx->display_width;
+	height = yctx->display_height;
 
-	sprite_t * wallpaper_tmp = malloc(sizeof(sprite_t));
+	wina = yutani_window_create_flags(yctx, width, height, YUTANI_WINDOW_FLAG_NO_STEAL_FOCUS);
+	assert(wina);
+	yutani_set_stack(yctx, wina, YUTANI_ZORDER_BOTTOM);
+	ctx = init_graphics_yutani_double_buffer(wina);
 
-	char f_name[512];
-	sprintf(f_name, "%s/.wallpaper.png", getenv("HOME"));
-	FILE * f = fopen(f_name, "r");
-	if (f) {
-		fclose(f);
-		load_sprite_png(wallpaper_tmp, f_name);
-	} else {
-		load_sprite_png(wallpaper_tmp, "/usr/share/wallpaper.png");
-	}
+	draw_fill(ctx, rgb(0,0,0));
+	flip(ctx);
+	yutani_flip(yctx, wina);
 
 	/* Initialize hashmap for icon cache */
 	icon_cache = hashmap_create(10);
@@ -283,7 +433,7 @@ int main (int argc, char ** argv) {
 	}
 
 	sprintf(f_name, "%s/.desktop", getenv("HOME"));
-	f = fopen(f_name, "r");
+	FILE * f = fopen(f_name, "r");
 	if (!f) {
 		f = fopen("/etc/default.desktop", "r");
 	}
@@ -296,34 +446,15 @@ int main (int argc, char ** argv) {
 		++i;
 	}
 
-	float x = (float)width  / (float)wallpaper_tmp->width;
-	float y = (float)height / (float)wallpaper_tmp->height;
+	wallpaper = load_wallpaper();
 
-	int nh = (int)(x * (float)wallpaper_tmp->height);
-	int nw = (int)(y * (float)wallpaper_tmp->width);;
-
-	wallpaper = create_sprite(width, height, ALPHA_OPAQUE);
-	gfx_context_t * tmp = init_graphics_sprite(wallpaper);
-
-	if (nw > width) {
-		draw_sprite_scaled(tmp, wallpaper_tmp, (width - nw) / 2, 0, nw, height);
-	} else {
-		draw_sprite_scaled(tmp, wallpaper_tmp, 0, (height - nh) / 2, width, nh);
-	}
-
-	free(tmp);
-
-	win_width = width;
-	win_height = height;
-
-	wina = yutani_window_create(yctx, width, height);
-	assert(wina);
-	yutani_set_stack(yctx, wina, YUTANI_ZORDER_BOTTOM);
-	ctx = init_graphics_yutani_double_buffer(wina);
 	init_shmemfonts();
 
-	redraw_apps();
+	redraw_apps(1);
 	yutani_flip(yctx, wina);
+
+	/* Set SIGUSR1 to reload wallpaper. */
+	signal(SIGUSR1, sig_usr);
 
 	while (_continue) {
 		yutani_msg_t * m = yutani_poll(yctx);
@@ -332,6 +463,18 @@ int main (int argc, char ** argv) {
 			switch (m->type) {
 				case YUTANI_MSG_WINDOW_MOUSE_EVENT:
 					wallpaper_check_click((struct yutani_msg_window_mouse_event *)m->data);
+					break;
+				case YUTANI_MSG_WELCOME:
+					{
+						struct yutani_msg_welcome * mw = (void*)m->data;
+						yutani_window_resize(yctx, wina, mw->display_width, mw->display_height);
+					}
+					break;
+				case YUTANI_MSG_RESIZE_OFFER:
+					{
+						struct yutani_msg_window_resize * wr = (void*)m->data;
+						resize_finish(wr->width, wr->height);
+					}
 					break;
 				case YUTANI_MSG_SESSION_END:
 					_continue = 0;

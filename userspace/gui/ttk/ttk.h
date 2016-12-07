@@ -24,6 +24,9 @@ typedef struct ttk_window {
 	uint16_t          height;
 	uint16_t          off_x; /* decor_left_width */
 	uint16_t          off_y; /* decor_top_height */
+
+	int32_t           x;
+	int32_t           y;
 } ttk_window_t;
 
 #define TTK_BACKGROUND_DEFAULT 204,204,204
@@ -33,9 +36,9 @@ typedef struct ttk_window {
 void cairo_rounded_rectangle(cairo_t * cr, double x, double y, double width, double height, double radius);
 void ttk_redraw_borders(ttk_window_t * window);
 void _ttk_draw_button(cairo_t * cr, int x, int y, int width, int height, char * title);
-void _ttk_draw_button_hover(cairo_t * cr, int x, int y, int width, int height);
+void _ttk_draw_button_hover(cairo_t * cr, int x, int y, int width, int height, char * title);
 void _ttk_draw_button_select(cairo_t * cr, int x, int y, int width, int height, char * title);
-void _ttk_draw_button_disabled(cairo_t * cr, int x, int y, int width, int height);
+void _ttk_draw_button_disabled(cairo_t * cr, int x, int y, int width, int height, char * title);
 void _ttk_draw_menu(cairo_t * cr, int x, int y, int width);
 void ttk_window_draw(ttk_window_t * window);
 void ttk_initialize();

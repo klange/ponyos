@@ -16,13 +16,30 @@
 static hashmap_t * symboltable = NULL;
 static hashmap_t * modules = NULL;
 
+extern char kernel_symbols_start[];
+extern char kernel_symbols_end[];
+
 typedef struct {
 	uintptr_t addr;
 	char name[];
 } kernel_symbol_t;
 
-extern char kernel_symbols_start[];
-extern char kernel_symbols_end[];
+/* Cannot use symboltable here because symbol_find is used during initialization
+ * of IRQs and ISRs.
+ */
+void (* symbol_find(const char * name))(void) {
+	kernel_symbol_t * k = (kernel_symbol_t *)&kernel_symbols_start;
+
+	while ((uintptr_t)k < (uintptr_t)&kernel_symbols_end) {
+		if (strcmp(k->name, name)) {
+			k = (kernel_symbol_t *)((uintptr_t)k + sizeof *k + strlen(k->name) + 1);
+			continue;
+		}
+		return (void (*)(void))k->addr;
+	}
+
+	return NULL;
+}
 
 int module_quickcheck(void * blob) {
 
@@ -32,6 +49,11 @@ int module_quickcheck(void * blob) {
 		target->e_ident[1] != ELFMAG1 ||
 		target->e_ident[2] != ELFMAG2 ||
 		target->e_ident[3] != ELFMAG3) {
+
+		char * head = (char *)blob;
+		if (head[0] == 'P' && head[1] == 'A' && head[2] == 'C' && head[3] == 'K') {
+			return 2;
+		}
 
 		return 0;
 	}
@@ -164,10 +186,18 @@ void * module_load_direct(void * blob, size_t length) {
 								}
 								i++;
 							}
+							/*
+							 * Common symbols
+							 * If we were a proper linker, we'd look at a bunch of objects
+							 * to find out if one of them defined this, but instead we have
+							 * a strict hierarchy of symbol resolution, so we know that an
+							 * undefined common symbol at this point should be immediately
+							 * allocated and zeroed.
+							 */
 							if (!set && table->st_shndx == 65522) {
 								if (!hashmap_get(symboltable, name)) {
-									uintptr_t final = (uintptr_t)target + table->st_value;
-									debug_print(NOTICE, "point %s to 0x%x", name, final);
+									void * final = calloc(1, table->st_value);
+									debug_print(NOTICE, "point %s to 0x%x", name, (uintptr_t)final);
 									hashmap_set(symboltable, name, (void *)final);
 									hashmap_set(local_symbols, name, (void *)final);
 								}

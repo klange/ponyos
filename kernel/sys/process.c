@@ -3,6 +3,7 @@
  * of the NCSA / University of Illinois License - see LICENSE.md
  * Copyright (C) 2011-2014 Kevin Lange
  * Copyright (C) 2012 Markus Schober
+ * Copyright (C) 2015 Dale Weiler
  *
  * Processes
  *
@@ -13,6 +14,7 @@
 #include <process.h>
 #include <tree.h>
 #include <list.h>
+#include <bitset.h>
 #include <logging.h>
 #include <shm.h>
 #include <printf.h>
@@ -24,13 +26,21 @@ list_t * sleep_queue;
 volatile process_t * current_process = NULL;
 process_t * kernel_idle_task = NULL;
 
-static uint8_t volatile tree_lock = 0;
-static uint8_t volatile process_queue_lock = 0;
-static uint8_t volatile wait_lock_tmp = 0;
-static uint8_t volatile sleep_lock = 0;
+static spin_lock_t tree_lock = { 0 };
+static spin_lock_t process_queue_lock = { 0 };
+static spin_lock_t wait_lock_tmp = { 0 };
+static spin_lock_t sleep_lock = { 0 };
+
+static bitset_t pid_set;
 
 /* Default process name string */
 char * default_name = "[unnamed]";
+
+/*
+ * This makes a nice 4096-byte bitmap. It also happens
+ * to be pid_max on 32-bit Linux, so that's kinda nice.
+ */
+#define MAX_PID 32768
 
 /*
  * Initialize the process tree and ready queue.
@@ -40,6 +50,12 @@ void initialize_process_tree(void) {
 	process_list = list_create();
 	process_queue = list_create();
 	sleep_queue = list_create();
+
+	/* Start off with enough bits for 64 processes */
+	bitset_init(&pid_set, MAX_PID / 8);
+	/* First two bits are set by default */
+	bitset_set(&pid_set, 0);
+	bitset_set(&pid_set, 1);
 }
 
 /*
@@ -111,23 +127,25 @@ void make_process_ready(process_t * proc) {
 		if (proc->sleep_node.owner == sleep_queue) {
 			/* XXX can't wake from timed sleep */
 			if (proc->timed_sleep_node) {
-				spin_lock(&sleep_lock);
+				IRQ_OFF;
+				spin_lock(sleep_lock);
 				list_delete(sleep_queue, proc->timed_sleep_node);
-				spin_unlock(&sleep_lock);
+				spin_unlock(sleep_lock);
+				IRQ_RES;
 				proc->sleep_node.owner = NULL;
 				free(proc->timed_sleep_node->value);
 			}
 			/* Else: I have no idea what happened. */
 		} else {
 			proc->sleep_interrupted = 1;
-			spin_lock(&wait_lock_tmp);
+			spin_lock(wait_lock_tmp);
 			list_delete((list_t*)proc->sleep_node.owner, &proc->sleep_node);
-			spin_unlock(&wait_lock_tmp);
+			spin_unlock(wait_lock_tmp);
 		}
 	}
-	spin_lock(&process_queue_lock);
+	spin_lock(process_queue_lock);
 	list_append(process_queue, &proc->sched_node);
-	spin_unlock(&process_queue_lock);
+	spin_unlock(process_queue_lock);
 }
 
 
@@ -153,11 +171,13 @@ void delete_process(process_t * proc) {
 	}
 
 	/* Remove the entry. */
-	spin_lock(&tree_lock);
+	spin_lock(tree_lock);
 	/* Reparent everyone below me to init */
 	tree_remove_reparent_root(process_tree, entry);
 	list_delete(process_list, list_find(process_list, proc));
-	spin_unlock(&tree_lock);
+	spin_unlock(tree_lock);
+
+	bitset_clear(&pid_set, proc->id);
 
 	/* Uh... */
 	free(proc);
@@ -165,7 +185,7 @@ void delete_process(process_t * proc) {
 
 static void _kidle(void) {
 	while (1) {
-		IRQ_RES;
+		IRQ_ON;
 		PAUSE;
 	}
 }
@@ -237,7 +257,8 @@ process_t * spawn_init(void) {
 	init->image.user_stack  = 0;
 	init->image.size        = 0;
 	init->image.shm_heap    = SHM_START; /* Yeah, a bit of a hack. */
-	init->image.lock = 0;
+
+	spin_init(init->image.lock);
 
 	/* Process is not finished */
 	init->finished = 0;
@@ -274,10 +295,24 @@ process_t * spawn_init(void) {
  *
  * @return A usable PID for a new process.
  */
+static int _next_pid = 2;
 pid_t get_next_pid(void) {
-	/* Terribly naïve, I know, but it works for now */
-	static pid_t next = 2;
-	return (next++);
+	if (_next_pid > MAX_PID) {
+		int index = bitset_ffub(&pid_set);
+		/*
+		 * Honestly, we don't have the memory to really risk reaching
+		 * the point where we have MAX_PID processes running
+		 * concurrently, so this assertion should be "safe enough".
+		 */
+		assert(index != -1);
+		bitset_set(&pid_set, index);
+		return index;
+	}
+	int pid = _next_pid;
+	_next_pid++;
+	assert(!bitset_test(&pid_set, pid) && "Next PID already allocated?");
+	bitset_set(&pid_set, pid);
+	return pid;
 }
 
 /*
@@ -289,11 +324,11 @@ void process_disown(process_t * proc) {
 	/* Find the process in the tree */
 	tree_node_t * entry = proc->tree_entry;
 	/* Break it of from its current parent */
-	spin_lock(&tree_lock);
+	spin_lock(tree_lock);
 	tree_break_off(process_tree, entry);
 	/* And insert it back elsewhere */
 	tree_node_insert_child_node(process_tree, process_tree->root, entry);
-	spin_unlock(&tree_lock);
+	spin_unlock(tree_lock);
 }
 
 /*
@@ -302,12 +337,12 @@ void process_disown(process_t * proc) {
  * @param parent The parent process to spawn the new one off of.
  * @return A pointer to the new process.
  */
-process_t * spawn_process(volatile process_t * parent) {
+process_t * spawn_process(volatile process_t * parent, int reuse_fds) {
 	assert(process_tree->root && "Attempted to spawn a process without init.");
 
 	/* Allocate a new process */
 	debug_print(INFO,"   process_t {");
-	process_t * proc = malloc(sizeof(process_t));
+	process_t * proc = calloc(sizeof(process_t),1);
 	debug_print(INFO,"   }");
 	proc->id = get_next_pid(); /* Set its PID */
 	proc->group = proc->id;    /* Set the GID */
@@ -327,6 +362,7 @@ process_t * spawn_process(volatile process_t * parent) {
 	proc->thread.ebp = 0;
 	proc->thread.eip = 0;
 	proc->thread.fpu_enabled = 0;
+	memcpy((void*)proc->thread.fp_regs, (void*)parent->thread.fp_regs, 512);
 
 	/* Set the process image information from the parent */
 	proc->image.entry       = parent->image.entry;
@@ -334,27 +370,33 @@ process_t * spawn_process(volatile process_t * parent) {
 	proc->image.heap_actual = parent->image.heap_actual;
 	proc->image.size        = parent->image.size;
 	debug_print(INFO,"    stack {");
-	proc->image.stack       = (uintptr_t)malloc(KERNEL_STACK_SIZE) + KERNEL_STACK_SIZE;
+	proc->image.stack       = (uintptr_t)kvmalloc(KERNEL_STACK_SIZE) + KERNEL_STACK_SIZE;
 	debug_print(INFO,"    }");
 	proc->image.user_stack  = parent->image.user_stack;
 	proc->image.shm_heap    = SHM_START; /* Yeah, a bit of a hack. */
-	proc->image.lock = 0;
+
+	spin_init(proc->image.lock);
 
 	assert(proc->image.stack && "Failed to allocate kernel stack for new process.");
 
 	/* Clone the file descriptors from the original process */
-	proc->fds = malloc(sizeof(fd_table_t));
-	proc->fds->refs     = 1;
-	proc->fds->length   = parent->fds->length;
-	proc->fds->capacity = parent->fds->capacity;
-	debug_print(INFO,"    fds / files {");
-	proc->fds->entries  = malloc(sizeof(fs_node_t *) * proc->fds->capacity);
-	assert(proc->fds->entries && "Failed to allocate file descriptor table for new process.");
-	debug_print(INFO,"    ---");
-	for (uint32_t i = 0; i < parent->fds->length; ++i) {
-		proc->fds->entries[i] = clone_fs(parent->fds->entries[i]);
+	if (reuse_fds) {
+		proc->fds = parent->fds;
+		proc->fds->refs++;
+	} else {
+		proc->fds = malloc(sizeof(fd_table_t));
+		proc->fds->refs     = 1;
+		proc->fds->length   = parent->fds->length;
+		proc->fds->capacity = parent->fds->capacity;
+		debug_print(INFO,"    fds / files {");
+		proc->fds->entries  = malloc(sizeof(fs_node_t *) * proc->fds->capacity);
+		assert(proc->fds->entries && "Failed to allocate file descriptor table for new process.");
+		debug_print(INFO,"    ---");
+		for (uint32_t i = 0; i < parent->fds->length; ++i) {
+			proc->fds->entries[i] = clone_fs(parent->fds->entries[i]);
+		}
+		debug_print(INFO,"    }");
 	}
-	debug_print(INFO,"    }");
 
 	/* As well as the working directory */
 	proc->wd_node = clone_fs(parent->wd_node);
@@ -388,10 +430,10 @@ process_t * spawn_process(volatile process_t * parent) {
 	tree_node_t * entry = tree_node_create(proc);
 	assert(entry && "Failed to allocate a process tree node for new process.");
 	proc->tree_entry = entry;
-	spin_lock(&tree_lock);
+	spin_lock(tree_lock);
 	tree_node_insert_child_node(process_tree, parent->tree_entry, entry);
 	list_insert(process_list, (void *)proc);
-	spin_unlock(&tree_lock);
+	spin_unlock(tree_lock);
 
 	/* Return the new process */
 	return proc;
@@ -407,9 +449,9 @@ uint8_t process_compare(void * proc_v, void * pid_v) {
 process_t * process_from_pid(pid_t pid) {
 	if (pid < 0) return NULL;
 
-	spin_lock(&tree_lock);
+	spin_lock(tree_lock);
 	tree_node_t * entry = tree_find(process_tree,&pid,process_compare);
-	spin_unlock(&tree_lock);
+	spin_unlock(tree_lock);
 	if (entry) {
 		return (process_t *)entry->value;
 	}
@@ -418,7 +460,7 @@ process_t * process_from_pid(pid_t pid) {
 
 process_t * process_get_parent(process_t * process) {
 	process_t * result = NULL;
-	spin_lock(&tree_lock);
+	spin_lock(tree_lock);
 
 	tree_node_t * entry = process->tree_entry;
 
@@ -426,7 +468,7 @@ process_t * process_get_parent(process_t * process) {
 		result = entry->parent->value;
 	}
 
-	spin_unlock(&tree_lock);
+	spin_unlock(tree_lock);
 	return result;
 }
 
@@ -523,8 +565,11 @@ uint32_t process_append_fd(process_t * proc, fs_node_t * node) {
  * @return The destination file descriptor, -1 on failure
  */
 uint32_t process_move_fd(process_t * proc, int src, int dest) {
-	if ((size_t)src > proc->fds->length || (size_t)dest > proc->fds->length) {
+	if ((size_t)src > proc->fds->length || (dest != -1 && (size_t)dest > proc->fds->length)) {
 		return -1;
+	}
+	if (dest == -1) {
+		dest = process_append_fd(proc, NULL);
 	}
 	if (proc->fds->entries[dest] != proc->fds->entries[src]) {
 		close_fs(proc->fds->entries[dest]);
@@ -537,9 +582,9 @@ uint32_t process_move_fd(process_t * proc, int src, int dest) {
 int wakeup_queue(list_t * queue) {
 	int awoken_processes = 0;
 	while (queue->length > 0) {
-		spin_lock(&wait_lock_tmp);
+		spin_lock(wait_lock_tmp);
 		node_t * node = list_pop(queue);
-		spin_unlock(&wait_lock_tmp);
+		spin_unlock(wait_lock_tmp);
 		if (!((process_t *)node->value)->finished) {
 			make_process_ready(node->value);
 		}
@@ -551,9 +596,9 @@ int wakeup_queue(list_t * queue) {
 int wakeup_queue_interrupted(list_t * queue) {
 	int awoken_processes = 0;
 	while (queue->length > 0) {
-		spin_lock(&wait_lock_tmp);
+		spin_lock(wait_lock_tmp);
 		node_t * node = list_pop(queue);
-		spin_unlock(&wait_lock_tmp);
+		spin_unlock(wait_lock_tmp);
 		if (!((process_t *)node->value)->finished) {
 			process_t * proc = node->value;
 			proc->sleep_interrupted = 1;
@@ -572,9 +617,9 @@ int sleep_on(list_t * queue) {
 		return 0;
 	}
 	current_process->sleep_interrupted = 0;
-	spin_lock(&wait_lock_tmp);
+	spin_lock(wait_lock_tmp);
 	list_append(queue, (node_t *)&current_process->sleep_node);
-	spin_unlock(&wait_lock_tmp);
+	spin_unlock(wait_lock_tmp);
 	switch_task(0);
 	return current_process->sleep_interrupted;
 }
@@ -585,7 +630,8 @@ int process_is_ready(process_t * proc) {
 
 
 void wakeup_sleepers(unsigned long seconds, unsigned long subseconds) {
-	spin_lock(&sleep_lock);
+	IRQ_OFF;
+	spin_lock(sleep_lock);
 	if (sleep_queue->length) {
 		sleeper_t * proc = ((sleeper_t *)sleep_queue->head->value);
 		while (proc && (proc->end_tick < seconds || (proc->end_tick == seconds && proc->end_subtick <= subseconds))) {
@@ -604,7 +650,8 @@ void wakeup_sleepers(unsigned long seconds, unsigned long subseconds) {
 			}
 		}
 	}
-	spin_unlock(&sleep_lock);
+	spin_unlock(sleep_lock);
+	IRQ_RES;
 }
 
 void sleep_until(process_t * process, unsigned long seconds, unsigned long subseconds) {
@@ -613,7 +660,9 @@ void sleep_until(process_t * process, unsigned long seconds, unsigned long subse
 		return;
 	}
 	process->sleep_node.owner = sleep_queue;
-	spin_lock(&sleep_lock);
+
+	IRQ_OFF;
+	spin_lock(sleep_lock);
 	node_t * before = NULL;
 	foreach(node, sleep_queue) {
 		sleeper_t * candidate = ((sleeper_t *)node->value);
@@ -627,7 +676,8 @@ void sleep_until(process_t * process, unsigned long seconds, unsigned long subse
 	proc->end_tick    = seconds;
 	proc->end_subtick = subseconds;
 	process->timed_sleep_node = list_insert_after(sleep_queue, before, proc);
-	spin_unlock(&sleep_lock);
+	spin_unlock(sleep_lock);
+	IRQ_RES;
 }
 
 void cleanup_process(process_t * proc, int retval) {
@@ -646,11 +696,13 @@ void cleanup_process(process_t * proc, int retval) {
 	if (proc->signal_kstack) {
 		free(proc->signal_kstack);
 	}
+
+	release_directory(proc->thread.page_directory);
+
 	debug_print(INFO, "Dec'ing fds for %d", proc->id);
 	proc->fds->refs--;
 	if (proc->fds->refs == 0) {
 		debug_print(INFO, "Reached 0, all dependencies are closed for %d's file descriptors and page directories", proc->id);
-		release_directory(proc->thread.page_directory);
 		debug_print(INFO, "Going to clear out the file descriptors %d", proc->id);
 		for (uint32_t i = 0; i < proc->fds->length; ++i) {
 			if (proc->fds->entries[i]) {

@@ -19,11 +19,14 @@
 #include <limits.h>
 #include <math.h>
 #include <time.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <signal.h>
 #include <sys/time.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
+#include <sys/ioctl.h>
 
 #include "lib/pthread.h"
 #include "lib/yutani.h"
@@ -31,6 +34,7 @@
 #include "lib/shmemfonts.h"
 #include "lib/hashmap.h"
 #include "lib/spinlock.h"
+#include "lib/sound.h"
 
 #define PANEL_HEIGHT 28
 #define FONT_SIZE 14
@@ -59,7 +63,7 @@
 #define MAX_WINDOW_COUNT 100
 
 #define TOTAL_CELL_WIDTH (ICON_SIZE + ICON_PADDING * 2 + title_width)
-#define LEFT_BOUND (width - TIME_LEFT - DATE_WIDTH - ICON_PADDING)
+#define LEFT_BOUND (width - TIME_LEFT - DATE_WIDTH - ICON_PADDING - widgets_width)
 
 #define APPMENU_WIDTH  200
 #define APPMENU_PAD_RIGHT 1
@@ -67,6 +71,10 @@
 #define APPMENU_BACKGROUND premultiply(rgba(255,255,255,240))
 #define APPMENU_HIGHLIGHT rgb(201,169,208)
 #define APPMENU_ITEM_HEIGHT 24
+
+#define WIDGET_WIDTH 24
+#define WIDGET_RIGHT (width - TIME_LEFT - DATE_WIDTH)
+#define WIDGET_POSITION(i) (WIDGET_RIGHT - WIDGET_WIDTH * (i+1))
 
 static yutani_t * yctx;
 
@@ -93,8 +101,16 @@ static char * bg_blob;
 static int width;
 static int height;
 
+static int widgets_width = 0;
+static int widgets_volume_enabled = 0;
+
 static sprite_t * sprite_panel;
 static sprite_t * sprite_logout;
+
+static sprite_t * sprite_volume_mute;
+static sprite_t * sprite_volume_low;
+static sprite_t * sprite_volume_med;
+static sprite_t * sprite_volume_high;
 
 static int center_x(int x) {
 	return (width - x) / 2;
@@ -146,6 +162,26 @@ static int new_focused = -1;
 
 static int title_width = 0;
 
+static void toggle_hide_panel(void) {
+	static int panel_hidden = 0;
+
+	if (panel_hidden) {
+		/* Unhide the panel */
+		for (int i = PANEL_HEIGHT-1; i >= 0; i--) {
+			yutani_window_move(yctx, panel, 0, -i);
+			usleep(10000);
+		}
+		panel_hidden = 0;
+	} else {
+		/* Hide the panel */
+		for (int i = 1; i <= PANEL_HEIGHT-1; i++) {
+			yutani_window_move(yctx, panel, 0, -i);
+			usleep(10000);
+		}
+		panel_hidden = 1;
+	}
+}
+
 static sprite_t * icon_get(char * name);
 static void redraw_appmenu(int item);
 
@@ -172,6 +208,47 @@ static void set_focused(int i) {
 	}
 }
 
+#define VOLUME_DEVICE_ID 0
+#define VOLUME_KNOB_ID   0
+static uint32_t volume_level = 0;
+static int mixer = -1;
+static void update_volume_level(void) {
+	if (mixer == -1) {
+		mixer = open("/dev/mixer", O_RDONLY);
+	}
+
+	snd_knob_value_t value = {0};
+	value.device = VOLUME_DEVICE_ID; /* TODO configure this somewhere */
+	value.id     = VOLUME_KNOB_ID;   /* TODO this too */
+
+	ioctl(mixer, SND_MIXER_READ_KNOB, &value);
+	volume_level = value.val;
+}
+static void volume_raise(void) {
+	if (volume_level > 0xE0000000) volume_level = 0xF0000000;
+	else volume_level += 0x10000000;
+
+	snd_knob_value_t value = {0};
+	value.device = VOLUME_DEVICE_ID; /* TODO configure this somewhere */
+	value.id     = VOLUME_KNOB_ID;   /* TODO this too */
+	value.val    = volume_level;
+
+	ioctl(mixer, SND_MIXER_WRITE_KNOB, &value);
+	redraw();
+}
+static void volume_lower(void) {
+	if (volume_level < 0x20000000) volume_level = 0x0;
+	else volume_level -= 0x10000000;
+
+	snd_knob_value_t value = {0};
+	value.device = VOLUME_DEVICE_ID; /* TODO configure this somewhere */
+	value.id     = VOLUME_KNOB_ID;   /* TODO this too */
+	value.val    = volume_level;
+
+	ioctl(mixer, SND_MIXER_WRITE_KNOB, &value);
+	redraw();
+}
+
 /* Callback for mouse events */
 static void panel_check_click(struct yutani_msg_window_mouse_event * evt) {
 	if (evt->wid == panel->wid) {
@@ -190,7 +267,10 @@ static void panel_check_click(struct yutani_msg_window_mouse_event * evt) {
 				} else {
 					/* ??? */
 				}
-			} else {
+			} else if (evt->new_x > WIDGET_POSITION(1) && evt->new_x < WIDGET_POSITION(0)) {
+				/* TODO: More generic widget click handling */
+				/* TODO: Show the volume manager */
+			} else if (evt->new_x >= APP_OFFSET && evt->new_x < LEFT_BOUND) {
 				for (int i = 0; i < MAX_WINDOW_COUNT; ++i) {
 					if (ads_by_l[i] == NULL) break;
 					if (evt->new_x >= ads_by_l[i]->left && evt->new_x < ads_by_l[i]->left + TOTAL_CELL_WIDTH) {
@@ -214,6 +294,47 @@ static void panel_check_click(struct yutani_msg_window_mouse_event * evt) {
 				}
 			} else {
 				set_focused(-1);
+			}
+
+			int scroll_direction = 0;
+			if (evt->buttons & YUTANI_MOUSE_SCROLL_UP) scroll_direction = -1;
+			else if (evt->buttons & YUTANI_MOUSE_SCROLL_DOWN) scroll_direction = 1;
+
+			if (scroll_direction) {
+				if (evt->new_x > WIDGET_POSITION(1) && evt->new_y < WIDGET_POSITION(0)) {
+					if (scroll_direction == 1) {
+						volume_lower();
+					} else if (scroll_direction == -1) {
+						volume_raise();
+					}
+				} else if (evt->new_x >= APP_OFFSET && evt->new_x < LEFT_BOUND) {
+					if (scroll_direction != 0) {
+						struct window_ad * last = window_list->tail ? window_list->tail->value : NULL;
+						int focus_next = 0;
+						foreach(node, window_list) {
+							struct window_ad * ad = node->value;
+							if (focus_next) {
+								yutani_focus_window(yctx, ad->wid);
+								return;
+							}
+							if (ad->flags & 1) {
+								if (scroll_direction == -1) {
+									yutani_focus_window(yctx, last->wid);
+									return;
+								}
+								if (scroll_direction == 1) {
+									focus_next = 1;
+								}
+							}
+							last = ad;
+						}
+						if (focus_next && window_list->head) {
+							struct window_ad * ad = window_list->head->value;
+							yutani_focus_window(yctx, ad->wid);
+							return;
+						}
+					}
+				}
 			}
 		} else if (evt->command == YUTANI_MOUSE_EVENT_LEAVE) {
 			/* Mouse left panel window */
@@ -297,6 +418,13 @@ static void handle_key_event(struct yutani_msg_key_event * ke) {
 		launch_application("terminal");
 	}
 
+	if ((ke->event.modifiers & KEY_MOD_LEFT_CTRL) &&
+		(ke->event.keycode == KEY_F11) &&
+		(ke->event.action == KEY_ACTION_DOWN)) {
+		fprintf(stderr, "[panel] Toggling visibility.\n");
+		toggle_hide_panel();
+	}
+
 	if ((was_tabbing) && (ke->event.keycode == 0 || ke->event.keycode == KEY_LEFT_ALT) &&
 		(ke->event.modifiers == 0) && (ke->event.action == KEY_ACTION_UP)) {
 
@@ -362,8 +490,11 @@ static void handle_key_event(struct yutani_msg_key_event * ke) {
 /* Default search paths for icons, in order of preference */
 static char * icon_directories[] = {
 	"/usr/share/icons/24",
+	"/usr/share/icons/external/24",
 	"/usr/share/icons/48",
+	"/usr/share/icons/external/48",
 	"/usr/share/icons",
+	"/usr/share/icons/external",
 	NULL
 };
 
@@ -540,10 +671,25 @@ static void redraw(void) {
 	t = (DATE_WIDTH - t) / 2;
 	draw_string(ctx, width - TIME_LEFT - DATE_WIDTH + t, 21, txt_color, buffer);
 
-	/* TODO: Future applications menu */
+	/* Applications menu */
 	set_font_face(FONT_SANS_SERIF_BOLD);
 	set_font_size(14);
 	draw_string(ctx, 10, 18, appmenu ? HILIGHT_COLOR : txt_color, "Applications");
+
+	/* Draw each widget */
+	/* - Volume */
+	/* TODO: Get actual volume levels, and cache them somewhere */
+	if (widgets_volume_enabled) {
+		if (volume_level < 10) {
+			draw_sprite(ctx, sprite_volume_mute, WIDGET_POSITION(0), 0);
+		} else if (volume_level < 0x547ae147) {
+			draw_sprite(ctx, sprite_volume_low, WIDGET_POSITION(0), 0);
+		} else if (volume_level < 0xa8f5c28e) {
+			draw_sprite(ctx, sprite_volume_med, WIDGET_POSITION(0), 0);
+		} else {
+			draw_sprite(ctx, sprite_volume_high, WIDGET_POSITION(0), 0);
+		}
+	}
 
 	/* Now draw the window list */
 	int i = 0, j = 0;
@@ -753,9 +899,33 @@ static void * clock_thread(void * garbage) {
 	 */
 	while (_continue) {
 		waitpid(-1, NULL, WNOHANG);
+		update_volume_level();
 		redraw();
 		usleep(500000);
 	}
+}
+
+static void resize_finish(int xwidth, int xheight) {
+	yutani_window_resize_accept(yctx, panel, xwidth, xheight);
+
+	reinit_graphics_yutani(ctx, panel);
+	yutani_window_resize_done(yctx, panel);
+
+	width = xwidth;
+
+	/* Draw the background */
+	draw_fill(ctx, rgba(0,0,0,0));
+	for (uint32_t i = 0; i < xwidth; i += sprite_panel->width) {
+		draw_sprite(ctx, sprite_panel, i, 0);
+	}
+
+	/* Copy the prerendered background so we can redraw it quickly */
+	bg_size = panel->width * panel->height * sizeof(uint32_t);
+	bg_blob = realloc(bg_blob, bg_size);
+	memcpy(bg_blob, ctx->backbuffer, bg_size);
+
+	update_window_list();
+	redraw();
 }
 
 int main (int argc, char ** argv) {
@@ -771,7 +941,7 @@ int main (int argc, char ** argv) {
 	set_font_size(14);
 
 	/* Create the panel window */
-	panel = yutani_window_create(yctx, width, PANEL_HEIGHT);
+	panel = yutani_window_create_flags(yctx, width, PANEL_HEIGHT, YUTANI_WINDOW_FLAG_NO_STEAL_FOCUS);
 
 	/* And move it to the top layer */
 	yutani_set_stack(yctx, panel, YUTANI_ZORDER_TOP);
@@ -823,6 +993,21 @@ int main (int argc, char ** argv) {
 	load_sprite_png(sprite_panel,  "/usr/share/panel.png");
 	load_sprite_png(sprite_logout, "/usr/share/icons/panel-shutdown.png");
 
+	struct stat stat_tmp;
+	if (!stat("/dev/dsp",&stat_tmp)) {
+		widgets_volume_enabled = 1;
+		widgets_width += WIDGET_WIDTH;
+		sprite_volume_mute = malloc(sizeof(sprite_t));
+		sprite_volume_low  = malloc(sizeof(sprite_t));
+		sprite_volume_med  = malloc(sizeof(sprite_t));
+		sprite_volume_high = malloc(sizeof(sprite_t));
+		load_sprite_png(sprite_volume_mute, "/usr/share/icons/24/volume-mute.png");
+		load_sprite_png(sprite_volume_low,  "/usr/share/icons/24/volume-low.png");
+		load_sprite_png(sprite_volume_med,  "/usr/share/icons/24/volume-medium.png");
+		load_sprite_png(sprite_volume_high, "/usr/share/icons/24/volume-full.png");
+		/* XXX store current volume */
+	}
+
 	/* Draw the background */
 	for (uint32_t i = 0; i < width; i += sprite_panel->width) {
 		draw_sprite(ctx, sprite_panel, i, 0);
@@ -855,6 +1040,8 @@ int main (int argc, char ** argv) {
 	yutani_key_bind(yctx, '\t', KEY_MOD_LEFT_ALT, YUTANI_BIND_STEAL);
 	yutani_key_bind(yctx, '\t', KEY_MOD_LEFT_ALT | KEY_MOD_LEFT_SHIFT, YUTANI_BIND_STEAL);
 
+	yutani_key_bind(yctx, KEY_F11, KEY_MOD_LEFT_CTRL, YUTANI_BIND_STEAL);
+
 	/* This lets us receive all just-modifier key releases */
 	yutani_key_bind(yctx, KEY_LEFT_ALT, 0, YUTANI_BIND_PASSTHROUGH);
 
@@ -876,6 +1063,20 @@ int main (int argc, char ** argv) {
 					break;
 				case YUTANI_MSG_WINDOW_FOCUS_CHANGE:
 					handle_focus_event((struct yutani_msg_window_focus_change *)m->data);
+					break;
+				case YUTANI_MSG_WELCOME:
+					{
+						struct yutani_msg_welcome * mw = (void*)m->data;
+						width = mw->display_width;
+						height = mw->display_height;
+						yutani_window_resize(yctx, panel, mw->display_width, PANEL_HEIGHT);
+					}
+					break;
+				case YUTANI_MSG_RESIZE_OFFER:
+					{
+						struct yutani_msg_window_resize * wr = (void*)m->data;
+						resize_finish(wr->width, wr->height);
+					}
 					break;
 				default:
 					break;

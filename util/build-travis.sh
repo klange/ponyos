@@ -1,22 +1,53 @@
 #!/bin/bash
 
-(
-    while [ 1 == 1 ]; do
-        echo "..."
-        sleep 1m
-    done
-) &
+COOKIE=".2016-12-03-dynamic.cookie"
 
-watchdog_pid=$!
+unset CC
 
-sudo apt-get update >/dev/null 2>/dev/null
-sudo apt-get install expect exuberant-ctags >/dev/null 2>/dev/null
-make toolchain >/dev/null 2>/dev/null
-
-kill $!
+if [ ! -e "toolchain/local/$COOKIE" ]; then
+    echo "=== Cleaning any preexisting stuff... ==="
+    rm -fr toolchain/build
+    rm -fr toolchain/local
+    rm -fr toolchain/tarballs/*
+    echo "=== Starting watchdog ==="
+    (
+        while [ 1 == 1 ]; do
+            echo "..."
+            sleep 1m
+        done
+    ) &
+    watchdog_pid=$!
+    echo "=== Begin Toolchain Build ==="
+    pushd toolchain
+        unset PKG_CONFIG_LIBDIR
+        ./prepare.sh
+        ./install.sh
+        date > ./local/$COOKIE
+    popd
+    echo "=== End Toolchain Build ==="
+    echo "=== Stopping watchdog ==="
+    kill $watchdog_pid
+else
+    echo "=== Toolchain was cached. ==="
+fi
 
 . toolchain/activate.sh
 
-make
+make || exit 1
 
-expect util/test-travis.exp
+echo "=== Running test suite. ==="
+
+expect util/test-travis.exp || exit 1
+
+echo "=== Building live CD ==="
+
+git fetch --unshallow
+
+git clone . _cdsource || exit 1
+
+cd _cdsource
+
+make cdrom || exit 1
+
+echo "=== Done. ==="
+

@@ -27,8 +27,8 @@ typedef enum {
 
 static int yutani_animation_lengths[] = {
 	0,
-	256,
-	256,
+	200,
+	200,
 	0,
 	0,
 };
@@ -59,9 +59,17 @@ typedef struct {
 	char *   client_strings;
 
 	int anim_mode;
-	int anim_start;
+	uint32_t anim_start;
 
 	int alpha_threshold;
+	int show_mouse;
+
+	int tiled;
+	int32_t untiled_width;
+	int32_t untiled_height;
+
+	int default_mouse;
+	uint32_t server_flags;
 } yutani_server_window_t;
 
 typedef struct {
@@ -107,6 +115,7 @@ typedef struct {
 	int mouse_win_y;
 	int mouse_init_x;
 	int mouse_init_y;
+	int mouse_init_r;
 
 	int mouse_drag_button;
 	int mouse_moved;
@@ -122,7 +131,7 @@ typedef struct {
 
 	list_t * window_subscribers;
 
-	int tick_count;
+	uint32_t start_time;
 
 	volatile int redraw_lock;
 
@@ -141,6 +150,22 @@ typedef struct {
 	int debug_shapes;
 
 	int screenshot_frame;
+
+	uint32_t start_subtime;
+
+	yutani_scale_direction_t resizing_direction;
+	int32_t resizing_offset_x;
+	int32_t resizing_offset_y;
+	int resizing_button;
+
+	sprite_t mouse_sprite_drag;
+	sprite_t mouse_sprite_resize_v;
+	sprite_t mouse_sprite_resize_h;
+	sprite_t mouse_sprite_resize_da;
+	sprite_t mouse_sprite_resize_db;
+
+	int current_cursor;
+	int resize_on_next;
 
 } yutani_globals_t;
 

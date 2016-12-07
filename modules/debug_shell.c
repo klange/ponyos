@@ -246,7 +246,12 @@ static int shell_log(fs_node_t * tty, int argc, char * argv[]) {
 		fprintf(tty, "Serial logging is %s.\n", !!debug_file ? "enabled" : "disabled");
 		fprintf(tty, "Usage: log [on|off] [<level>]\n");
 	} else {
-		if (!strcmp(argv[1], "on")) {
+		if (!strcmp(argv[1], "direct")) {
+			debug_file = kopen("/dev/ttyS0", 0);
+			if (argc > 2) {
+				debug_level = atoi(argv[2]);
+			}
+		} else if (!strcmp(argv[1], "on")) {
 			debug_file = tty;
 			if (argc > 2) {
 				debug_level = atoi(argv[2]);
@@ -404,6 +409,37 @@ static int shell_modules(fs_node_t * tty, int argc, char * argv[]) {
 	return 0;
 }
 
+static int shell_rdtsc(fs_node_t * tty, int argc, char * argv[]) {
+	uint64_t x;
+	asm volatile (".byte 0x0f, 0x31" : "=A" (x));
+
+	fprintf(tty, "0x%x%x\n", (uint32_t)(x >> 32), (uint32_t)(x & 0xFFFFFFFF));
+
+	return 0;
+}
+
+static int shell_mhz(fs_node_t * tty, int argc, char * argv[]) {
+
+	uint64_t x, y;
+
+	asm volatile (".byte 0x0f, 0x31" : "=A" (x));
+
+	unsigned long s, ss;
+	relative_time(1, 0, &s, &ss);
+	sleep_until((process_t *)current_process, s, ss);
+	switch_task(0);
+
+	asm volatile (".byte 0x0f, 0x31" : "=A" (y));
+
+	uint64_t diff = y - x;
+	uint32_t f = diff >> 15;
+	uint32_t mhz = f / 30;
+
+	fprintf(tty, "%d MHz\n", mhz);
+
+	return 0;
+}
+
 /*
  * Determine the size of a smart terminal that we don't have direct
  * termios access to. This is done by sending a cursor-move command
@@ -508,6 +544,20 @@ static int shell_exit(fs_node_t * tty, int argc, char * argv[]) {
 	return 0;
 }
 
+static int shell_cursor_off(fs_node_t * tty, int argc, char * argv[]) {
+	outportb(0x3D4, 14);
+	outportb(0x3D5, 0xFF);
+	outportb(0x3D4, 15);
+	outportb(0x3D5, 0xFF);
+	return 0;
+}
+
+extern pid_t trace_pid;
+static int shell_debug_pid(fs_node_t * tty, int argc, char * argv[]) {
+	trace_pid = atoi(argv[1]);
+	return 0;
+}
+
 static struct shell_command shell_commands[] = {
 	{"shell", &shell_create_userspace_shell,
 		"Runs a userspace shell on this tty."},
@@ -531,6 +581,8 @@ static struct shell_command shell_commands[] = {
 		"[testing] Module loading."},
 	{"symbols", &shell_symbols,
 		"Dump symbol table."},
+	{"debug_pid", &shell_debug_pid,
+		"Set pid to trace syscalls for."},
 	{"print", &shell_print,
 		"[dangerous] Print the value of a symbol using a format string."},
 	{"modules", &shell_modules,
@@ -541,6 +593,12 @@ static struct shell_command shell_commands[] = {
 		"Attempt to reset mouse device."},
 	{"mount", &shell_mount,
 		"Mount a filesystemp."},
+	{"rdtsc", &shell_rdtsc,
+		"Read the TSC, if available."},
+	{"mhz", &shell_mhz,
+		"Use TSC to determine clock speed."},
+	{"cursor-off", &shell_cursor_off,
+		"Disable VGA text mode cursor."},
 	{"exit", &shell_exit,
 		"Quit the shell."},
 	{NULL, NULL, NULL}
@@ -587,6 +645,7 @@ static void debug_shell_handle_out(void * data, char * name) {
 
 static void debug_shell_actual(void * data, char * name) {
 
+	current_process->image.entry = 0;
 	fs_node_t * tty = (fs_node_t *)data;
 
 	/* Our prompt will include the version number of the current kernel */

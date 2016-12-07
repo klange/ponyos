@@ -1,7 +1,11 @@
 #ifndef _TERMEMU_H__
 #define _TERMEMU_H__
 
+#ifdef _KERNEL_
+# include <types.h>
+#else
 #include <stdint.h>
+#endif
 
 #define TERM_BUF_LEN 128
 
@@ -26,6 +30,10 @@ typedef struct {
 	void (*input_buffer_stuff)(char *);
 	void (*set_font_size)(float);
 	void (*set_title)(char *);
+	void (*set_cell_contents)(int,int,char *);
+	int  (*get_cell_width)(void);
+	int  (*get_cell_height)(void);
+	void (*set_csr_on)(int);
 } term_callbacks_t;
 
 typedef struct {
@@ -44,6 +52,10 @@ typedef struct {
 	char     buffer[TERM_BUF_LEN];  /* Previous buffer */
 	term_callbacks_t * callbacks;
 	int volatile lock;
+	uint8_t  mouse_on;
+	uint32_t img_collected;
+	uint32_t img_size;
+	char *   img_data;
 } term_state_t;
 
 /* Triggers escape mode. */
@@ -84,6 +96,7 @@ typedef struct {
 #define ANSI_BORDER    0x20
 #define ANSI_WIDE      0x40 /* Character is double width */
 #define ANSI_CROSS     0x80 /* And that's all I'm going to support (for now) */
+#define ANSI_EXT_IMG   0x100 /* Cell is actually an image, use fg color as pointer */
 
 #define ANSI_EXT_IOCTL 'z'  /* These are special escapes only we support */
 

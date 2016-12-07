@@ -8,12 +8,24 @@
 
 #include "termemu.h"
 
+#ifdef _KERNEL_
+# include <system.h>
+# include <types.h>
+# include <logging.h>
+static void _spin_lock(volatile int * foo) { return; }
+static void _spin_unlock(volatile int * foo) { return; }
+# define rgba(r,g,b,a) (((uint32_t)a * 0x1000000) + ((uint32_t)r * 0x10000) + ((uint32_t)g * 0x100) + ((uint32_t)b * 0x1))
+# define rgb(r,g,b) rgba(r,g,b,0xFF)
+#else
 #include <stdlib.h>
 #include <math.h>
 #include <syscall.h>
-
-#include "lib/graphics.h"
 #include "lib/spinlock.h"
+#include "lib/graphics.h"
+#define _spin_lock spin_lock
+#define _spin_unlock spin_unlock
+#endif
+
 
 #define MAX_ARGS 1024
 
@@ -44,11 +56,11 @@ static void ansi_buf_add(term_state_t * s, char c) {
 	s->buffer[s->buflen] = '\0';
 }
 
-static int to_eight(uint32_t codepoint, uint8_t * out) {
+static int to_eight(uint32_t codepoint, char * out) {
 	memset(out, 0x00, 7);
 
 	if (codepoint < 0x0080) {
-		out[0] = (uint8_t)codepoint;
+		out[0] = (char)codepoint;
 	} else if (codepoint < 0x0800) {
 		out[0] = 0xC0 | (codepoint >> 6);
 		out[1] = 0x80 | (codepoint & 0x3F);
@@ -121,6 +133,9 @@ static void _ansi_put(term_state_t * s, char c) {
 			} else if (c == ANSI_OPEN_PAREN) {
 				s->escape = 4;
 				ansi_buf_add(s, c);
+			} else if (c == 'T') {
+				s->escape = 5;
+				ansi_buf_add(s, c);
 			} else {
 				/* This isn't a bracket, we're not actually escaped!
 				 * Get out of here! */
@@ -159,11 +174,13 @@ static void _ansi_put(term_state_t * s, char c) {
 									case 1:
 										callbacks->redraw_cursor();
 										break;
+#ifndef _KERNEL_
 									case 1555:
 										if (argc > 1) {
 											callbacks->set_font_size(atof(argv[1]));
 										}
 										break;
+#endif
 									default:
 										break;
 								}
@@ -290,6 +307,25 @@ static void _ansi_put(term_state_t * s, char c) {
 							if (!strcmp(argv[0], "?1049")) {
 								callbacks->cls(2);
 								callbacks->set_csr(0,0);
+							} else if (!strcmp(argv[0], "?1000")) {
+								s->mouse_on = 1;
+							} else if (!strcmp(argv[0], "?1002")) {
+								s->mouse_on = 2;
+							} else if (!strcmp(argv[0], "?25")) {
+								callbacks->set_csr_on(1);
+							}
+						}
+						break;
+					case ANSI_HIDE:
+						if (argc > 0) {
+							if (!strcmp(argv[0], "?1049")) {
+								/* TODO: Unimplemented */
+							} else if (!strcmp(argv[0], "?1000")) {
+								s->mouse_on = 0;
+							} else if (!strcmp(argv[0], "?1002")) {
+								s->mouse_on = 0;
+							} else if (!strcmp(argv[0], "?25")) {
+								callbacks->set_csr_on(0);
 							}
 						}
 						break;
@@ -374,7 +410,7 @@ static void _ansi_put(term_state_t * s, char c) {
 					case ANSI_DSR:
 						{
 							char out[24];
-							sprintf(out, "\033[%d;%dR", callbacks->get_csr_y + 1, callbacks->get_csr_x + 1);
+							sprintf(out, "\033[%d;%dR", callbacks->get_csr_y() + 1, callbacks->get_csr_x() + 1);
 							callbacks->input_buffer_stuff(out);
 						}
 						break;
@@ -464,7 +500,7 @@ static void _ansi_put(term_state_t * s, char c) {
 				return;
 			} else {
 				/* Still escaped */
-				if (c == '\n' || s->buflen > 256) {
+				if (c == '\n' || s->buflen == 255) {
 					ansi_dump_buffer(s);
 					callbacks->writer(c);
 					s->buflen = 0;
@@ -486,13 +522,44 @@ static void _ansi_put(term_state_t * s, char c) {
 			s->escape = 0;
 			s->buflen = 0;
 			break;
+		case 5:
+			if (c == 'q') {
+				char out[24];
+				sprintf(out, "\033T%d;%dq", callbacks->get_cell_width(), callbacks->get_cell_height());
+				callbacks->input_buffer_stuff(out);
+				s->escape = 0;
+				s->buflen = 0;
+			} else if (c == 's') {
+				s->img_collected = 0;
+				s->escape = 6;
+				s->img_size = sizeof(uint32_t) * callbacks->get_cell_width() * callbacks->get_cell_height();
+				if (!s->img_data) {
+					s->img_data = malloc(s->img_size);
+				}
+				memset(s->img_data, 0x00, s->img_size);
+			} else {
+				ansi_dump_buffer(s);
+				callbacks->writer(c);
+				s->escape = 0;
+				s->buflen = 0;
+			}
+			break;
+		case 6:
+			s->img_data[s->img_collected++] = c;
+			if (s->img_collected == s->img_size) {
+				callbacks->set_cell_contents(callbacks->get_csr_x(), callbacks->get_csr_y(), s->img_data);
+				callbacks->set_csr(min(callbacks->get_csr_x() + 1, s->width - 1), callbacks->get_csr_y());
+				s->escape = 0;
+				s->buflen = 0;
+			}
+			break;
 	}
 }
 
 void ansi_put(term_state_t * s, char c) {
-	spin_lock(&s->lock);
+	_spin_lock(&s->lock);
 	_ansi_put(s, c);
-	spin_unlock(&s->lock);
+	_spin_unlock(&s->lock);
 }
 
 term_state_t * ansi_init(term_state_t * s, int w, int y, term_callbacks_t * callbacks_in) {
@@ -512,6 +579,7 @@ term_state_t * ansi_init(term_state_t * s, int w, int y, term_callbacks_t * call
 	s->box    = 0;
 	s->callbacks = callbacks_in;
 	s->callbacks->set_color(s->fg, s->bg);
+	s->mouse_on = 0;
 
 	return s;
 }

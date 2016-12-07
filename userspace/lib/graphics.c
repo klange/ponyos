@@ -48,20 +48,24 @@ void clearbuffer(gfx_context_t * ctx) {
 }
 
 /* Deprecated */
+static int framebuffer_fd = 0;
 gfx_context_t * init_graphics_fullscreen() {
 	gfx_context_t * out = malloc(sizeof(gfx_context_t));
 
-	int fd = open("/dev/fb0", O_RDONLY);
-	if (fd < 0) {
+	if (!framebuffer_fd) {
+		framebuffer_fd = open("/dev/fb0", O_RDONLY);
+	}
+	if (framebuffer_fd < 0) {
 		/* oh shit */
 		free(out);
 		return NULL;
 	}
 
-	ioctl(fd, IO_VID_WIDTH,  &out->width);
-	ioctl(fd, IO_VID_HEIGHT, &out->height);
-	ioctl(fd, IO_VID_DEPTH,  &out->depth);
-	ioctl(fd, IO_VID_ADDR,   &out->buffer);
+	ioctl(framebuffer_fd, IO_VID_WIDTH,  &out->width);
+	ioctl(framebuffer_fd, IO_VID_HEIGHT, &out->height);
+	ioctl(framebuffer_fd, IO_VID_DEPTH,  &out->depth);
+	ioctl(framebuffer_fd, IO_VID_ADDR,   &out->buffer);
+	ioctl(framebuffer_fd, IO_VID_SIGNAL, NULL);
 
 	out->size   = GFX_H(out) * GFX_W(out) * GFX_B(out);
 	out->backbuffer = out->buffer;
@@ -73,6 +77,24 @@ gfx_context_t * init_graphics_fullscreen_double_buffer() {
 	if (!out) return NULL;
 	out->backbuffer = malloc(sizeof(uint32_t) * GFX_W(out) * GFX_H(out));
 	return out;
+}
+
+void reinit_graphics_fullscreen(gfx_context_t * out) {
+
+	ioctl(framebuffer_fd, IO_VID_WIDTH,  &out->width);
+	ioctl(framebuffer_fd, IO_VID_HEIGHT, &out->height);
+	ioctl(framebuffer_fd, IO_VID_DEPTH,  &out->depth);
+
+	out->size = GFX_H(out) * GFX_W(out) * GFX_B(out);
+
+	if (out->buffer != out->backbuffer) {
+		ioctl(framebuffer_fd, IO_VID_ADDR,   &out->buffer);
+		out->backbuffer = realloc(out->backbuffer, sizeof(uint32_t) * GFX_W(out) * GFX_H(out));
+	} else {
+		ioctl(framebuffer_fd, IO_VID_ADDR,   &out->buffer);
+		out->backbuffer = out->buffer;
+	}
+
 }
 
 gfx_context_t * init_graphics_sprite(sprite_t * sprite) {
@@ -502,20 +524,17 @@ int load_sprite_png(sprite_t * sprite, char * file) {
 
 	FILE *fp = fopen(file, "rb");
 	if (!fp) {
-		printf("Oh dear. Failed to open wallpaper file.\n");
 		return 1;
 	}
 	fread(header, 1, 8, fp);
 	if (png_sig_cmp(header, 0, 8)) {
 		fclose(fp);
-		printf("Oh dear. Bad signature.\n");
 		return 1;
 	}
 
 	png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
 	if (!png_ptr) {
 		fclose(fp);
-		printf("Oh dear. Couldn't make a read struct.\n");
 		return 1;
 	}
 	info_ptr = png_create_info_struct(png_ptr);
@@ -754,3 +773,37 @@ void draw_sprite_scaled(gfx_context_t * ctx, sprite_t * sprite, int32_t x, int32
 		}
 	}
 }
+
+void draw_sprite_alpha(gfx_context_t * ctx, sprite_t * sprite, int32_t x, int32_t y, float alpha) {
+	int32_t _left   = max(x, 0);
+	int32_t _top    = max(y, 0);
+	int32_t _right  = min(x + sprite->width,  ctx->width - 1);
+	int32_t _bottom = min(y + sprite->height, ctx->height - 1);
+	for (uint16_t _y = 0; _y < sprite->height; ++_y) {
+		for (uint16_t _x = 0; _x < sprite->width; ++_x) {
+			if (x + _x < _left || x + _x > _right || y + _y < _top || y + _y > _bottom)
+				continue;
+			uint32_t n_color = SPRITE(sprite, _x, _y);
+			uint32_t f_color = rgb(_ALP(n_color) * alpha, 0, 0);
+			GFX(ctx, x + _x, y + _y) = alpha_blend(GFX(ctx, x + _x, y + _y), n_color, f_color);
+		}
+	}
+}
+
+
+void draw_sprite_scaled_alpha(gfx_context_t * ctx, sprite_t * sprite, int32_t x, int32_t y, uint16_t width, uint16_t height, float alpha) {
+	int32_t _left   = max(x, 0);
+	int32_t _top    = max(y, 0);
+	int32_t _right  = min(x + width,  ctx->width - 1);
+	int32_t _bottom = min(y + height, ctx->height - 1);
+	for (uint16_t _y = 0; _y < height; ++_y) {
+		for (uint16_t _x = 0; _x < width; ++_x) {
+			if (x + _x < _left || x + _x > _right || y + _y < _top || y + _y > _bottom)
+				continue;
+			uint32_t n_color = getBilinearFilteredPixelColor(sprite, (double)_x / (double)width, (double)_y/(double)height);
+			uint32_t f_color = rgb(_ALP(n_color) * alpha, 0, 0);
+			GFX(ctx, x + _x, y + _y) = alpha_blend(GFX(ctx, x + _x, y + _y), n_color, f_color);
+		}
+	}
+}
+

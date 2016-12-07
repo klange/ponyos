@@ -5,15 +5,37 @@
 #define KBD_ESC_A  1
 #define KBD_ESC_B  2
 #define KBD_FUNC   3
+#define KBD_ESC_O  4
+#define KBD_ESC_EXT 5
 
 #define KEY_NONE        0
 #define KEY_BACKSPACE   8
 #define KEY_CTRL_A      1
+#define KEY_CTRL_B      2
 #define KEY_CTRL_C      3
 #define KEY_CTRL_D      4
 #define KEY_CTRL_E      5
+#define KEY_CTRL_F      6
+#define KEY_CTRL_G      7
+#define KEY_CTRL_H      8
+#define KEY_CTRL_I      9
+#define KEY_CTRL_J      10
+#define KEY_CTRL_K      11
 #define KEY_CTRL_L      12
+#define KEY_CTRL_M      13
+#define KEY_CTRL_N      14
+#define KEY_CTRL_O      15
+#define KEY_CTRL_P      16
+#define KEY_CTRL_Q      17
 #define KEY_CTRL_R      18
+#define KEY_CTRL_S      19
+#define KEY_CTRL_T      20
+#define KEY_CTRL_U      21
+#define KEY_CTRL_V      22
+#define KEY_CTRL_W      23
+#define KEY_CTRL_X      24
+#define KEY_CTRL_Y      25
+#define KEY_CTRL_Z      26
 #define KEY_ESCAPE      27
 #define KEY_NORMAL_MAX  256
 #define KEY_ARROW_UP    257
@@ -21,6 +43,16 @@
 #define KEY_ARROW_RIGHT 259
 #define KEY_ARROW_LEFT  260
 #define KEY_BAD_STATE   -1
+
+#define KEY_CTRL_ARROW_UP    261
+#define KEY_CTRL_ARROW_DOWN  262
+#define KEY_CTRL_ARROW_RIGHT 263
+#define KEY_CTRL_ARROW_LEFT  264
+
+#define KEY_SHIFT_ARROW_UP    265
+#define KEY_SHIFT_ARROW_DOWN  266
+#define KEY_SHIFT_ARROW_RIGHT 267
+#define KEY_SHIFT_ARROW_LEFT  268
 
 #define KEY_LEFT_CTRL   1001
 #define KEY_LEFT_SHIFT  1002
@@ -47,6 +79,11 @@
 
 #define KEY_PAGE_DOWN   2013
 #define KEY_PAGE_UP     2014
+
+#define KEY_HOME        2015
+#define KEY_END         2016
+#define KEY_DEL         2017
+#define KEY_INSERT      2018
 
 #define KEY_SCANCODE_F1  0x3b
 #define KEY_SCANCODE_F2  0x3c
@@ -104,6 +141,8 @@ typedef struct {
 	int kr_shift;
 	int kr_alt;
 	int kr_super;
+
+	int kbd_esc_buf;
 } key_event_state_t;
 
 kbd_key_t kbd_key(key_event_state_t * state, unsigned char c);

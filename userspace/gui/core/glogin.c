@@ -1,6 +1,7 @@
-/* This file is part of ToaruOS and is released under the terms
+/* vim: tabstop=4 shiftwidth=4 noexpandtab
+ * This file is part of ToaruOS and is released under the terms
  * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2013-2014 Kevin Lange
+ * Copyright (C) 2013-2015 Kevin Lange
  */
 /*
  * glogin
@@ -25,18 +26,44 @@
 #include "lib/kbd.h"
 #include "lib/yutani.h"
 #include "lib/toaru_auth.h"
+#include "lib/confreader.h"
 
-sprite_t * sprites[128];
-sprite_t alpha_tmp;
+#include "gui/ttk/ttk.h"
 
-gfx_context_t * ctx;
+#include "lib/trace.h"
+#define TRACE_APP_NAME "glogin"
 
-uint16_t win_width;
-uint16_t win_height;
+static sprite_t logo;
 
-int uid = 0;
+static gfx_context_t * ctx;
 
-#define LOGO_FINAL_OFFSET 150
+static uint16_t win_width;
+static uint16_t win_height;
+
+static int uid = 0;
+
+#define USERNAME_BOX 1
+#define PASSWORD_BOX 2
+
+static int LOGO_FINAL_OFFSET = 150;
+static int BOX_WIDTH = 272;
+static int BOX_HEIGHT = 104;
+static int BOX_ROUNDNESS = 4;
+static int CENTER_BOX_X=1;
+static int CENTER_BOX_Y=1;
+static int BOX_LEFT=-1;
+static int BOX_RIGHT=-1;
+static int BOX_TOP=-1;
+static int BOX_BOTTOM=-1;
+static int BOX_COLOR_R=0;
+static int BOX_COLOR_G=0;
+static int BOX_COLOR_B=0;
+static int BOX_COLOR_A=127;
+static char * WALLPAPER = "/usr/share/wallpapers/default";
+static char * LOGO = "/usr/share/logo_login.png";
+
+#define TEXTBOX_INTERIOR_LEFT 4
+#define EXTRA_TEXT_OFFSET 15
 
 int center_x(int x) {
 	return (win_width - x) / 2;
@@ -44,11 +71,6 @@ int center_x(int x) {
 
 int center_y(int y) {
 	return (win_height - y) / 2;
-}
-
-void init_sprite_png(int id, char * path) {
-	sprites[id] = malloc(sizeof(sprite_t));
-	load_sprite_png(sprites[id], path);
 }
 
 #define INPUT_SIZE 1024
@@ -74,88 +96,219 @@ int buffer_put(char * input_buffer, char c) {
 	return 0;
 }
 
-void * process_input(void * arg) {
-	while (1) {
+struct text_box {
+	int x;
+	int y;
+	unsigned int width;
+	unsigned int height;
+
+	uint32_t text_color;
+
+	struct login_container * parent;
+
+	int is_focused:1;
+	int is_password:1;
+
+	unsigned int cursor;
+	char * buffer;
+
+	char * placeholder;
+};
+
+struct login_container {
+	int x;
+	int y;
+	unsigned int width;
+	unsigned int height;
+
+	struct text_box * username_box;
+	struct text_box * password_box;
+
+	int show_error:1;
+};
+
+void draw_text_box(cairo_t * cr, struct text_box * tb) {
+	int x = tb->parent->x + tb->x;
+	int y = tb->parent->y + tb->y;
+
+	set_font_size(13);
+	int text_offset = 15;
+
+	cairo_rounded_rectangle(cr, 1 + x, 1 + y, tb->width - 2, tb->height - 2, 2.0);
+	if (tb->is_focused) {
+		cairo_set_source_rgba(cr, 8.0/255.0, 193.0/255.0, 236.0/255.0, 1.0);
+	} else {
+		cairo_set_source_rgba(cr, 158.0/255.0, 169.0/255.0, 177.0/255.0, 1.0);
 	}
-}
+	cairo_set_line_width(cr, 2);
+	cairo_stroke(cr);
 
-int32_t min(int32_t a, int32_t b) {
-	return (a < b) ? a : b;
-}
-
-int32_t max(int32_t a, int32_t b) {
-	return (a > b) ? a : b;
-}
-
-void draw_box(gfx_context_t * ctx, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color) {
-	int32_t _min_x = max(x, 0);
-	int32_t _min_y = max(y,  0);
-	int32_t _max_x = min(x + w - 1, ctx->width  - 1);
-	int32_t _max_y = min(y + h - 1, ctx->height - 1);
-
-	for (int i = _min_y; i < _max_y; ++i) {
-		draw_line(ctx, _min_x, _max_x, i, i, color);
+	{
+		cairo_pattern_t * pat = cairo_pattern_create_linear(1 + x, 1 + y, 1 + x, 1 + y + tb->height - 2);
+		if (tb->is_focused) {
+			cairo_pattern_add_color_stop_rgba(pat, 0, 241.0/255.0, 241.0/255.0, 244.0/255.0, 1.0);
+			cairo_pattern_add_color_stop_rgba(pat, 1, 1, 1, 1, 1.0);
+		} else {
+			cairo_pattern_add_color_stop_rgba(pat, 0, 241.0/255.0, 241.0/255.0, 244.0/255.0, 0.9);
+			cairo_pattern_add_color_stop_rgba(pat, 1, 1, 1, 1, 0.9);
+		}
+		cairo_rounded_rectangle(cr, 1 + x, 1 + y, tb->width - 2, tb->height - 2, 2.0);
+		cairo_set_source(cr, pat);
+		cairo_fill(cr);
+		cairo_pattern_destroy(pat);
 	}
+
+	char * text = tb->buffer;
+	char password_circles[512];
+	uint32_t color = tb->text_color;
+
+	if (strlen(tb->buffer) == 0 && !tb->is_focused) {
+		text = tb->placeholder;
+		color = rgba(0,0,0,127);
+	} else if (tb->is_password) {
+		strcpy(password_circles, "");
+		for (int i = 0; i < strlen(tb->buffer); ++i) {
+			strcat(password_circles, "⚫");
+		}
+		text = password_circles;
+	}
+
+	draw_string(ctx, x + TEXTBOX_INTERIOR_LEFT, y + text_offset, color, text);
+
+	if (tb->is_focused) {
+		int width = draw_string_width(text);
+		draw_line(ctx, x + TEXTBOX_INTERIOR_LEFT + width, x + TEXTBOX_INTERIOR_LEFT + width, y + 2, y + text_offset + 1, tb->text_color);
+	}
+
 }
 
-void draw_box_border(gfx_context_t * ctx, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t color) {
-	int32_t _min_x = max(x, 0);
-	int32_t _min_y = max(y,  0);
-	int32_t _max_x = min(x + w - 1, ctx->width  - 1);
-	int32_t _max_y = min(y + h - 1, ctx->height - 1);
+void draw_login_container(cairo_t * cr, struct login_container * lc) {
 
-	draw_line(ctx, _min_x, _max_x, _min_y, _min_y, color);
-	draw_line(ctx, _min_x, _max_x, _max_y, _max_y, color);
-	draw_line(ctx, _min_x, _min_x, _min_y, _max_y, color);
-	draw_line(ctx, _max_x, _max_x, _min_y, _max_y, color);
+	/* Draw rounded rectangle */
+	cairo_rounded_rectangle(cr, lc->x, lc->y, lc->width, lc->height, (float)BOX_ROUNDNESS);
+	cairo_set_source_rgba(cr, (float)(BOX_COLOR_R)/255.0, (float)(BOX_COLOR_G)/255.0, (float)(BOX_COLOR_B)/255.0, (float)(BOX_COLOR_A)/255.0);
+	cairo_fill(cr);
+
+	/* Draw labels */
+	if (lc->show_error) {
+		char * error_message = "Incorrect username or password.";
+
+		set_font_size(11);
+		draw_string(ctx, lc->x + (lc->width - draw_string_width(error_message)) / 2, lc->y + 6 + EXTRA_TEXT_OFFSET, rgb(240, 20, 20), error_message);
+	}
+
+	draw_text_box(cr, lc->username_box);
+	draw_text_box(cr, lc->password_box);
+
+}
+
+/**
+ * Get hostname information updated with the current time.
+ *
+ * @param hostname
+ */
+static void get_updated_hostname_with_time_info(char hostname[]) {
+	// get hostname
+	char _hostname[256];
+	syscall_gethostname(_hostname);
+
+	// get current time
+	struct tm * timeinfo;
+	struct timeval now;
+	gettimeofday(&now, NULL); //time(NULL);
+	timeinfo = localtime((time_t *)&now.tv_sec);
+
+	// format the hostname info
+	char _date[256];
+	strftime(_date, 256, "%a %B %d %Y", timeinfo);
+	sprintf(hostname, "%s // %s", _hostname, _date);
 }
 
 int main (int argc, char ** argv) {
-	init_sprite_png(0, "/usr/share/logo_login.png");
-	init_sprite_png(1, "/usr/share/wallpaper.png");
 	init_shmemfonts();
-
-	fprintf(stderr, "glogin here, hello world.\n");
 
 	yutani_t * y = yutani_init();
 
 	if (!y) {
-		fprintf(stderr, "[demo-client] Connection to server failed.\n");
+		fprintf(stderr, "[glogin] Connection to server failed.\n");
 		return 1;
 	}
 
+	/* Load config */
+	{
+		confreader_t * conf = confreader_load("/etc/glogin.conf");
+
+		LOGO_FINAL_OFFSET = confreader_intd(conf, "style", "logo_padding", LOGO_FINAL_OFFSET);
+		BOX_WIDTH = confreader_intd(conf, "style", "box_width", BOX_WIDTH);
+		BOX_HEIGHT = confreader_intd(conf, "style", "box_height", BOX_HEIGHT);
+		BOX_ROUNDNESS = confreader_intd(conf, "style", "box_roundness", BOX_ROUNDNESS);
+		CENTER_BOX_X = confreader_intd(conf, "style", "center_box_x", CENTER_BOX_X);
+		CENTER_BOX_Y = confreader_intd(conf, "style", "center_box_y", CENTER_BOX_Y);
+		BOX_LEFT = confreader_intd(conf, "style", "box_left", BOX_LEFT);
+		BOX_RIGHT = confreader_intd(conf, "style", "box_right", BOX_RIGHT);
+		BOX_TOP = confreader_intd(conf, "style", "box_top", BOX_TOP);
+		BOX_BOTTOM = confreader_intd(conf, "style", "box_bottom", BOX_BOTTOM);
+		BOX_COLOR_R = confreader_intd(conf, "style", "box_color_r", BOX_COLOR_R);
+		BOX_COLOR_G = confreader_intd(conf, "style", "box_color_g", BOX_COLOR_G);
+		BOX_COLOR_B = confreader_intd(conf, "style", "box_color_b", BOX_COLOR_B);
+		BOX_COLOR_A = confreader_intd(conf, "style", "box_color_a", BOX_COLOR_A);
+
+		WALLPAPER = confreader_getd(conf, "image", "wallpaper", WALLPAPER);
+		LOGO = confreader_getd(conf, "image", "logo", LOGO);
+
+		confreader_free(conf);
+
+		TRACE("Loading complete");
+	}
+
+	TRACE("Loading logo...");
+	load_sprite_png(&logo, LOGO);
+	TRACE("... done.");
+
 	/* Generate surface for background */
 	sprite_t * bg_sprite;
-	cairo_surface_t * bg_surf;
 
 	int width  = y->display_width;
 	int height = y->display_height;
-
-	win_width = width;
-	win_height = height;
+	int skip_animation = 0;
 
 	/* Do something with a window */
+	TRACE("Connecting to window server...");
 	yutani_window_t * wina = yutani_window_create(y, width, height);
 	assert(wina);
 	yutani_set_stack(y, wina, 0);
 	ctx = init_graphics_yutani_double_buffer(wina);
-	draw_fill(ctx, rgba(0,0,0,0));
+	draw_fill(ctx, rgba(0,0,0,255));
 	yutani_flip(y, wina);
+	TRACE("... done.");
 
+
+redo_everything:
+	win_width = width;
+	win_height = height;
+
+	cairo_surface_t * cs = cairo_image_surface_create_for_data((void*)ctx->backbuffer, CAIRO_FORMAT_ARGB32, ctx->width, ctx->height, cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32, ctx->width));
+	cairo_t * cr = cairo_create(cs);
+
+
+	TRACE("Loading wallpaper...");
 	{
-		float x = (float)width  / (float)sprites[1]->width;
-		float y = (float)height / (float)sprites[1]->height;
+		sprite_t * wallpaper = malloc(sizeof(sprite_t));
+		load_sprite_png(wallpaper, WALLPAPER);
 
-		int nh = (int)(x * (float)sprites[1]->height);
-		int nw = (int)(y * (float)sprites[1]->width);;
+		float x = (float)width  / (float)wallpaper->width;
+		float y = (float)height / (float)wallpaper->height;
+
+		int nh = (int)(x * (float)wallpaper->height);
+		int nw = (int)(y * (float)wallpaper->width);;
 
 		bg_sprite = create_sprite(width, height, ALPHA_OPAQUE);
 		gfx_context_t * bg = init_graphics_sprite(bg_sprite);
 
 		if (nw > width) {
-			draw_sprite_scaled(bg, sprites[1], (width - nw) / 2, 0, nw, height);
+			draw_sprite_scaled(bg, wallpaper, (width - nw) / 2, 0, nw, height);
 		} else {
-			draw_sprite_scaled(bg, sprites[1], 0, (height - nh) / 2, width, nh);
+			draw_sprite_scaled(bg, wallpaper, 0, (height - nh) / 2, width, nh);
 		}
 
 		/* Three box blurs = good enough approximation of a guassian, but faster*/
@@ -164,16 +317,14 @@ int main (int argc, char ** argv) {
 		blur_context_box(bg, 20);
 
 		free(bg);
+		free(wallpaper);
 	}
-
-	bg_surf = cairo_image_surface_create_for_data((void*)bg_sprite->bitmap, CAIRO_FORMAT_ARGB32, bg_sprite->width, bg_sprite->height, cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32, bg_sprite->width));
-
-	cairo_surface_t * cs = cairo_image_surface_create_for_data((void*)ctx->backbuffer, CAIRO_FORMAT_ARGB32, ctx->width, ctx->height, cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32, ctx->width));
-	cairo_t * cr = cairo_create(cs);
+	TRACE("... done.");
 
 	while (1) {
 
 		yutani_set_stack(y, wina, 0);
+		yutani_focus_window(y, wina->wid);
 
 		draw_fill(ctx, rgb(0,0,0));
 		draw_sprite(ctx, bg_sprite, center_x(width), center_y(height));
@@ -183,13 +334,37 @@ int main (int argc, char ** argv) {
 		char * foo = malloc(sizeof(uint32_t) * width * height);
 		memcpy(foo, ctx->backbuffer, sizeof(uint32_t) * width * height);
 
-		for (int i = 0; i < LOGO_FINAL_OFFSET; i += 2) {
-			memcpy(ctx->backbuffer, foo, sizeof(uint32_t) * width * height);
-			draw_sprite(ctx, sprites[0], center_x(sprites[0]->width), center_y(sprites[0]->height) - i);
-			flip(ctx);
-			yutani_flip_region(y, wina, center_x(sprites[0]->width), center_y(sprites[0]->height) - i, sprites[0]->width, sprites[0]->height + 5);
-			usleep(10000);
+		TRACE("Begin animation.");
+		if (!skip_animation) {
+			struct timeval start;
+			gettimeofday(&start, NULL);
+
+			while (1) {
+				uint32_t tick;
+				struct timeval t;
+				gettimeofday(&t, NULL);
+
+				uint32_t sec_diff = t.tv_sec - start.tv_sec;
+				uint32_t usec_diff = t.tv_usec - start.tv_usec;
+
+				if (t.tv_usec < start.tv_usec) {
+					sec_diff -= 1;
+					usec_diff = (1000000 + t.tv_usec) - start.tv_usec;
+				}
+
+				tick = (uint32_t)(sec_diff * 1000 + usec_diff / 1000);
+				int i = (float)LOGO_FINAL_OFFSET * (float)tick / 700.0f;
+				if (i >= LOGO_FINAL_OFFSET) break;
+
+				memcpy(ctx->backbuffer, foo, sizeof(uint32_t) * width * height);
+				draw_sprite(ctx, &logo, center_x(logo.width), center_y(logo.height) - i);
+				flip(ctx);
+				yutani_flip_region(y, wina, center_x(logo.width), center_y(logo.height) - i, logo.width, logo.height + 5);
+				usleep(10000);
+			}
 		}
+		TRACE("End animation.");
+		skip_animation = 0;
 
 		size_t buf_size = wina->width * wina->height * sizeof(uint32_t);
 		char * buf = malloc(buf_size);
@@ -198,7 +373,6 @@ int main (int argc, char ** argv) {
 
 		uint32_t black = rgb(0,0,0);
 		uint32_t white = rgb(255,255,255);
-		uint32_t red   = rgb(240, 20, 20);
 
 		int x_offset = 65;
 		int y_offset = 64;
@@ -209,20 +383,8 @@ int main (int argc, char ** argv) {
 		char password[INPUT_SIZE] = {0};
 		char hostname[512];
 
-		{
-			char _hostname[256];
-			syscall_gethostname(_hostname);
-
-			struct tm * timeinfo;
-			struct timeval now;
-			gettimeofday(&now, NULL); //time(NULL);
-			timeinfo = localtime((time_t *)&now.tv_sec);
-
-			char _date[256];
-			strftime(_date, 256, "%a %B %d %Y", timeinfo);
-
-			sprintf(hostname, "%s // %s", _hostname, _date);
-		}
+		// we do it here to calculate the final string position
+		get_updated_hostname_with_time_info(hostname);
 
 		char kernel_v[512];
 
@@ -236,112 +398,186 @@ int main (int argc, char ** argv) {
 
 		uid = 0;
 
-#define BOX_WIDTH  272
-#define BOX_HEIGHT 104
-#define USERNAME_BOX 1
-#define PASSWORD_BOX 2
-#define EXTRA_TEXT_OFFSET 12
-#define TEXTBOX_INTERIOR_LEFT 4
-#define LEFT_OFFSET 80
-		int box_x = center_x(BOX_WIDTH);
-		int box_y = center_y(0) + 8;
+		int box_x, box_y;
 
-		int focus = USERNAME_BOX;
+		if (CENTER_BOX_X) {
+			box_x = center_x(BOX_WIDTH);
+		} else if (BOX_LEFT == -1) {
+			box_x = win_width - BOX_RIGHT - BOX_WIDTH;
+		} else {
+			box_x = BOX_LEFT;
+		}
+		if (CENTER_BOX_Y) {
+			box_y = center_y(0) + 8;
+		} else if (BOX_TOP == -1) {
+			box_y = win_width - BOX_BOTTOM - BOX_HEIGHT;
+		} else {
+			box_y = BOX_TOP;
+		}
+
+		int focus = 0;
 
 		set_font_size(11);
-
-		int username_label_left = LEFT_OFFSET - 2 - draw_string_width("Username:");
-		int password_label_left = LEFT_OFFSET - 2 - draw_string_width("Password:");
 		int hostname_label_left = width - 10 - draw_string_width(hostname);
 		int kernel_v_label_left = 10;
 
-		char password_circles[INPUT_SIZE * 3];
+		struct text_box username_box = { (BOX_WIDTH - 170) / 2, 30, 170, 20, rgb(0,0,0), NULL, 0, 0, 0, username, "Username" };
+		struct text_box password_box = { (BOX_WIDTH - 170) / 2, 58, 170, 20, rgb(0,0,0), NULL, 0, 1, 0, password, "Password" };
 
-		int show_error = 0;
+		struct login_container lc = { box_x, box_y, BOX_WIDTH, BOX_HEIGHT, &username_box, &password_box, 0 };
+
+		username_box.parent = &lc;
+		password_box.parent = &lc;
 
 		while (1) {
-			focus = USERNAME_BOX;
+			focus = 0;
 			memset(username, 0x0, INPUT_SIZE);
 			memset(password, 0x0, INPUT_SIZE);
-			memset(password_circles, 0x0, INPUT_SIZE * 3);
 
 			while (1) {
 
-				strcpy(password_circles, "");
-				for (int i = 0; i < strlen(password); ++i) {
-					strcat(password_circles, "●");
-				}
+				// update time info
+				get_updated_hostname_with_time_info(hostname);
 
 				memcpy(ctx->backbuffer, foo, sizeof(uint32_t) * width * height);
-				draw_sprite(ctx, sprites[0], center_x(sprites[0]->width), center_y(sprites[0]->height) - LOGO_FINAL_OFFSET);
+				draw_sprite(ctx, &logo, center_x(logo.width), center_y(logo.height) - LOGO_FINAL_OFFSET);
 
+				set_font_size(11);
 				draw_string_shadow(ctx, hostname_label_left, height - 12, white, hostname, rgb(0,0,0), 2, 1, 1, 3.0);
 				draw_string_shadow(ctx, kernel_v_label_left, height - 12, white, kernel_v, rgb(0,0,0), 2, 1, 1, 3.0);
 
-				/* Draw backdrops */
-				draw_box(ctx, box_x, box_y, BOX_WIDTH, BOX_HEIGHT, rgb(180,124,205));
-				draw_box(ctx, box_x + LEFT_OFFSET, box_y + 32, 168, 16, rgb(255,255,255));
-				draw_box(ctx, box_x + LEFT_OFFSET, box_y + 56, 168, 16, rgb(255,255,255));
-
-				/* Draw labels */
-				draw_string(ctx, box_x + username_label_left, box_y + 32 + EXTRA_TEXT_OFFSET, white, "Username:");
-				draw_string(ctx, box_x + password_label_left, box_y + 56 + EXTRA_TEXT_OFFSET, white, "Password:");
-
-				/* Draw box entries */
-				draw_string(ctx, box_x + LEFT_OFFSET + TEXTBOX_INTERIOR_LEFT, box_y + 32 + EXTRA_TEXT_OFFSET, black, username);
-				draw_string(ctx, box_x + LEFT_OFFSET + TEXTBOX_INTERIOR_LEFT, box_y + 56 + EXTRA_TEXT_OFFSET, black, password_circles);
-
-				if (show_error) {
-					char * error_message = "Incorrect username or password.";
-					
-					draw_string(ctx, box_x + (BOX_WIDTH - draw_string_width(error_message)) / 2, box_y + 8 + EXTRA_TEXT_OFFSET, red, error_message);
-				}
-
 				if (focus == USERNAME_BOX) {
-					draw_box_border(ctx, box_x + LEFT_OFFSET, box_y + 32, 168, 16, rgb(229, 68, 138));
+					username_box.is_focused = 1;
+					password_box.is_focused = 0;
 				} else if (focus == PASSWORD_BOX) {
-					draw_box_border(ctx, box_x + LEFT_OFFSET, box_y + 56, 168, 16, rgb(229, 68, 138));
+					username_box.is_focused = 0;
+					password_box.is_focused = 1;
+				} else {
+					username_box.is_focused = 0;
+					password_box.is_focused = 0;
 				}
+
+				draw_login_container(cr, &lc);
 
 				flip(ctx);
 				yutani_flip(y, wina);
 
 				struct yutani_msg_key_event kbd;
-				int tmp = 0;
+				struct yutani_msg_window_mouse_event mou;
+				int msg_type = 0;
+collect_events:
 				do {
 					yutani_msg_t * msg = yutani_poll(y);
-					if (msg->type == YUTANI_MSG_KEY_EVENT) {
-						struct yutani_msg_key_event * ke = (void*)msg->data;
-						if (ke->event.action == KEY_ACTION_DOWN) {
-							memcpy(&kbd, ke, sizeof(struct yutani_msg_key_event));
-							tmp = 1;
-						}
+					switch (msg->type) {
+						case YUTANI_MSG_KEY_EVENT:
+							{
+								struct yutani_msg_key_event * ke = (void*)msg->data;
+								if (ke->event.action == KEY_ACTION_DOWN) {
+									memcpy(&kbd, ke, sizeof(struct yutani_msg_key_event));
+									msg_type = 1;
+								}
+							}
+							break;
+						case YUTANI_MSG_WINDOW_MOUSE_EVENT:
+							{
+								struct yutani_msg_window_mouse_event * me = (void*)msg->data;
+								memcpy(&mou, me, sizeof(struct yutani_msg_mouse_event));
+								msg_type = 2;
+							}
+							break;
+						case YUTANI_MSG_WELCOME:
+							{
+								struct yutani_msg_welcome * mw = (void*)msg->data;
+								yutani_window_resize(y, wina, mw->display_width, mw->display_height);
+							}
+							break;
+						case YUTANI_MSG_RESIZE_OFFER:
+							{
+								struct yutani_msg_window_resize * wr = (void*)msg->data;
+								width = wr->width;
+								height = wr->height;
+								yutani_window_resize_accept(y, wina, width, height);
+								reinit_graphics_yutani(ctx, wina);
+								yutani_window_resize_done(y, wina);
+
+								sprite_free(bg_sprite);
+								cairo_destroy(cr);
+								cairo_surface_destroy(cs);
+
+								skip_animation = 1;
+								goto redo_everything;
+							}
+							break;
 					}
 					free(msg);
-				} while (!tmp);
+				} while (!msg_type);
 
-				if (kbd.event.keycode == '\n') {
-					if (focus == USERNAME_BOX) {
-						focus = PASSWORD_BOX;
+				if (msg_type == 1) {
+
+					if (kbd.event.keycode == '\n') {
+						if (focus == USERNAME_BOX) {
+							focus = PASSWORD_BOX;
+							continue;
+						} else if (focus == PASSWORD_BOX) {
+							break;
+						} else {
+							focus = USERNAME_BOX;
+							continue;
+						}
+					}
+
+					if (kbd.event.keycode == '\t') {
+						if (focus == USERNAME_BOX) {
+							focus = PASSWORD_BOX;
+						} else {
+							focus = USERNAME_BOX;
+						}
 						continue;
-					} else if (focus == PASSWORD_BOX) {
-						break;
 					}
-				}
 
-				if (kbd.event.keycode == '\t') {
-					if (focus == USERNAME_BOX) {
-						focus = PASSWORD_BOX;
-					} else if (focus == PASSWORD_BOX) {
-						focus = USERNAME_BOX;
+					if (kbd.event.key) {
+
+						if (!focus) {
+							focus = USERNAME_BOX;
+						}
+
+						if (focus == USERNAME_BOX) {
+							buffer_put(username, kbd.event.key);
+						} else if (focus == PASSWORD_BOX) {
+							buffer_put(password, kbd.event.key);
+						}
+
 					}
-					continue;
-				}
 
-				if (focus == USERNAME_BOX) {
-					buffer_put(username, kbd.event.keycode);
-				} else if (focus == PASSWORD_BOX) {
-					buffer_put(password, kbd.event.keycode);
+				} else if (msg_type == 2) {
+
+					if ((mou.command == YUTANI_MOUSE_EVENT_DOWN
+					     && mou.buttons & YUTANI_MOUSE_BUTTON_LEFT)
+					    || (mou.command == YUTANI_MOUSE_EVENT_CLICK)) {
+						/* Determine if we were inside of a text box */
+
+						if (mou.new_x >= lc.x + username_box.x &&
+						    mou.new_x <= lc.x + username_box.x + username_box.width &&
+						    mou.new_y >= lc.y + username_box.y &&
+						    mou.new_y <= lc.y + username_box.y + username_box.height) {
+							/* Ensure this box is focused. */
+							focus = USERNAME_BOX;
+							continue;
+						} else if (mou.new_x >= lc.x + password_box.x &&
+						    mou.new_x <= lc.x + password_box.x + password_box.width &&
+						    mou.new_y >= lc.y + password_box.y &&
+						    mou.new_y <= lc.y + password_box.y + password_box.height) {
+							/* Ensure this box is focused. */
+							focus = PASSWORD_BOX;
+							continue;
+						} else {
+							focus = 0;
+							continue;
+						}
+
+					} else {
+						goto collect_events;
+					}
 				}
 
 			}
@@ -351,12 +587,13 @@ int main (int argc, char ** argv) {
 			if (uid >= 0) {
 				break;
 			}
-			show_error = 1;
+			lc.show_error = 1;
 		}
 
 		memcpy(ctx->backbuffer, foo, sizeof(uint32_t) * width * height);
 		flip(ctx);
 		yutani_flip(y, wina);
+		syscall_yield();
 
 		pid_t _session_pid = fork();
 		if (!_session_pid) {

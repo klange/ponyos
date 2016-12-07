@@ -20,7 +20,8 @@
 
 #define TIMER_IRQ 0
 
-#define SUBTICKS_PER_TICK 100
+#define SUBTICKS_PER_TICK 1000
+#define RESYNC_TIME 1
 
 /*
  * Set the phase (in hertz) for the Programmable
@@ -40,23 +41,31 @@ timer_phase(
  * Internal timer counters
  */
 unsigned long timer_ticks = 0;
-unsigned char timer_subticks = 0;
+unsigned long timer_subticks = 0;
+signed long timer_drift = 0;
+signed long _timer_drift = 0;
+
+static int behind = 0;
 
 /*
  * IRQ handler for when the timer fires
  */
-void
-timer_handler(
-		struct regs *r
-		) {
-	if (++timer_subticks == SUBTICKS_PER_TICK) {
+int timer_handler(struct regs *r) {
+	if (++timer_subticks == SUBTICKS_PER_TICK || (behind && ++timer_subticks == SUBTICKS_PER_TICK)) {
 		timer_ticks++;
 		timer_subticks = 0;
+		if (timer_ticks % RESYNC_TIME == 0) {
+			uint32_t new_time = read_cmos();
+			_timer_drift = new_time - boot_time - timer_ticks;
+			if (_timer_drift > 0) behind = 1;
+			else behind = 0;
+		}
 	}
 	irq_ack(TIMER_IRQ);
 
 	wakeup_sleepers(timer_ticks, timer_subticks);
 	switch_task(1);
+	return 1;
 }
 
 void relative_time(unsigned long seconds, unsigned long subseconds, unsigned long * out_seconds, unsigned long * out_subseconds) {
@@ -74,7 +83,8 @@ void relative_time(unsigned long seconds, unsigned long subseconds, unsigned lon
  */
 void timer_install(void) {
 	debug_print(NOTICE,"Initializing interval timer");
+	boot_time = read_cmos();
 	irq_install_handler(TIMER_IRQ, timer_handler);
-	timer_phase(100); /* 100Hz */
+	timer_phase(SUBTICKS_PER_TICK); /* 100Hz */
 }
 

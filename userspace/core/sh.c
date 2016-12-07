@@ -29,9 +29,11 @@
 #include <sys/time.h>
 #include <sys/wait.h>
 #include <sys/utsname.h>
+#include <sys/stat.h>
 
 #include "lib/list.h"
 #include "lib/kbd.h"
+#include "lib/rline.h"
 
 #define PIPE_TOKEN "\xFF\xFFPIPE\xFF\xFF"
 
@@ -219,219 +221,6 @@ void sig_pass(int sig) {
 	}
 }
 
-struct rline_callback;
-
-typedef struct {
-	char *  buffer;
-	struct rline_callback * callbacks;
-	int     collected;
-	int     requested;
-	int     newline;
-	int     cancel;
-	int     offset;
-	int     tabbed;
-} rline_context_t;
-
-typedef void (*rline_callback_t)(rline_context_t * context);
-
-typedef struct rline_callback {
-	rline_callback_t tab_complete;
-	rline_callback_t redraw_prompt;
-	rline_callback_t special_key;
-	rline_callback_t key_up;
-	rline_callback_t key_down;
-	rline_callback_t key_left;
-	rline_callback_t key_right;
-	rline_callback_t rev_search;
-} rline_callbacks_t;
-
-void rline_redraw(rline_context_t * context) {
-	printf("\033[u%s\033[K", context->buffer);
-	for (int i = context->offset; i < context->collected; ++i) {
-		printf("\033[D");
-	}
-	fflush(stdout);
-}
-
-void rline_redraw_clean(rline_context_t * context) {
-	printf("\033[u%s", context->buffer);
-	for (int i = context->offset; i < context->collected; ++i) {
-		printf("\033[D");
-	}
-	fflush(stdout);
-}
-
-int rline(char * buffer, int buf_size, rline_callbacks_t * callbacks) {
-	/* Initialize context */
-	rline_context_t context = {
-		buffer,
-		callbacks,
-		0,
-		buf_size,
-		0,
-		0,
-		0,
-		0,
-	};
-
-	printf("\033[s");
-	fflush(stdout);
-
-	key_event_state_t kbd_state = {0};
-
-	/* Read keys */
-	while ((context.collected < context.requested) && (!context.newline)) {
-		uint32_t key_sym = kbd_key(&kbd_state, fgetc(stdin));
-		if (key_sym == KEY_NONE) continue;
-		switch (key_sym) {
-			case KEY_CTRL_C:
-				printf("^C\n");
-				context.buffer[0] = '\0';
-				return 0;
-			case KEY_CTRL_D:
-				if (context.collected == 0) {
-					printf("exit\n");
-					sprintf(context.buffer, "exit\n");
-					return strlen(context.buffer);
-				}
-				continue;
-			case KEY_CTRL_R:
-				if (callbacks->rev_search) {
-					callbacks->rev_search(&context);
-					return context.collected;
-				}
-				continue;
-			case KEY_ARROW_UP:
-				if (callbacks->key_up) {
-					callbacks->key_up(&context);
-				}
-				continue;
-			case KEY_ARROW_DOWN:
-				if (callbacks->key_down) {
-					callbacks->key_down(&context);
-				}
-				continue;
-			case KEY_ARROW_RIGHT:
-				if (callbacks->key_right) {
-					callbacks->key_right(&context);
-				} else {
-					if (context.offset < context.collected) {
-						printf("\033[C");
-						fflush(stdout);
-						context.offset++;
-					}
-				}
-				continue;
-			case KEY_ARROW_LEFT:
-				if (callbacks->key_left) {
-					callbacks->key_left(&context);
-				} else {
-					if (context.offset > 0) {
-						printf("\033[D");
-						fflush(stdout);
-						context.offset--;
-					}
-				}
-				continue;
-			case KEY_BACKSPACE:
-				if (context.collected) {
-					if (!context.offset) {
-						continue;
-					}
-					printf("\010 \010");
-					if (context.offset != context.collected) {
-						int remaining = context.collected - context.offset;
-						for (int i = 0; i < remaining; ++i) {
-							printf("%c", context.buffer[context.offset + i]);
-							context.buffer[context.offset + i - 1] = context.buffer[context.offset + i];
-						}
-						printf(" ");
-						for (int i = 0; i < remaining + 1; ++i) {
-							printf("\033[D");
-						}
-						context.offset--;
-						context.collected--;
-					} else {
-						context.buffer[--context.collected] = '\0';
-						context.offset--;
-					}
-					fflush(stdout);
-				}
-				continue;
-			case KEY_CTRL_A:
-				while (context.offset > 0) {
-					printf("\033[D");
-					context.offset--;
-				}
-				fflush(stdout);
-				continue;
-			case KEY_CTRL_E:
-				while (context.offset < context.collected) {
-					printf("\033[C");
-					context.offset++;
-				}
-				fflush(stdout);
-				continue;
-			case KEY_CTRL_L: /* ^L: Clear Screen, redraw prompt and buffer */
-				printf("\033[H\033[2J");
-				if (callbacks->redraw_prompt) {
-					callbacks->redraw_prompt(&context);
-				}
-				printf("\033[s");
-				rline_redraw_clean(&context);
-				continue;
-			case '\t':
-				if (callbacks->tab_complete) {
-					callbacks->tab_complete(&context);
-				}
-				continue;
-			case '\n':
-				while (context.offset < context.collected) {
-					printf("\033[C");
-					context.offset++;
-				}
-				if (context.collected < context.requested) {
-					context.buffer[context.collected] = '\n';
-					context.buffer[++context.collected] = '\0';
-					context.offset++;
-				}
-				printf("\n");
-				fflush(stdout);
-				context.newline = 1;
-				continue;
-		}
-		if (context.offset != context.collected) {
-			for (int i = context.collected; i > context.offset; --i) {
-				context.buffer[i] = context.buffer[i-1];
-			}
-			if (context.collected < context.requested) {
-				context.buffer[context.offset] = (char)key_sym;
-				context.buffer[++context.collected] = '\0';
-				context.offset++;
-			}
-			for (int i = context.offset - 1; i < context.collected; ++i) {
-				printf("%c", context.buffer[i]);
-			}
-			for (int i = context.offset; i < context.collected; ++i) {
-				printf("\033[D");
-			}
-			fflush(stdout);
-		} else {
-			printf("%c", (char)key_sym);
-			if (context.collected < context.requested) {
-				context.buffer[context.collected] = (char)key_sym;
-				context.buffer[++context.collected] = '\0';
-				context.offset++;
-			}
-			fflush(stdout);
-		}
-	}
-
-	/* Cap that with a null */
-	context.buffer[context.collected] = '\0';
-	return context.collected;
-}
-
 void redraw_prompt_func(rline_context_t * context) {
 	draw_prompt(0);
 }
@@ -444,122 +233,166 @@ void redraw_prompt_func_c(rline_context_t * context) {
 	draw_prompt_c();
 }
 
-void tab_complete_func(rline_context_t * context) {
-	char buf[1024];
-	char * pch;
-	char * cmd;
-	char * save;
+void tab_complete_func(rline_context_t * c) {
+	char * dup = malloc(LINE_LEN);
+	
+	memcpy(dup, c->buffer, LINE_LEN);
 
-	memcpy(buf, context->buffer, 1024);
-
-	pch = strtok_r(buf, " ", &save);
-	cmd = pch;
-
-	char * argv[1024];
+	char *pch, *cmd, *save;
+	char *argv[1024];
 	int argc = 0;
+	int cursor = 0;
 
-	if (!cmd) {
+	pch = strtok_r(dup, " ", &save);
+
+	if (!pch) {
 		argv[0] = "";
-		argc = 1;
-	} else {
-		while (pch != NULL) {
-			argv[argc] = (char *)pch;
-			++argc;
-			pch = strtok_r(NULL, " ", &save);
-		}
+		argc = 0;
 	}
 
+	while (pch != NULL) {
+		if (pch - dup <= c->offset) cursor = argc;
+		argv[argc] = pch;
+		++argc;
+		pch = strtok_r(NULL, " ", &save);
+	}
 	argv[argc] = NULL;
 
-	if (argc < 2) {
-		if (context->buffer[strlen(context->buffer) - 1] == ' ' || argc == 0) {
-			if (!context->tabbed) {
-				context->tabbed = 1;
-				return;
+	if (c->offset && c->buffer[c->offset-1] == ' ' && argc) {
+		cursor++;
+	}
+
+	char * word = argv[cursor];
+	int word_offset = word ? (c->offset - (argv[cursor] - dup)) : 0;
+
+	char * prefix = malloc(word_offset + 1);
+	if (word) memcpy(prefix, word, word_offset);
+	prefix[word_offset] = '\0';
+
+	/* Complete file path */
+	list_t * matches = list_create();
+	char * match = NULL;
+	int free_matches = 0;
+	int no_space_if_only = 0;
+	if (cursor == 0 && !strchr(prefix,'/')) {
+		/* Complete binary name */
+		for (int i = 0; i < shell_commands_len; ++i) {
+			if (strstr(shell_commands[i], prefix) == shell_commands[i]) {
+				list_insert(matches, shell_commands[i]);
+				match = shell_commands[i];
 			}
-			fprintf(stderr, "\n");
-			for (int i = 0; i < shell_commands_len; ++i) {
-				fprintf(stderr, "%s", shell_commands[i]);
-				if (i < shell_commands_len - 1) {
+		}
+	} else {
+		free_matches = 1;
+		char * tmp = strdup(prefix);
+		char * last_slash = strrchr(tmp, '/');
+		DIR * dirp;
+		char * compare = prefix;
+		if (last_slash) {
+			*last_slash = '\0';
+			word = word + (last_slash - tmp) + 1;
+			word_offset = word_offset - (last_slash - tmp + 1);
+			compare = word;
+			if (last_slash == tmp) {
+				dirp = opendir("/");
+			} else {
+				dirp = opendir(tmp);
+			}
+		} else {
+			dirp = opendir(".");
+		}
+
+		if (!dirp) {
+			free(tmp);
+			goto finish_tab;
+		}
+
+		struct dirent * ent = readdir(dirp);
+		while (ent != NULL) {
+			if (ent->d_name[0] != '.') {
+				if (!word || strstr(ent->d_name, compare) == ent->d_name) {
+					struct stat statbuf;
+					/* stat it */
+					if (last_slash) {
+						char * x = malloc(strlen(tmp) + 1 + strlen(ent->d_name) + 1);
+						sprintf(x,"%s/%s",tmp,ent->d_name);
+						int t = lstat(x, &statbuf);
+					} else {
+						int t = lstat(ent->d_name, &statbuf);
+					}
+					char * s;
+					if (S_ISDIR(statbuf.st_mode)) {
+						s = malloc(strlen(ent->d_name) + 2);
+						sprintf(s,"%s/", ent->d_name);
+						no_space_if_only = 1;
+					} else {
+						s = strdup(ent->d_name);
+					}
+					list_insert(matches, s);
+					match = s;
+				}
+			}
+			ent = readdir(dirp);
+		}
+		closedir(dirp);
+
+		free(tmp);
+	}
+	if (matches->length == 1) {
+		/* Insert */
+		rline_insert(c, &match[word_offset]);
+		if (word && word_offset == strlen(word) && !no_space_if_only) {
+			rline_insert(c, " ");
+		}
+		rline_redraw(c);
+	} else if (matches->length > 1) {
+		if (!c->tabbed) {
+			/* see if there is a minimum subset we can fill in */
+			size_t j = word_offset;
+			do {
+				char d = match[j];
+				int diff = 0;
+				foreach(node, matches) {
+					char * match = (char *)node->value;
+					if (match[j] != d || match[j] == '\0') diff = 1;
+				}
+				if (diff) break;
+				j++;
+			} while (j < c->requested);
+			if (j > word_offset) {
+				char * tmp = strdup(match);
+				tmp[j] = '\0';
+				rline_insert(c, &tmp[word_offset]);
+				rline_redraw(c);
+				free(tmp);
+			} else {
+				c->tabbed = 1;
+			}
+		} else {
+			/* Print matches */
+			fprintf(stderr,"\n");
+			size_t j = 0;
+			foreach(node, matches) {
+				char * match = (char *)node->value;
+				fprintf(stderr, "%s", match);
+				++j;
+				if (j < matches->length) {
 					fprintf(stderr, ", ");
 				}
 			}
-			fprintf(stderr, "\n");
-			context->callbacks->redraw_prompt(context);
-			rline_redraw(context);
-			return;
-		} else {
-			int j = 0;
-			list_t * matches = list_create();
-			char * match = NULL;
-			for (int i = 0; i < shell_commands_len; ++i) {
-				if (strstr(shell_commands[i], argv[0]) == shell_commands[i]) {
-					list_insert(matches, shell_commands[i]);
-					match = shell_commands[i];
-				}
-			}
-			if (matches->length == 0) {
-				list_free(matches);
-				return;
-			} else if (matches->length == 1) {
-				for (int j = 0; j < strlen(context->buffer); ++j) {
-					printf("\010 \010");
-				}
-				printf("%s", match);
-				fflush(stdout);
-				memcpy(context->buffer, match, strlen(match) + 1);
-				context->collected = strlen(context->buffer);
-				context->offset = context->collected;
-				list_free(matches);
-				return;
-			} else  {
-				if (!context->tabbed) {
-					context->tabbed = 1;
-					list_free(matches);
-					return;
-				}
-				j = matches->length;
-				char tmp[1024];
-				memcpy(tmp, argv[0], strlen(argv[0])+1);
-				while (j == matches->length) {
-					j = 0;
-					int x = strlen(tmp);
-					tmp[x] = match[x];
-					tmp[x+1] = '\0';
-					node_t * node;
-					foreach(node, matches) {
-						char * match = (char *)node->value;
-						if (strstr(match, tmp) == match) {
-							j++;
-						}
-					}
-				}
-				tmp[strlen(tmp)-1] = '\0';
-				memcpy(context->buffer, tmp, strlen(tmp) + 1);
-				context->collected = strlen(context->buffer);
-				context->offset = context->collected;
-				j = 0;
-				fprintf(stderr, "\n");
-				node_t * node;
-				foreach(node, matches) {
-					char * match = (char *)node->value;
-					fprintf(stderr, "%s", match);
-					++j;
-					if (j < matches->length) {
-						fprintf(stderr, ", ");
-					}
-				}
-				fprintf(stderr, "\n");
-				context->callbacks->redraw_prompt(context);
-				fprintf(stderr, "\033[s");
-				rline_redraw(context);
-				list_free(matches);
-				return;
-			}
+			fprintf(stderr,"\n");
+			c->callbacks->redraw_prompt(c);
+			fprintf(stderr, "\033[s");
+			rline_redraw(c);
 		}
-	} else {
-		/* XXX Should complete to file names here */
 	}
+
+finish_tab:
+	if (free_matches) list_destroy(matches);
+	list_free(matches);
+	free(prefix);
+	free(dup);
+
 }
 
 void reverse_search(rline_context_t * context) {
@@ -1047,6 +880,10 @@ void sort_commands() {
 	}
 }
 
+void show_version(void) {
+	printf("esh 0.11.0 - experimental shell\n");
+}
+
 void show_usage(int argc, char * argv[]) {
 	printf(
 			"Esh: The Experimental Shell\n"
@@ -1055,6 +892,7 @@ void show_usage(int argc, char * argv[]) {
 			"\n"
 			" -c \033[4mcmd\033[0m \033[3mparse and execute cmd\033[0m\n"
 			//-c cmd \033[...
+			" -v     \033[3mshow version information\033[0m\n"
 			" -?     \033[3mshow this help text\033[0m\n"
 			"\n", argv[0]);
 }
@@ -1080,11 +918,14 @@ int main(int argc, char ** argv) {
 
 	if (argc > 1) {
 		int index, c;
-		while ((c = getopt(argc, argv, "c:?")) != -1) {
+		while ((c = getopt(argc, argv, "c:v?")) != -1) {
 			switch (c) {
 				case 'c':
 					shell_interactive = 0;
 					return shell_exec(optarg, strlen(optarg));
+				case 'v':
+					show_version();
+					return 0;
 				case '?':
 					show_usage(argc, argv);
 					return 0;
@@ -1218,7 +1059,19 @@ uint32_t shell_cmd_set(int argc, char * argv[]) {
 	} else if (!strcmp(argv[1], "no-force-raw")) {
 		shell_force_raw = 0;
 		return 0;
+	} else if (!strcmp(argv[1], "--help")) {
+		fprintf(stderr, "Available arguments:\n"
+		                "  alpha - alpha transparency enabled / disabled\n"
+		                "  scale - font scaling\n"
+		                "  size - terminal width/height in characters\n"
+		                "  force-raw - sets terminal to raw mode before commands\n"
+		                "  no-force-raw - disables forced raw mode\n"
+		);
+		return 0;
 	}
+
+	fprintf(stderr, "%s: unrecognized argument\n", argv[0]);
+	return 1;
 }
 
 void install_commands() {

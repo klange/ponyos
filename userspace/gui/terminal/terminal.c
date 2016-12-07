@@ -76,6 +76,10 @@ uint8_t  _force_kernel  = 0;
 uint8_t  _hold_out      = 0;    /* state indicator on last cell ignore \n */
 uint8_t  _free_size     = 1;    /* Disable rounding when resized */
 
+int      last_mouse_x   = -1;
+int      last_mouse_y   = -1;
+int      button_state   = 0;
+
 static volatile int display_lock = 0;
 
 yutani_window_t * window       = NULL; /* GUI window */
@@ -103,6 +107,7 @@ size_t terminal_title_length = 0;
 gfx_context_t * ctx;
 static void render_decors();
 void term_clear();
+void flush_unused_images(void);
 
 void dump_buffer();
 
@@ -388,7 +393,7 @@ _extra_stuff:
 	}
 }
 
-static void cell_set(uint16_t x, uint16_t y, uint32_t c, uint32_t fg, uint32_t bg, uint8_t flags) {
+static void cell_set(uint16_t x, uint16_t y, uint32_t c, uint32_t fg, uint32_t bg, uint32_t flags) {
 	if (x >= term_width || y >= term_height) return;
 	term_cell_t * cell = (term_cell_t *)((uintptr_t)term_buffer + (y * term_width + x) * sizeof(term_cell_t));
 	cell->c     = c;
@@ -397,9 +402,24 @@ static void cell_set(uint16_t x, uint16_t y, uint32_t c, uint32_t fg, uint32_t b
 	cell->flags = flags;
 }
 
+static void redraw_cell_image(uint16_t x, uint16_t y, term_cell_t * cell) {
+	uint32_t * data = (uint32_t *)cell->fg;
+	for (uint32_t yy = 0; yy < char_height; ++yy) {
+		for (uint32_t xx = 0; xx < char_width; ++xx) {
+			term_set_point(x * char_width + xx, y * char_height + yy, *data);
+			data++;
+		}
+	}
+	l_x = min(l_x, decor_left_width + x);
+	l_y = min(l_y, decor_top_height + y);
+	r_x = max(r_x, decor_left_width + x + char_width);
+	r_y = max(r_y, decor_top_height + y + char_height);
+}
+
 static void cell_redraw(uint16_t x, uint16_t y) {
 	if (x >= term_width || y >= term_height) return;
 	term_cell_t * cell = (term_cell_t *)((uintptr_t)term_buffer + (y * term_width + x) * sizeof(term_cell_t));
+	if (cell->flags & ANSI_EXT_IMG) { redraw_cell_image(x,y,cell); return; }
 	if (((uint32_t *)cell)[0] == 0x00000000) {
 		term_write_char(' ', x * char_width, y * char_height, TERM_DEFAULT_FG, TERM_DEFAULT_BG, TERM_DEFAULT_FLAGS);
 	} else {
@@ -410,6 +430,7 @@ static void cell_redraw(uint16_t x, uint16_t y) {
 static void cell_redraw_inverted(uint16_t x, uint16_t y) {
 	if (x >= term_width || y >= term_height) return;
 	term_cell_t * cell = (term_cell_t *)((uintptr_t)term_buffer + (y * term_width + x) * sizeof(term_cell_t));
+	if (cell->flags & ANSI_EXT_IMG) { redraw_cell_image(x,y,cell); return; }
 	if (((uint32_t *)cell)[0] == 0x00000000) {
 		term_write_char(' ', x * char_width, y * char_height, TERM_DEFAULT_BG, TERM_DEFAULT_FG, TERM_DEFAULT_FLAGS | ANSI_SPECBG);
 	} else {
@@ -420,6 +441,7 @@ static void cell_redraw_inverted(uint16_t x, uint16_t y) {
 static void cell_redraw_box(uint16_t x, uint16_t y) {
 	if (x >= term_width || y >= term_height) return;
 	term_cell_t * cell = (term_cell_t *)((uintptr_t)term_buffer + (y * term_width + x) * sizeof(term_cell_t));
+	if (cell->flags & ANSI_EXT_IMG) { redraw_cell_image(x,y,cell); return; }
 	if (((uint32_t *)cell)[0] == 0x00000000) {
 		term_write_char(' ', x * char_width, y * char_height, TERM_DEFAULT_FG, TERM_DEFAULT_BG, TERM_DEFAULT_FLAGS | ANSI_BORDER);
 	} else {
@@ -479,6 +501,7 @@ void term_scroll(int how_much) {
 		/* And redraw the new rows */
 		for (int i = 0; i < how_much; ++i) {
 			for (uint16_t x = 0; x < term_width; ++x) {
+				cell_set(x,term_height - how_much,' ', current_fg, current_bg, ansi_state->flags);
 				cell_redraw(x, term_height - how_much);
 			}
 		}
@@ -506,6 +529,7 @@ void term_scroll(int how_much) {
 			}
 		}
 	}
+	flush_unused_images();
 	yutani_flip(yctx, window);
 }
 
@@ -554,6 +578,7 @@ void redraw_scrollback() {
 			int y = i - scrollback_offset;
 			for (int x = 0; x < term_width; ++x) {
 				term_cell_t * cell = (term_cell_t *)((uintptr_t)term_buffer + (y * term_width + x) * sizeof(term_cell_t));
+				if (cell->flags & ANSI_EXT_IMG) { redraw_cell_image(x,i,cell); continue; }
 				if (((uint32_t *)cell)[0] == 0x00000000) {
 					term_write_char(' ', x * char_width, i * char_height, TERM_DEFAULT_FG, TERM_DEFAULT_BG, TERM_DEFAULT_FLAGS);
 				} else {
@@ -699,26 +724,65 @@ void term_write(char c) {
 	draw_cursor();
 }
 
-void
-term_set_csr(int x, int y) {
+void term_set_csr(int x, int y) {
 	cell_redraw(csr_x,csr_y);
 	csr_x = x;
 	csr_y = y;
 	draw_cursor();
 }
 
-int
-term_get_csr_x() {
+int term_get_csr_x(void) {
 	return csr_x;
 }
 
-int
-term_get_csr_y() {
+int term_get_csr_y(void) {
 	return csr_y;
 }
 
-void
-term_set_csr_show(uint8_t on) {
+static list_t * images_list = NULL;
+
+void term_set_cell_contents(int x, int y, char * data) {
+	if (!images_list) {
+		images_list = list_create();
+	}
+	char * cell_data = malloc(char_width * char_height * sizeof(uint32_t));
+	memcpy(cell_data, data, char_width * char_height * sizeof(uint32_t));
+	list_insert(images_list, cell_data);
+	cell_set(x, y, ' ', (uint32_t)cell_data, 0, ANSI_EXT_IMG);
+	return;
+}
+
+void flush_unused_images(void) {
+	if (!images_list) return;
+
+	list_t * tmp = list_create();
+	for (int y = 0; y < term_height; ++y) {
+		for (int x = 0; x < term_width; ++x) {
+			term_cell_t * cell = (term_cell_t *)((uintptr_t)term_buffer + (y * term_width + x) * sizeof(term_cell_t));
+			if (cell->flags & ANSI_EXT_IMG) {
+				list_insert(tmp, (void *)cell->fg);
+			}
+		}
+	}
+	foreach(node, images_list) {
+		if (!list_find(tmp, node->value)) {
+			free(node->value);
+		}
+	}
+
+	list_free(images_list);
+	images_list = tmp;
+}
+
+int term_get_cell_width(void) {
+	return char_width;
+}
+
+int term_get_cell_height(void) {
+	return char_height;
+}
+
+void term_set_csr_show(int on) {
 	cursor_on = on;
 }
 
@@ -738,7 +802,7 @@ void flip_cursor() {
 	if (scrollback_offset != 0) {
 		return; /* Don't flip cursor while drawing scrollback */
 	}
-	if (cursor_flipped) {
+	if (window->focused && cursor_flipped) {
 		cell_redraw(csr_x, csr_y);
 	} else {
 		render_cursor();
@@ -786,6 +850,7 @@ void term_clear(int i) {
 			term_set_cell(x, csr_y, ' ');
 		}
 	}
+	flush_unused_images();
 }
 
 char * loadMemFont(char * name, char * ident, size_t * size) {
@@ -828,6 +893,11 @@ void key_event(int ret, key_event_t * event) {
 	if (ret) {
 		if (event->modifiers & KEY_MOD_LEFT_ALT || event->modifiers & KEY_MOD_RIGHT_ALT) {
 			handle_input('\033');
+		}
+		if ((event->modifiers & KEY_MOD_LEFT_SHIFT || event->modifiers & KEY_MOD_RIGHT_SHIFT) &&
+		    event->key == '\t') {
+			handle_input_s("\033[Z");
+			return;
 		}
 		handle_input(event->key);
 	} else {
@@ -878,16 +948,64 @@ void key_event(int ret, key_event_t * event) {
 				}
 				break;
 			case KEY_ARROW_UP:
-				handle_input_s("\033[A");
+				if (event->modifiers & KEY_MOD_LEFT_SHIFT && event->modifiers & KEY_MOD_LEFT_CTRL) {
+					handle_input_s("\033[6A");
+				} else if (event->modifiers & KEY_MOD_LEFT_CTRL) {
+					handle_input_s("\033[5A");
+				} else if (event->modifiers & KEY_MOD_LEFT_SHIFT && event->modifiers & KEY_MOD_LEFT_ALT) {
+					handle_input_s("\033[4A");
+				} else if (event->modifiers & KEY_MOD_LEFT_ALT) {
+					handle_input_s("\033[3A");
+				} else if (event->modifiers & KEY_MOD_LEFT_SHIFT) {
+					handle_input_s("\033[2A");
+				} else {
+					handle_input_s("\033[A");
+				}
 				break;
 			case KEY_ARROW_DOWN:
-				handle_input_s("\033[B");
+				if (event->modifiers & KEY_MOD_LEFT_SHIFT && event->modifiers & KEY_MOD_LEFT_CTRL) {
+					handle_input_s("\033[6B");
+				} else if (event->modifiers & KEY_MOD_LEFT_CTRL) {
+					handle_input_s("\033[5B");
+				} else if (event->modifiers & KEY_MOD_LEFT_SHIFT && event->modifiers & KEY_MOD_LEFT_ALT) {
+					handle_input_s("\033[4B");
+				} else if (event->modifiers & KEY_MOD_LEFT_ALT) {
+					handle_input_s("\033[3B");
+				} else if (event->modifiers & KEY_MOD_LEFT_SHIFT) {
+					handle_input_s("\033[2B");
+				} else {
+					handle_input_s("\033[B");
+				}
 				break;
 			case KEY_ARROW_RIGHT:
-				handle_input_s("\033[C");
+				if (event->modifiers & KEY_MOD_LEFT_SHIFT && event->modifiers & KEY_MOD_LEFT_CTRL) {
+					handle_input_s("\033[6C");
+				} else if (event->modifiers & KEY_MOD_LEFT_CTRL) {
+					handle_input_s("\033[5C");
+				} else if (event->modifiers & KEY_MOD_LEFT_SHIFT && event->modifiers & KEY_MOD_LEFT_ALT) {
+					handle_input_s("\033[4C");
+				} else if (event->modifiers & KEY_MOD_LEFT_ALT) {
+					handle_input_s("\033[3C");
+				} else if (event->modifiers & KEY_MOD_LEFT_SHIFT) {
+					handle_input_s("\033[2C");
+				} else {
+					handle_input_s("\033[C");
+				}
 				break;
 			case KEY_ARROW_LEFT:
-				handle_input_s("\033[D");
+				if (event->modifiers & KEY_MOD_LEFT_SHIFT && event->modifiers & KEY_MOD_LEFT_CTRL) {
+					handle_input_s("\033[6D");
+				} else if (event->modifiers & KEY_MOD_LEFT_CTRL) {
+					handle_input_s("\033[5D");
+				} else if (event->modifiers & KEY_MOD_LEFT_SHIFT && event->modifiers & KEY_MOD_LEFT_ALT) {
+					handle_input_s("\033[4D");
+				} else if (event->modifiers & KEY_MOD_LEFT_ALT) {
+					handle_input_s("\033[3D");
+				} else if (event->modifiers & KEY_MOD_LEFT_SHIFT) {
+					handle_input_s("\033[2D");
+				} else {
+					handle_input_s("\033[D");
+				}
 				break;
 			case KEY_PAGE_UP:
 				if (event->modifiers & KEY_MOD_LEFT_SHIFT) {
@@ -912,6 +1030,18 @@ void key_event(int ret, key_event_t * event) {
 				} else {
 					handle_input_s("\033[6~");
 				}
+				break;
+			case KEY_HOME:
+				handle_input_s("\033OH");
+				break;
+			case KEY_END:
+				handle_input_s("\033OF");
+				break;
+			case KEY_DEL:
+				handle_input_s("\033[3~");
+				break;
+			case KEY_INSERT:
+				handle_input_s("\033[2~");
 				break;
 		}
 	}
@@ -948,30 +1078,22 @@ void usage(char * argv[]) {
 }
 
 term_callbacks_t term_callbacks = {
-	/* writer*/
 	&term_write,
-	/* set_color*/
 	term_set_colors,
-	/* set_csr*/
 	term_set_csr,
-	/* get_csr_x*/
 	term_get_csr_x,
-	/* get_csr_y*/
 	term_get_csr_y,
-	/* set_cell*/
 	term_set_cell,
-	/* cls*/
 	term_clear,
-	/* scroll*/
 	term_scroll,
-	/* redraw_cursor*/
 	term_redraw_cursor,
-	/* input_buffer_stuff*/
 	input_buffer_stuff,
-	/* set_font_size*/
 	set_term_font_size,
-	/* set_title*/
 	set_title,
+	term_set_cell_contents,
+	term_get_cell_width,
+	term_get_cell_height,
+	term_set_csr_show,
 };
 
 void reinit(int send_sig) {
@@ -1026,7 +1148,10 @@ void reinit(int send_sig) {
 		memset(term_buffer, 0x0, sizeof(term_cell_t) * term_width * term_height);
 	}
 
+	int old_mouse_state = 0;
+	if (ansi_state) old_mouse_state = ansi_state->mouse_on;
 	ansi_state = ansi_init(ansi_state, term_width, term_height, &term_callbacks);
+	ansi_state->mouse_on = old_mouse_state;
 
 	draw_fill(ctx, rgba(0,0,0, TERM_DEFAULT_OPAC));
 	render_decors();
@@ -1087,6 +1212,12 @@ static void resize_finish(int width, int height) {
 	yutani_flip(yctx, window);
 }
 
+void mouse_event(int button, int x, int y) {
+	char buf[7];
+	sprintf(buf, "\033[M%c%c%c", button + 32, x + 33, y + 33);
+	handle_input_s(buf);
+}
+
 void * handle_incoming(void * garbage) {
 	while (!exit_application) {
 		yutani_msg_t * m = yutani_poll(yctx);
@@ -1128,6 +1259,46 @@ void * handle_incoming(void * garbage) {
 							if (decor_handle_event(yctx, m) == DECOR_CLOSE) {
 								kill(child_pid, SIGKILL);
 								exit_application = 1;
+								break;
+							}
+						}
+						/* Map Cursor Action */
+						if (ansi_state->mouse_on) {
+							int new_x = me->new_x;
+							int new_y = me->new_y;
+							if (!_no_frame) {
+								new_x -= decor_left_width;
+								new_y -= decor_top_height;
+							}
+							/* Convert from coordinate to cell positon */
+							new_x /= char_width;
+							new_y /= char_height;
+
+							if (me->buttons & YUTANI_MOUSE_SCROLL_UP) {
+								mouse_event(32+32, new_x, new_y);
+							} else if (me->buttons & YUTANI_MOUSE_SCROLL_DOWN) {
+								mouse_event(32+32+1, new_x, new_y);
+							}
+
+							if (me->buttons != button_state) {
+								/* Figure out what changed */
+								if (me->buttons & YUTANI_MOUSE_BUTTON_LEFT && !(button_state & YUTANI_MOUSE_BUTTON_LEFT)) mouse_event(0, new_x, new_y);
+								if (me->buttons & YUTANI_MOUSE_BUTTON_MIDDLE && !(button_state & YUTANI_MOUSE_BUTTON_MIDDLE)) mouse_event(1, new_x, new_y);
+								if (me->buttons & YUTANI_MOUSE_BUTTON_RIGHT && !(button_state & YUTANI_MOUSE_BUTTON_RIGHT)) mouse_event(2, new_x, new_y);
+								if (!(me->buttons & YUTANI_MOUSE_BUTTON_LEFT) && button_state & YUTANI_MOUSE_BUTTON_LEFT) mouse_event(3, new_x, new_y);
+								if (!(me->buttons & YUTANI_MOUSE_BUTTON_MIDDLE) && button_state & YUTANI_MOUSE_BUTTON_MIDDLE) mouse_event(3, new_x, new_y);
+								if (!(me->buttons & YUTANI_MOUSE_BUTTON_RIGHT) && button_state & YUTANI_MOUSE_BUTTON_RIGHT) mouse_event(3, new_x, new_y);
+								last_mouse_x = new_x;
+								last_mouse_y = new_y;
+								button_state = me->buttons;
+							} else if (ansi_state->mouse_on == 2) {
+								/* Report motion for pressed buttons */
+								if (last_mouse_x == new_x && last_mouse_y == new_y) break;
+								if (button_state & YUTANI_MOUSE_BUTTON_LEFT) mouse_event(32, new_x, new_y);
+								if (button_state & YUTANI_MOUSE_BUTTON_MIDDLE) mouse_event(33, new_x, new_y);
+								if (button_state & YUTANI_MOUSE_BUTTON_RIGHT) mouse_event(34, new_x, new_y);
+								last_mouse_x = new_x;
+								last_mouse_y = new_y;
 							}
 						}
 					}
@@ -1240,8 +1411,8 @@ int main(int argc, char ** argv) {
 	if (_no_frame) {
 		window = yutani_window_create(yctx, window_width, window_height);
 	} else {
-		window = yutani_window_create(yctx, window_width + decor_left_width + decor_right_width, window_height + decor_top_height + decor_bottom_height);
 		init_decorations();
+		window = yutani_window_create(yctx, window_width + decor_left_width + decor_right_width, window_height + decor_top_height + decor_bottom_height);
 	}
 
 	if (_fullscreen) {

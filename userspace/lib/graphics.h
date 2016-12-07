@@ -46,6 +46,7 @@ typedef struct context {
 
 gfx_context_t * init_graphics_fullscreen();
 gfx_context_t * init_graphics_fullscreen_double_buffer();
+void reinit_graphics_fullscreen(gfx_context_t * ctx);
 
 #define ALPHA_OPAQUE   0
 #define ALPHA_MASK     1
@@ -76,6 +77,8 @@ void draw_line_thick(gfx_context_t * ctx, int32_t x0, int32_t x1, int32_t y0, in
 void draw_fill(gfx_context_t * ctx, uint32_t color);
 
 void draw_sprite_scaled(gfx_context_t * ctx, sprite_t * sprite, int32_t x, int32_t y, uint16_t width, uint16_t height);
+void draw_sprite_scaled_alpha(gfx_context_t * ctx, sprite_t * sprite, int32_t x, int32_t y, uint16_t width, uint16_t height, float alpha);
+void draw_sprite_alpha(gfx_context_t * ctx, sprite_t * sprite, int32_t x, int32_t y, float alpha);
 
 void context_to_png(FILE * file, gfx_context_t * ctx);
 

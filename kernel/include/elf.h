@@ -89,6 +89,7 @@ typedef struct {
 	Elf32_Addr p_vaddr;
 	Elf32_Addr p_paddr;
 	Elf32_Word p_filesz;
+	Elf32_Word p_memsz;
 	Elf32_Word p_flags;
 	Elf32_Word p_align;
 } Elf32_Phdr;
@@ -137,6 +138,15 @@ typedef struct {
 	Elf32_Addr r_offset;
 	Elf32_Word r_info;
 } Elf32_Rel;
+
+typedef struct {
+	Elf32_Sword d_tag;
+	union {
+		Elf32_Word      d_val;
+		Elf32_Addr      d_ptr;
+		Elf32_Off       d_off;
+	} d_un;
+} Elf32_Dyn;
 
 /* sh_type values */
 #define SHT_NONE     0

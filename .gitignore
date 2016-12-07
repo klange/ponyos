@@ -7,9 +7,11 @@
 *.out
 *.pdf
 *.swp
+*.swn
 *.toc
 *.ko
 kernel/symbols.s
+kernel/symbols.S
 .compositor-check
 .config
 .gdb_history
@@ -49,6 +51,7 @@ hdd/usr/share/man
 hdd/usr/share/tabset
 hdd/usr/share/terminfo
 hdd/usr/share/vim
+hdd/usr/share/icons/external
 initrd
 initrd/bin/*
 initrd/boot
@@ -68,3 +71,14 @@ util/toaru-toolchain/*
 _hdd
 qemu-vlan0.pcap
 contrib
+cdrom
+toaruos.iso
+toaruos-big.iso
+modpack.kop
+.vagrant
+Vagrantfile
+hdd/usr/etc
+hdd/usr/share/doc
+hdd/usr/share/fontconfig
+hdd/usr/share/xml
+

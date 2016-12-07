@@ -25,21 +25,23 @@
 /* Generic (pre-set, 32-bit, linear frame buffer) */
 static void graphics_install_preset(uint16_t, uint16_t);
 
-static uint16_t lfb_resolution_x = 0;
-static uint16_t lfb_resolution_y = 0;
-static uint16_t lfb_resolution_b = 0;
+uint16_t lfb_resolution_x = 0;
+uint16_t lfb_resolution_y = 0;
+uint16_t lfb_resolution_b = 0;
 
 /* BOCHS / QEMU VBE Driver */
 static void graphics_install_bochs(uint16_t, uint16_t);
 static void bochs_set_y_offset(uint16_t y);
 static uint16_t bochs_current_scroll(void);
 
+static pid_t display_change_recipient = 0;
+
 /*
  * Address of the linear frame buffer.
  * This can move, so it's a pointer instead of
  * #define.
  */
-static uint8_t * lfb_vid_memory = (uint8_t *)0xE0000000;
+uint8_t * lfb_vid_memory = (uint8_t *)0xE0000000;
 
 static int ioctl_vid(fs_node_t * node, int request, void * argp) {
 	/* TODO: Make this actually support multiple video devices */
@@ -60,6 +62,10 @@ static int ioctl_vid(fs_node_t * node, int request, void * argp) {
 		case IO_VID_ADDR:
 			validate(argp);
 			*((uintptr_t *)argp) = (uintptr_t)lfb_vid_memory;
+			return 0;
+		case IO_VID_SIGNAL:
+			/* ioctl to register for a signal (vid device change? idk) on display change */
+			display_change_recipient = getpid();
 			return 0;
 		default:
 			return -1; /* TODO EINV... something or other */
@@ -181,13 +187,60 @@ static uint16_t bochs_current_scroll(void) {
 }
 
 static void bochs_scan_pci(uint32_t device, uint16_t v, uint16_t d, void * extra) {
-	if (v == 0x1234 && d == 0x1111) {
+	if ((v == 0x1234 && d == 0x1111) ||
+	    (v == 0x80EE && d == 0xBEEF)) {
 		uintptr_t t = pci_read_field(device, PCI_BAR0, 4);
 		if (t > 0) {
 			*((uint8_t **)extra) = (uint8_t *)(t & 0xFFFFFFF0);
 		}
 	}
 }
+
+static void (*lfb_resolution_impl)(uint16_t,uint16_t) = NULL;
+
+void lfb_set_resolution(uint16_t x, uint16_t y) {
+
+	if (lfb_resolution_impl) {
+		lfb_resolution_impl(x,y);
+		if (display_change_recipient) {
+			send_signal(display_change_recipient, SIGWINEVENT);
+			debug_print(WARNING, "Telling %d to SIGWINEVENT", display_change_recipient);
+		}
+	}
+
+}
+
+static void res_change_bochs(uint16_t x, uint16_t y) {
+
+	outports(0x1CE, 0x04);
+	outports(0x1CF, 0x00);
+	/* Uh oh, here we go. */
+	outports(0x1CE, 0x01);
+	outports(0x1CF, x);
+	/* Set Y resolution to 768 */
+	outports(0x1CE, 0x02);
+	outports(0x1CF, y);
+	/* Set bpp to 32 */
+	outports(0x1CE, 0x03);
+	outports(0x1CF, PREFERRED_B);
+	/* Set Virtual Height to stuff */
+	outports(0x1CE, 0x07);
+	outports(0x1CF, PREFERRED_VY);
+	/* Turn it back on */
+	outports(0x1CE, 0x04);
+	outports(0x1CF, 0x41);
+
+	/* Read X to see if it's something else */
+	outports(0x1CE, 0x01);
+	uint16_t new_x = inports(0x1CF);
+	if (x != new_x) {
+		x = new_x;
+	}
+
+	lfb_resolution_x = x;
+	lfb_resolution_y = y;
+}
+
 
 static void graphics_install_bochs(uint16_t resolution_x, uint16_t resolution_y) {
 	debug_print(NOTICE, "Setting up BOCHS/QEMU graphics controller...");
@@ -199,26 +252,12 @@ static void graphics_install_bochs(uint16_t resolution_x, uint16_t resolution_y)
 	}
 	outports(0x1CF, 0xB0C4);
 	i = inports(0x1CF);
-	/* Disable VBE */
-	outports(0x1CE, 0x04);
-	outports(0x1CF, 0x00);
-	/* Set X resolution to 1024 */
-	outports(0x1CE, 0x01);
-	outports(0x1CF, resolution_x);
-	/* Set Y resolution to 768 */
-	outports(0x1CE, 0x02);
-	outports(0x1CF, resolution_y);
-	/* Set bpp to 32 */
-	outports(0x1CE, 0x03);
-	outports(0x1CF, PREFERRED_B);
-	/* Set Virtual Height to stuff */
-	outports(0x1CE, 0x07);
-	outports(0x1CF, PREFERRED_VY);
-	/* Re-enable VBE */
-	outports(0x1CE, 0x04);
-	outports(0x1CF, 0x41);
+	res_change_bochs(resolution_x, resolution_y);
+	resolution_x = lfb_resolution_x; /* may have changed */
 
 	pci_scan(bochs_scan_pci, -1, &lfb_vid_memory);
+
+	lfb_resolution_impl = &res_change_bochs;
 
 	if (lfb_vid_memory) {
 		/* Enable the higher memory */
@@ -251,6 +290,12 @@ static void graphics_install_bochs(uint16_t resolution_x, uint16_t resolution_y)
 	}
 
 mem_found:
+	if (lfb_vid_memory + 4 * resolution_x * resolution_y > lfb_vid_memory + 0xFF0000) {
+		for (uintptr_t i = (uintptr_t)lfb_vid_memory + 0xFF1000; i <= (uintptr_t)lfb_vid_memory + 4 * resolution_x * resolution_y; i += 0x1000) {
+			debug_print(WARNING, "Also mapping 0x%x", i);
+			dma_frame(get_page(i, 1, kernel_directory), 0, 1, i);
+		}
+	}
 	finalize_graphics(resolution_x, resolution_y, PREFERRED_B);
 }
 
@@ -314,6 +359,103 @@ mem_found:
 	}
 }
 
+#define SVGA_IO_BASE (vmware_io)
+#define SVGA_IO_MUL 1
+#define SVGA_INDEX_PORT 0
+#define SVGA_VALUE_PORT 1
+
+#define SVGA_REG_ID 0
+#define SVGA_REG_ENABLE 1
+#define SVGA_REG_WIDTH 2
+#define SVGA_REG_HEIGHT 3
+#define SVGA_REG_BITS_PER_PIXEL 7
+#define SVGA_REG_FB_START 13
+
+static uint32_t vmware_io = 0;
+
+static void vmware_scan_pci(uint32_t device, uint16_t v, uint16_t d, void * extra) {
+	if ((v == 0x15ad && d == 0x0405)) {
+		uintptr_t t = pci_read_field(device, PCI_BAR0, 4);
+		if (t > 0) {
+			*((uint8_t **)extra) = (uint8_t *)(t & 0xFFFFFFF0);
+		}
+	}
+}
+
+static void vmware_write(int reg, int value) {
+	outportl(SVGA_IO_MUL * SVGA_INDEX_PORT + SVGA_IO_BASE, reg);
+	outportl(SVGA_IO_MUL * SVGA_VALUE_PORT + SVGA_IO_BASE, value);
+}
+
+static uint32_t vmware_read(int reg) {
+	outportl(SVGA_IO_MUL * SVGA_INDEX_PORT + SVGA_IO_BASE, reg);
+	return inportl(SVGA_IO_MUL * SVGA_VALUE_PORT + SVGA_IO_BASE);
+}
+
+static void vmware_set_mode(uint16_t w, uint16_t h) {
+	vmware_write(SVGA_REG_ENABLE, 0);
+	vmware_write(SVGA_REG_ID, 0);
+	vmware_write(SVGA_REG_WIDTH, w);
+	vmware_write(SVGA_REG_HEIGHT, h);
+	vmware_write(SVGA_REG_BITS_PER_PIXEL, 32);
+	vmware_write(SVGA_REG_ENABLE, 1);
+
+	lfb_resolution_x = w;
+	lfb_resolution_y = h;
+}
+
+static void graphics_install_vmware(uint16_t w, uint16_t h) {
+	debug_print(WARNING, "Please note that the `vmware` display driver is experimental.");
+	pci_scan(vmware_scan_pci, -1, &vmware_io);
+
+	if (!vmware_io) {
+		debug_print(ERROR, "No vmware device found?");
+		return;
+	} else {
+		debug_print(WARNING, "vmware io base: 0x%x", vmware_io);
+	}
+
+	vmware_write(SVGA_REG_ID, 0);
+	vmware_write(SVGA_REG_WIDTH, w);
+	vmware_write(SVGA_REG_HEIGHT, h);
+	vmware_write(SVGA_REG_BITS_PER_PIXEL, 32);
+	vmware_write(SVGA_REG_ENABLE, 1);
+
+	lfb_resolution_impl = &vmware_set_mode;
+
+	uint32_t fb_addr = vmware_read(SVGA_REG_FB_START);
+	debug_print(WARNING, "vmware fb address: 0x%x", fb_addr);
+
+	lfb_vid_memory = (uint8_t *)fb_addr;
+
+	uintptr_t fb_offset = (uintptr_t)lfb_vid_memory;
+	for (uintptr_t i = fb_offset; i <= fb_offset + 0xFF0000; i += 0x1000) {
+		dma_frame(get_page(i, 1, kernel_directory), 0, 1, i);
+	}
+
+	finalize_graphics(w,h,32);
+}
+
+struct disp_mode {
+	int16_t x;
+	int16_t y;
+	int set;
+};
+
+static void auto_scan_pci(uint32_t device, uint16_t v, uint16_t d, void * extra) {
+	struct disp_mode * mode = extra;
+	if (mode->set) return;
+	if ((v == 0x1234 && d == 0x1111) ||
+	    (v == 0x80EE && d == 0xBEEF)) {
+		mode->set = 1;
+		graphics_install_bochs(mode->x, mode->y);
+	} else if ((v == 0x15ad && d == 0x0405)) {
+		mode->set = 1;
+		graphics_install_vmware(mode->x, mode->y);
+	}
+}
+
+
 static int init(void) {
 
 	if (mboot_ptr->vbe_mode_info) {
@@ -337,11 +479,21 @@ static int init(void) {
 			y = atoi(argv[2]);
 		}
 
-		if (!strcmp(argv[0], "qemu")) {
+		if (!strcmp(argv[0], "auto")) {
+			/* Attempt autodetection */
+			debug_print(WARNING, "Autodetect is in beta, this may not work.");
+			struct disp_mode mode = {x,y,0};
+			pci_scan(auto_scan_pci, -1, &mode);
+			if (!mode.set) {
+				graphics_install_preset(x,y);
+			}
+		} else if (!strcmp(argv[0], "qemu")) {
 			/* Bochs / Qemu Video Device */
 			graphics_install_bochs(x,y);
 		} else if (!strcmp(argv[0],"preset")) {
 			graphics_install_preset(x,y);
+		} else if (!strcmp(argv[0],"vmware")) {
+			graphics_install_vmware(x,y);
 		} else {
 			debug_print(WARNING, "Unrecognized video adapter: %s", argv[0]);
 		}

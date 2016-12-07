@@ -23,7 +23,8 @@ uintptr_t placement_pointer = (uintptr_t)&end;
 uintptr_t heap_end = (uintptr_t)NULL;
 uintptr_t kernel_heap_alloc_point = KERNEL_HEAP_INIT;
 
-static volatile uint8_t frame_alloc_lock = 0;
+//static volatile uint8_t frame_alloc_lock = 0;
+static spin_lock_t frame_alloc_lock = { 0 };
 uint32_t first_n_frames(int n);
 
 void
@@ -56,17 +57,20 @@ kmalloc_real(
 					clear_frame(map_to_physical(i));
 				}
 				/* XXX This is going to get touchy... */
-				spin_lock(&frame_alloc_lock);
+				spin_lock(frame_alloc_lock);
 				uint32_t index = first_n_frames((size + 0xFFF) / 0x1000);
 				if (index == 0xFFFFFFFF) {
+					spin_unlock(frame_alloc_lock);
 					return 0;
 				}
 				for (unsigned int i = 0; i < (size + 0xFFF) / 0x1000; ++i) {
 					set_frame((index + i) * 0x1000);
 					page_t * page = get_page((uintptr_t)address + (i * 0x1000),0,kernel_directory);
 					page->frame = index + i;
+					page->writethrough = 1;
+					page->cachedisable = 1;
 				}
-				spin_unlock(&frame_alloc_lock);
+				spin_unlock(frame_alloc_lock);
 			}
 			*phys = map_to_physical((uintptr_t)address);
 		}
@@ -137,10 +141,12 @@ void
 set_frame(
 		uintptr_t frame_addr
 		) {
-	uint32_t frame  = frame_addr / 0x1000;
-	uint32_t index  = INDEX_FROM_BIT(frame);
-	uint32_t offset = OFFSET_FROM_BIT(frame);
-	frames[index] |= (0x1 << offset);
+	if (frame_addr < nframes * 4 * 0x400) {
+		uint32_t frame  = frame_addr / 0x1000;
+		uint32_t index  = INDEX_FROM_BIT(frame);
+		uint32_t offset = OFFSET_FROM_BIT(frame);
+		frames[index] |= (0x1 << offset);
+	}
 }
 
 void
@@ -220,12 +226,12 @@ alloc_frame(
 		page->user    = (is_kernel == 1)    ? 0 : 1;
 		return;
 	} else {
-		spin_lock(&frame_alloc_lock);
+		spin_lock(frame_alloc_lock);
 		uint32_t index = first_frame();
 		assert(index != (uint32_t)-1 && "Out of frames.");
 		set_frame(index * 0x1000);
 		page->frame   = index;
-		spin_unlock(&frame_alloc_lock);
+		spin_unlock(frame_alloc_lock);
 		page->present = 1;
 		page->rw      = (is_writeable == 1) ? 1 : 0;
 		page->user    = (is_kernel == 1)    ? 0 : 1;
@@ -244,9 +250,7 @@ dma_frame(
 	page->rw      = (is_writeable) ? 1 : 0;
 	page->user    = (is_kernel)    ? 0 : 1;
 	page->frame   = address / 0x1000;
-	if (address < nframes * 4 * 0x400) {
-		set_frame(address);
-	}
+	set_frame(address);
 }
 
 void
@@ -284,7 +288,7 @@ uintptr_t memory_total(){
 void paging_install(uint32_t memsize) {
 	nframes = memsize  / 4;
 	frames  = (uint32_t *)kmalloc(INDEX_FROM_BIT(nframes * 8));
-	memset(frames, 0, INDEX_FROM_BIT(nframes));
+	memset(frames, 0, INDEX_FROM_BIT(nframes * 8));
 
 	uintptr_t phys;
 	kernel_directory = (page_directory_t *)kvmalloc_p(sizeof(page_directory_t),&phys);

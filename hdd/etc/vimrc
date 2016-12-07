@@ -16,6 +16,10 @@ if has('multi_byte')      " Make sure we have unicode support
    set encoding=utf-8      " Default encoding should always be UTF-8
 endif
 
+if (&term == "toaru")
+   set ttymouse=xterm2
+endif
+
 if (&term =~ "screen")
    set ttymouse=xterm2
 endif
@@ -371,7 +375,7 @@ elseif (&term !~ "cons")
    map! <C-?> <BS>
 endif
 
-if (&term =~ "^xterm")
+if ((&term =~ "^xterm") || (&term == "toaru"))
    map  <C-[>[H <Home>
    map! <C-[>[H <Home>
    map  <C-[>[F <End>

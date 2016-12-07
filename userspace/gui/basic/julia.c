@@ -128,6 +128,10 @@ void usage(char * argv[]) {
 			argv[0]);
 }
 
+static void decors() {
+	render_decorations(window, ctx, "Julia Fractals");
+}
+
 void redraw() {
 	printf("initer: %f\n", initer);
 	printf("X: %f %f\n", Minx, Maxx);
@@ -138,7 +142,7 @@ void redraw() {
 	printf("Y: %f %f\n", Miny, Maxy);
 	printf("conx: %f cony: %f\n", conx, cony);
 
-	render_decorations(window, ctx, "Julia Fractals");
+	decors();
 
 	newcolor  = 0;
 	lastcolor = 0;
@@ -233,10 +237,10 @@ int main(int argc, char * argv[]) {
 	}
 
 	yctx = yutani_init();
+	init_decorations();
 
 	window = yutani_window_create(yctx, width + decor_width(), height + decor_height());
 	yutani_window_move(yctx, window, left, top);
-	init_decorations();
 
 	yutani_window_advertise_icon(yctx, window, "Julia Fractals", "julia");
 
@@ -264,7 +268,7 @@ int main(int argc, char * argv[]) {
 						yutani_window_t * win = hashmap_get(yctx->windows, (void*)wf->wid);
 						if (win) {
 							win->focused = wf->focused;
-							redraw();
+							decors();
 							yutani_flip(yctx, window);
 						}
 					}

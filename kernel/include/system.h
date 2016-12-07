@@ -8,6 +8,7 @@
 #include <list.h>
 #include <task.h>
 #include <process.h>
+#include <libc.h>
 
 #define STR(x) #x
 #define STRSTR(x) STR(x)
@@ -15,10 +16,13 @@
 #define asm __asm__
 #define volatile __volatile__
 
-extern unsigned int __irq_sem;
+void int_disable(void);
+void int_resume(void);
+void int_enable(void);
 
-#define IRQ_OFF { asm volatile ("cli"); }
-#define IRQ_RES { asm volatile ("sti"); }
+#define IRQ_OFF int_disable()
+#define IRQ_RES int_resume()
+#define IRQ_ON  int_enable()
 #define PAUSE   { asm volatile ("hlt"); }
 
 #define STOP while (1) { PAUSE; }
@@ -35,24 +39,17 @@ extern char * boot_arg_extra; /* Extra data to pass to init */
 
 extern void *sbrk(uintptr_t increment);
 
-extern void spin_lock(uint8_t volatile * lock);
-extern void spin_unlock(uint8_t volatile * lock);
+/* spin.c */
+typedef volatile int spin_lock_t[2];
+extern void spin_init(spin_lock_t lock);
+extern void spin_lock(spin_lock_t lock);
+extern void spin_unlock(spin_lock_t lock);
 
 extern void return_to_userspace(void);
 
 /* Kernel Main */
-extern int max(int,int);
-extern int min(int,int);
-extern int abs(int);
-extern void swap(int *, int *);
-extern void *memcpy(void *restrict dest, const void *restrict src, size_t count);
-extern void *memmove(void *restrict dest, const void *restrict src, size_t count);
-extern void *memset(void *dest, int val, size_t count);
 extern unsigned short *memsetw(unsigned short *dest, unsigned short val, int count);
-extern uint32_t strlen(const char *str);
-extern char * strdup(const char *str);
-extern char * strcpy(char * dest, const char * src);
-extern int atoi(const char *str);
+
 extern unsigned char inportb(unsigned short _port);
 extern void outportb(unsigned short _port, unsigned char _data);
 extern unsigned short inports(unsigned short _port);
@@ -61,26 +58,29 @@ extern unsigned int inportl(unsigned short _port);
 extern void outportl(unsigned short _port, unsigned int _data);
 extern void outportsm(unsigned short port, unsigned char * data, unsigned long size);
 extern void inportsm(unsigned short port, unsigned char * data, unsigned long size);
-extern int strcmp(const char *a, const char *b);
-extern char * strtok_r(char * str, const char * delim, char ** saveptr);
+
+
 extern size_t lfind(const char * str, const char accept);
 extern size_t rfind(const char * str, const char accept);
-extern size_t strspn(const char * str, const char * accept);
-extern char * strpbrk(const char * str, const char * accept);
+
 extern uint32_t krand(void);
-extern char * strstr(const char * haystack, const char * needle);
+
 extern uint8_t startswith(const char * str, const char * accept);
 
 /* GDT */
 extern void gdt_install(void);
-extern void gdt_set_gate(size_t num, unsigned long base, unsigned long limit, unsigned char access, unsigned char gran);
+extern void gdt_set_gate(uint8_t num, uint64_t base, uint64_t limit, uint8_t access, uint8_t gran);
 extern void set_kernel_stack(uintptr_t stack);
 
 /* IDT */
 extern void idt_install(void);
-extern void idt_set_gate(unsigned char num, void (*base)(void), unsigned short sel, unsigned char flags);
+extern void idt_set_gate(uint8_t num, void (*base)(void), uint16_t sel, uint8_t flags);
 
-/* Registers */
+/* Registers
+ *
+ * Note: if the order of these changes, sys/task.S must be changed to use
+ * the correct offsets as well.
+ */
 struct regs {
 	unsigned int gs, fs, es, ds;
 	unsigned int edi, esi, ebp, esp, ebx, edx, ecx, eax;
@@ -91,6 +91,7 @@ struct regs {
 typedef struct regs regs_t;
 
 typedef void (*irq_handler_t) (struct regs *);
+typedef int (*irq_handler_chain_t) (struct regs *);
 
 /* Panic */
 #define HALT_AND_CATCH_FIRE(mesg, regs) halt_and_catch_fire(mesg, __FILE__, __LINE__, regs)
@@ -105,15 +106,17 @@ extern void isrs_uninstall_handler(size_t isrs);
 
 /* Interrupt Handlers */
 extern void irq_install(void);
-extern void irq_install_handler(size_t irq, irq_handler_t);
+extern void irq_install_handler(size_t irq, irq_handler_chain_t);
 extern void irq_uninstall_handler(size_t irq);
+extern int irq_is_handler_free(size_t irq);
 extern void irq_gates(void);
 extern void irq_ack(size_t);
 
 /* Timer */
 extern void timer_install(void);
 extern unsigned long timer_ticks;
-extern unsigned char timer_subticks;
+extern unsigned long timer_subticks;
+extern signed long timer_drift;
 extern void relative_time(unsigned long seconds, unsigned long subseconds, unsigned long * out_seconds, unsigned long * out_subseconds);
 
 /* Memory Management */
@@ -184,6 +187,8 @@ extern void parse_args(char * argv);
 /* CMOS */
 extern void get_time(uint16_t * hours, uint16_t * minutes, uint16_t * seconds);
 extern void get_date(uint16_t * month, uint16_t * day);
+extern uint32_t boot_time;
+extern uint32_t read_cmos(void);
 
 struct timeval {
 	uint32_t tv_sec;
@@ -196,6 +201,7 @@ extern uint32_t now(void);
 
 /* Floating Point Unit */
 extern void switch_fpu(void);
+extern void unswitch_fpu(void);
 extern void fpu_install(void);
 
 /* ELF */

@@ -48,7 +48,7 @@ typedef struct image {
 	uintptr_t user_stack;  /* User stack */
 	uintptr_t start;
 	uintptr_t shm_heap;
-	volatile uint8_t lock;
+	volatile int lock[2];
 } image_t;
 
 /* Resizable descriptor table */
@@ -112,7 +112,7 @@ typedef struct {
 } sleeper_t;
 
 extern void initialize_process_tree(void);
-extern process_t * spawn_process(volatile process_t * parent);
+extern process_t * spawn_process(volatile process_t * parent, int reuse_fds);
 extern void debug_print_process_tree(void);
 extern process_t * spawn_init(void);
 extern process_t * spawn_kidle(void);

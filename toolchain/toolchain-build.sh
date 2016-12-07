@@ -24,11 +24,11 @@ if [[ "$INSTALL_PACKAGES" == "true" ]] ; then
     echo "If you don't want to do this and you're sure you have all of the required system packages, then interrupt the password prompt and run this script again with -q."
 
     if [ -f /etc/debian_version ]; then
-        sudo apt-get install yasm genext2fs build-essential wget libmpfr-dev libmpc-dev libgmp3-dev qemu autoconf automake texinfo pkg-config
+        sudo apt-get install yasm genext2fs build-essential wget libmpfr-dev libmpc-dev libgmp3-dev qemu autoconf automake texinfo pkg-config git ctags gperf
     elif [ -f /etc/fedora-release ]; then
-        sudo yum groupinstall 'Development Tools'
-        sudo yum groupinstall 'Development Libraries'
-        sudo yum install yasm mpfr-devel libmpc-devel gmp-devel
+        sudo dnf groupinstall 'Development Tools'
+        sudo dnf groupinstall 'Development Libraries'
+        sudo dnf install yasm mpfr-devel libmpc-devel gmp-devel gperf
         echo "Warning: Fedora is unsupported in this script. Be careful!"
         echo "For best results, follow the steps in the script manually."
         echo "(Script will continue in 5 seconds)"
@@ -36,8 +36,8 @@ if [[ "$INSTALL_PACKAGES" == "true" ]] ; then
     else
         echo "You are on an entirely unsupported system, please ensure you have the following packages:"
         echo "  - essential development packages for your platform (C headers, etc.)"
-        echo "  - development headers for mpfr, mpc, and gmp"
-        echo "  - clang / LLVM"
+        echo "  - development headers for mpfr, libmpc, and gmp"
+        echo "  - gcc"
         echo "  - YASM"
         echo "  - genext2fs"
         echo "  - autoconf/automake"
@@ -45,7 +45,9 @@ if [[ "$INSTALL_PACKAGES" == "true" ]] ; then
         echo "  - qemu"
         echo "  - texinfo"
         echo "  - pkg-config"
-        echo "(If you are on Arch, install: clang yasm genext2fs base-devel wget mpfr mpc gmp qemu autoconf automake texinfo pkg-config)"
+        echo "  - git"
+        echo "  - ctags"
+        echo "(If you are on Arch, install: gcc yasm genext2fs base-devel wget mpfr libmpc gmp qemu autoconf automake texinfo pkg-config git ctags)"
         echo ""
         echo "... then run this script (toolchain/toolchain-build.sh) again with the -q flag."
         exit 1

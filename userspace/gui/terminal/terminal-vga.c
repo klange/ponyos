@@ -64,8 +64,8 @@ void term_clear();
 
 void dump_buffer();
 
-wchar_t box_chars_in[] = L"▒␉␌␍␊°±␤␋┘┐┌└┼⎺⎻─⎼⎽├┤┴┬│≤≥";
-wchar_t box_chars_out[] =  {176,0,0,0,0,248,241,0,0,217,191,218,192,197,196,196,196,196,196,195,180,193,194,179,243,242};
+wchar_t box_chars_in[] = L"▒␉␌␍␊°±␤␋┘┐┌└┼⎺⎻─⎼⎽├┤┴┬│≤≥▄";
+wchar_t box_chars_out[] =  {176,0,0,0,0,248,241,0,0,217,191,218,192,197,196,196,196,196,196,195,180,193,194,179,243,242,220};
 
 static int color_distance(uint32_t a, uint32_t b) {
 	int a_r = (a & 0xFF0000) >> 16;
@@ -173,6 +173,10 @@ uint32_t ununicode(uint32_t c) {
 		}
 		w++;
 	}
+	switch (c) {
+		case L'»': return 175;
+		case L'·': return 250;
+	}
 	return 4;
 }
 
@@ -242,16 +246,8 @@ static void cell_redraw_box(uint16_t x, uint16_t y) {
 	}
 }
 
-void outb(unsigned char _data, unsigned short _port) {
-	__asm__ __volatile__ ("outb %1, %0" : : "dN" (_port), "a" (_data));
-}
-
 void render_cursor() {
-	unsigned int tmp = csr_y * 80 + csr_x;
-	outb(14, 0x3D4);
-	outb(tmp >> 8, 0x3D5);
-	outb(15, 0x3D4);
-	outb(tmp, 0x3D5);
+	cell_redraw_inverted(csr_x, csr_y);
 }
 
 void draw_cursor() {
@@ -281,6 +277,11 @@ void term_scroll(int how_much) {
 		memmove(term_buffer, (void *)((uintptr_t)term_buffer + sizeof(term_cell_t) * term_width), sizeof(term_cell_t) * term_width * (term_height - how_much));
 		/* Reset the "new" row to clean cells */
 		memset((void *)((uintptr_t)term_buffer + sizeof(term_cell_t) * term_width * (term_height - how_much)), 0x0, sizeof(term_cell_t) * term_width * how_much);
+		for (int i = 0; i < how_much; ++i) {
+			for (uint16_t x = 0; x < term_width; ++x) {
+				cell_set(x,term_height - how_much,' ', current_fg, current_bg, ansi_state->flags);
+			}
+		}
 		term_redraw_all();
 	} else {
 		how_much = -how_much;
@@ -372,26 +373,22 @@ void term_write(char c) {
 	draw_cursor();
 }
 
-void
-term_set_csr(int x, int y) {
+void term_set_csr(int x, int y) {
 	cell_redraw(csr_x,csr_y);
 	csr_x = x;
 	csr_y = y;
 	draw_cursor();
 }
 
-int
-term_get_csr_x() {
+int term_get_csr_x() {
 	return csr_x;
 }
 
-int
-term_get_csr_y() {
+int term_get_csr_y() {
 	return csr_y;
 }
 
-void
-term_set_csr_show(uint8_t on) {
+void term_set_csr_show(int on) {
 	cursor_on = on;
 }
 
@@ -416,8 +413,7 @@ void flip_cursor() {
 	cursor_flipped = 1 - cursor_flipped;
 }
 
-void
-term_set_cell(int x, int y, uint32_t c) {
+void term_set_cell(int x, int y, uint32_t c) {
 	cell_set(x, y, c, current_fg, current_bg, ansi_state->flags);
 	cell_redraw(x, y);
 }
@@ -479,6 +475,11 @@ void key_event(int ret, key_event_t * event) {
 		if (event->modifiers & KEY_MOD_LEFT_ALT || event->modifiers & KEY_MOD_RIGHT_ALT) {
 			handle_input('\033');
 		}
+		if ((event->modifiers & KEY_MOD_LEFT_SHIFT || event->modifiers & KEY_MOD_RIGHT_SHIFT) &&
+		    event->key == '\t') {
+			handle_input_s("\033[Z");
+			return;
+		}
 		handle_input(event->key);
 	} else {
 		if (event->action == KEY_ACTION_UP) return;
@@ -539,6 +540,15 @@ void key_event(int ret, key_event_t * event) {
 			case KEY_PAGE_DOWN:
 				handle_input_s("\033[6~");
 				break;
+			case KEY_HOME:
+				handle_input_s("\033OH");
+				break;
+			case KEY_END:
+				handle_input_s("\033OF");
+				break;
+			case KEY_DEL:
+				handle_input_s("\033[3~");
+				break;
 		}
 	}
 }
@@ -566,31 +576,26 @@ void usage(char * argv[]) {
 			argv[0]);
 }
 
+int unsupported_int(void) { return 0; }
+void unsupported(int x, int y, char * data) { }
+
 term_callbacks_t term_callbacks = {
-	/* writer*/
-	&term_write,
-	/* set_color*/
-	&term_set_colors,
-	/* set_csr*/
-	&term_set_csr,
-	/* get_csr_x*/
-	&term_get_csr_x,
-	/* get_csr_y*/
-	&term_get_csr_y,
-	/* set_cell*/
-	&term_set_cell,
-	/* cls*/
-	&term_clear,
-	/* scroll*/
-	&term_scroll,
-	/* redraw_cursor*/
-	&term_redraw_cursor,
-	/* input_buffer_stuff*/
-	&input_buffer_stuff,
-	/* set_font_size*/
-	&set_term_font_size,
-	/* set_title*/
-	&set_title,
+	term_write,
+	term_set_colors,
+	term_set_csr,
+	term_get_csr_x,
+	term_get_csr_y,
+	term_set_cell,
+	term_clear,
+	term_scroll,
+	term_redraw_cursor,
+	input_buffer_stuff,
+	set_term_font_size,
+	set_title,
+	unsupported,
+	unsupported_int,
+	unsupported_int,
+	term_set_csr_show,
 };
 
 void reinit(int send_sig) {
@@ -613,6 +618,14 @@ void * handle_incoming(void * garbage) {
 	char c;
 
 	key_event_state_t kbd_state = {0};
+
+	/* Prune any keyboard input we got before the terminal started. */
+	struct stat s;
+	fstat(kfd, &s);
+	for (int i = 0; i < s.st_size; i++) {
+		char tmp[1];
+		read(kfd, tmp, 1);
+	}
 
 	while (!exit_application) {
 		int r = read(kfd, &c, 1);
@@ -678,6 +691,8 @@ int main(int argc, char ** argv) {
 	reinit(0);
 
 	fflush(stdin);
+
+	system("cursor-off"); /* Might GPF */
 
 	int pid = getpid();
 	uint32_t f = fork();

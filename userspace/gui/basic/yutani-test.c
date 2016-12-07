@@ -51,11 +51,13 @@ char * modifiers(unsigned int m) {
 }
 
 char * mouse_buttons(unsigned char button) {
-	static char out[] = "...";
+	static char out[] = "....";
 
 	if (button & YUTANI_MOUSE_BUTTON_LEFT)   out[0] = 'l'; else out[0] = '.';
 	if (button & YUTANI_MOUSE_BUTTON_MIDDLE) out[1] = 'm'; else out[1] = '.';
 	if (button & YUTANI_MOUSE_BUTTON_RIGHT)  out[2] = 'r'; else out[2] = '.';
+	if (button & YUTANI_MOUSE_SCROLL_UP)     out[3] = 'u'; else \
+	if (button & YUTANI_MOUSE_SCROLL_DOWN)   out[3] = 'd'; else out[3] = '.';
 
 	return out;
 }
@@ -94,6 +96,8 @@ void redraw(void) {
 }
 
 int main (int argc, char ** argv) {
+	int show_cursor = 1;
+
 	left   = 100;
 	top    = 100;
 	width  = 500;
@@ -125,6 +129,11 @@ int main (int argc, char ** argv) {
 							ke->event.keycode,
 							modifiers(ke->event.modifiers),
 							ke->event.key, ke->event.key);
+
+						if (ke->event.key == 'm' && ke->event.action == KEY_ACTION_DOWN) {
+							show_cursor = !show_cursor;
+							yutani_window_show_mouse(yctx, wina, show_cursor);
+						}
 					}
 					break;
 				case YUTANI_MSG_WINDOW_MOUSE_EVENT:
@@ -147,6 +156,12 @@ int main (int argc, char ** argv) {
 					{
 						struct yutani_msg_window_focus_change * fc = (void*)m->data;
 						fprintf(stderr, "Focus Change (wid=%d) %s\n", fc->wid, fc->focused ? "on" : "off");
+					}
+					break;
+				case YUTANI_MSG_WINDOW_MOVE:
+					{
+						struct yutani_msg_window_move * wm = (void*)m->data;
+						fprintf(stderr, "Window Moved (wid=%d) %d, %d\n", wm->wid, wm->x, wm->y);
 					}
 					break;
 				case YUTANI_MSG_RESIZE_OFFER:
