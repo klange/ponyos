@@ -55,9 +55,9 @@ static int BOX_LEFT=-1;
 static int BOX_RIGHT=-1;
 static int BOX_TOP=-1;
 static int BOX_BOTTOM=-1;
-static int BOX_COLOR_R=0;
-static int BOX_COLOR_G=0;
-static int BOX_COLOR_B=0;
+static int BOX_COLOR_R=173;
+static int BOX_COLOR_G=55;
+static int BOX_COLOR_B=160;
 static int BOX_COLOR_A=127;
 static char * WALLPAPER = "/usr/share/wallpapers/default";
 static char * LOGO = "/usr/share/logo_login.png";
@@ -136,7 +136,7 @@ void draw_text_box(cairo_t * cr, struct text_box * tb) {
 
 	cairo_rounded_rectangle(cr, 1 + x, 1 + y, tb->width - 2, tb->height - 2, 2.0);
 	if (tb->is_focused) {
-		cairo_set_source_rgba(cr, 8.0/255.0, 193.0/255.0, 236.0/255.0, 1.0);
+		cairo_set_source_rgba(cr, 253.0/255.0, 75.0/255.0, 165.0/255.0, 1.0);
 	} else {
 		cairo_set_source_rgba(cr, 158.0/255.0, 169.0/255.0, 177.0/255.0, 1.0);
 	}
