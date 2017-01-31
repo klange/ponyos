@@ -25,6 +25,24 @@ fs_node_t * fs_root = NULL; /* Pointer to the root mount fs_node (must be some f
 hashmap_t * fs_types = NULL;
 
 
+int has_permission(fs_node_t * node, int permission_bit) {
+	if (!node) return 0;
+
+	uint32_t permissions = node->mask;
+
+	uint8_t user_perm  = (permissions >> 6) & 07;
+	//uint8_t group_perm = (permissions >> 3) & 07;
+	uint8_t other_perm = (permissions) & 07;
+
+	if (current_process->user == node->uid) {
+		return (permission_bit & user_perm);
+		/* TODO group permissions? */
+	} else {
+		return (permission_bit & other_perm);
+	}
+
+}
+
 static struct dirent * readdir_mapper(fs_node_t *node, uint32_t index) {
 	tree_node_t * d = (tree_node_t *)node->device;
 
@@ -71,6 +89,31 @@ static fs_node_t * vfs_mapper(void) {
 	return fnode;
 }
 
+/**
+ * selectcheck_fs: Check if a read from this file would block.
+ */
+int selectcheck_fs(fs_node_t * node) {
+	if (!node) return -1;
+
+	if (node->selectcheck) {
+		return node->selectcheck(node);
+	}
+
+	return -1;
+}
+
+/**
+ * selectwait_fs: Inform a node that it should alert the current_process.
+ */
+int selectwait_fs(fs_node_t * node, void * process) {
+	if (!node) return -1;
+
+	if (node->selectwait) {
+		return node->selectwait(node, process);
+	}
+
+	return -1;
+}
 
 /**
  * read_fs: Read a file system node based on its underlying type.
@@ -270,6 +313,10 @@ int create_file_fs(char *name, uint16_t permission) {
 	if (!parent) {
 		free(path);
 		return -1;
+	}
+
+	if (!has_permission(parent, 02)) {
+		return -EACCES;
 	}
 
 	if (parent->create) {
@@ -550,6 +597,8 @@ void vfs_install(void) {
 
 	root->name = strdup("[root]");
 	root->file = NULL; /* Nothing mounted as root */
+	root->fs_type = NULL;
+	root->device = NULL;
 
 	tree_set_root(fs_tree, root);
 
@@ -574,7 +623,12 @@ int vfs_mount_type(char * type, char * arg, char * mountpoint) {
 
 	if (!n) return -EINVAL;
 
-	vfs_mount(mountpoint, n);
+	tree_node_t * node = vfs_mount(mountpoint, n);
+	if (node && node->value) {
+		struct vfs_entry * ent = (struct vfs_entry *)node->value;
+		ent->fs_type = strdup(type);
+		ent->device  = strdup(arg);
+	}
 
 	debug_print(NOTICE, "Mounted %s[%s] to %s: 0x%x", type, arg, mountpoint, n);
 	debug_print_vfs_tree();
@@ -664,6 +718,8 @@ void * vfs_mount(char * path, fs_node_t * local_root) {
 				struct vfs_entry * ent = malloc(sizeof(struct vfs_entry));
 				ent->name = strdup(at);
 				ent->file = NULL;
+				ent->device = NULL;
+				ent->fs_type = NULL;
 				node = tree_node_insert_child(fs_tree, node, ent);
 			}
 			at = at + strlen(at) + 1;
@@ -706,7 +762,7 @@ void debug_print_vfs_tree_node(tree_node_t * node, size_t height) {
 	struct vfs_entry * fnode = (struct vfs_entry *)node->value;
 	/* Print the process name */
 	if (fnode->file) {
-		c += sprintf(c, "%s → 0x%x (%s)", fnode->name, fnode->file, fnode->file->name);
+		c += sprintf(c, "%s → %s 0x%x (%s, %s)", fnode->name, fnode->device, fnode->file, fnode->fs_type, fnode->file->name);
 	} else {
 		c += sprintf(c, "%s → (empty)", fnode->name);
 	}
@@ -886,7 +942,7 @@ fs_node_t *kopen_recur(char *filename, uint32_t flags, uint32_t symlink_depth, c
 			 * the stack, especially considering this function is called recursively
 			 */
 			char symlink_buf[MAX_SYMLINK_SIZE];
-			int len = node_ptr->readlink(node_ptr, symlink_buf, sizeof(symlink_buf));
+			int len = readlink_fs(node_ptr, symlink_buf, sizeof(symlink_buf));
 			if (len < 0) {
 				/* TODO(gerow): should probably be setting errno from this */
 				debug_print(WARNING, "Got error %d from symlink for %s.", len, node_ptr->name);

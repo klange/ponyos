@@ -21,19 +21,35 @@ static hashmap_t *_udp_sockets = NULL;
 static void parse_dns_response(fs_node_t * tty, void * last_packet);
 static size_t write_dns_packet(uint8_t * buffer, size_t queries_len, uint8_t * queries);
 
-static struct netif _netif;
+static struct netif _netif = {0};
 
-void init_netif_funcs(get_mac_func mac_func, get_packet_func get_func, send_packet_func send_func) {
+static int tasklet_pid = 0;
+
+void init_netif_funcs(get_mac_func mac_func, get_packet_func get_func, send_packet_func send_func, char * device) {
 	_netif.get_mac = mac_func;
 	_netif.get_packet = get_func;
 	_netif.send_packet = send_func;
+	_netif.driver = device;
 	memcpy(_netif.hwaddr, _netif.get_mac(), sizeof(_netif.hwaddr));
+
+	if (!tasklet_pid) {
+		tasklet_pid = create_kernel_tasklet(net_handler, "[net]", NULL);
+		debug_print(NOTICE, "Network worker tasklet started with pid %d", tasklet_pid);
+	}
+}
+
+struct netif * get_default_network_interface(void) {
+	return &_netif;
+}
+
+uint32_t get_primary_dns(void) {
+	return _dns_server;
 }
 
 uint32_t ip_aton(const char * in) {
 	char ip[16];
 	char * c = ip;
-	int out[4];
+	uint32_t out[4];
 	char * i;
 	memcpy(ip, in, strlen(in) < 15 ? strlen(in) + 1 : 15);
 	ip[15] = '\0';
@@ -275,6 +291,39 @@ static char * fgets(char * buf, int size, struct socket * stream) {
 	return buf;
 }
 
+static void socket_alert_waiters(struct socket * sock) {
+	if (sock->alert_waiters) {
+		while (sock->alert_waiters->head) {
+			node_t * node = list_dequeue(sock->alert_waiters);
+			process_t * p = node->value;
+			process_alert_node(p, sock);
+			free(node);
+		}
+	}
+}
+
+
+static int socket_check(fs_node_t * node) {
+	struct socket * sock = node->device;
+
+	if (sock->packet_queue->length > 0) {
+		return 0;
+	}
+
+	return 1;
+}
+
+static int socket_wait(fs_node_t * node, void * process) {
+	struct socket * sock = node->device;
+
+	if (!list_find(sock->alert_waiters, process)) {
+		list_insert(sock->alert_waiters, process);
+	}
+
+	list_insert(((process_t *)process)->node_waits, sock);
+	return 0;
+}
+
 static uint32_t socket_read(fs_node_t * node, uint32_t offset, uint32_t size, uint8_t * buffer) {
 	/* Sleep until we have something to receive */
 #if 0
@@ -392,11 +441,13 @@ static fs_node_t * finddir_netfs(fs_node_t * node, char * name) {
 	memset(fnode, 0x00, sizeof(fs_node_t));
 	fnode->inode = 0;
 	strcpy(fnode->name, name);
-	fnode->mask = 0555;
+	fnode->mask = 0666;
 	fnode->flags   = FS_CHARDEVICE;
 	fnode->read    = socket_read;
 	fnode->write   = socket_write;
 	fnode->device  = (void *)net_open(SOCK_STREAM);
+	fnode->selectcheck = socket_check;
+	fnode->selectwait = socket_wait;
 
 	net_connect((struct socket *)fnode->device, ip, port);
 
@@ -598,6 +649,7 @@ int net_close(struct socket* socket) {
 	// socket->is_connected;
 	socket->status = 1; /* Disconnected */
 	wakeup_queue(socket->packet_wait);
+	socket_alert_waiters(socket);
 	return 1;
 }
 
@@ -743,6 +795,7 @@ static void net_handle_tcp(struct tcp_header * tcp, size_t length) {
 			net_send_tcp(socket, TCP_FLAGS_ACK, NULL, 0);
 
 			wakeup_queue(socket->packet_wait);
+			socket_alert_waiters(socket);
 
 			if (htons(tcp->flags) & TCP_FLAGS_FIN) {
 				/* We should make sure we finish sending before closing. */
@@ -816,6 +869,7 @@ int net_connect(struct socket* socket, uint32_t dest_ip, uint16_t dest_port) {
 
 	socket->packet_queue = list_create();
 	socket->packet_wait = list_create();
+	socket->alert_waiters = list_create();
 
 	socket->ip = dest_ip; //ip_aton("10.255.50.206");
 	socket->port_dest = dest_port; //12345;

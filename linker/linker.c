@@ -27,6 +27,8 @@ static hashmap_t * dumb_symbol_table;
 static hashmap_t * glob_dat;
 static hashmap_t * objects_map;
 
+static char * last_error = NULL;
+
 typedef struct elf_object {
 	FILE * file;
 
@@ -48,6 +50,8 @@ typedef struct elf_object {
 	void (*init)(void);
 	void (**ctors)(void);
 	size_t ctors_size;
+	void (**init_array)(void);
+	size_t init_array_size;
 
 	uintptr_t base;
 
@@ -57,13 +61,15 @@ typedef struct elf_object {
 
 } elf_t;
 
+static elf_t * _main_obj = NULL;
+
 static char * find_lib(const char * file) {
 
 	if (strchr(file, '/')) return strdup(file);
 
 	char * path = getenv("LD_LIBRARY_PATH");
 	if (!path) {
-		path = "/usr/lib:/lib";
+		path = "/usr/lib:/lib:/opt/lib";
 	}
 	char * xpath = strdup(path);
 	int found = 0;
@@ -91,6 +97,11 @@ static char * find_lib(const char * file) {
 
 static elf_t * open_object(const char * path) {
 
+	if (!path) {
+		_main_obj->loaded = 1;
+		return _main_obj;
+	}
+
 	if (hashmap_has(objects_map, (void*)path)) {
 		elf_t * object = hashmap_get(objects_map, (void*)path);
 		object->loaded = 1;
@@ -98,13 +109,17 @@ static elf_t * open_object(const char * path) {
 	}
 
 	char * file = find_lib(path);
-	if (!file) return NULL;
+	if (!file) {
+		last_error = "Could not find library.";
+		return NULL;
+	}
 
 	FILE * f = fopen(file, "r");
 
 	free(file);
 
 	if (!f) {
+		last_error = "Could not open library.";
 		return NULL;
 	}
 
@@ -112,6 +127,7 @@ static elf_t * open_object(const char * path) {
 	hashmap_set(objects_map, (void*)path, object);
 
 	if (!object) {
+		last_error = "Could not allocate space.";
 		return NULL;
 	}
 
@@ -120,6 +136,7 @@ static elf_t * open_object(const char * path) {
 	size_t r = fread(&object->header, sizeof(Elf32_Header), 1, object->file);
 
 	if (!r) {
+		last_error = "Failed to read object header.";
 		free(object);
 		return NULL;
 	}
@@ -129,6 +146,7 @@ static elf_t * open_object(const char * path) {
 	    object->header.e_ident[2] != ELFMAG2 ||
 	    object->header.e_ident[3] != ELFMAG3) {
 
+		last_error = "Not an ELF object.";
 		free(object);
 		return NULL;
 	}
@@ -281,7 +299,12 @@ static int object_postload(elf_t * object) {
 
 		if (!strcmp((char *)((uintptr_t)object->string_table + shdr.sh_name), ".ctors")) {
 			object->ctors = (void *)(shdr.sh_addr + object->base);
-			object->ctors_size = shdr.sh_size;
+			object->ctors_size = shdr.sh_size / sizeof(uintptr_t);
+		}
+
+		if (!strcmp((char *)((uintptr_t)object->string_table + shdr.sh_name), ".init_array")) {
+			object->init_array = (void *)(shdr.sh_addr + object->base);
+			object->init_array_size = shdr.sh_size / sizeof(uintptr_t);
 		}
 	}
 
@@ -341,10 +364,10 @@ static int object_relocate(elf_t * object) {
 					symname = (char *)((uintptr_t)object->dyn_string_table + sym->st_name);
 				}
 				if ((sym->st_shndx == 0) && need_symbol_for_type(type) || (type == 5)) {
-					if (hashmap_has(dumb_symbol_table, symname)) {
+					if (symname && hashmap_has(dumb_symbol_table, symname)) {
 						x = (uintptr_t)hashmap_get(dumb_symbol_table, symname);
 					} else {
-						fprintf(stderr, "Symbol not found: %s\n", symname);
+						TRACE_LD("Symbol not found: %s", symname);
 						x = 0x0;
 					}
 				}
@@ -352,7 +375,7 @@ static int object_relocate(elf_t * object) {
 				/* Relocations, symbol lookups, etc. */
 				switch (type) {
 					case 6: /* GLOB_DAT */
-						if (hashmap_has(glob_dat, symname)) {
+						if (symname && hashmap_has(glob_dat, symname)) {
 							x = (uintptr_t)hashmap_get(glob_dat, symname);
 						}
 					case 7: /* JUMP_SLOT */
@@ -411,8 +434,6 @@ static void object_find_copy_relocations(elf_t * object) {
 
 }
 
-static char * last_error = NULL;
-
 static void * object_find_symbol(elf_t * object, const char * symbol_name) {
 	if (!object->dyn_symbol_table) {
 		last_error = "lib does not have a symbol table";
@@ -465,6 +486,7 @@ static void * do_actual_load(const char * filename, elf_t * lib, int flags) {
 
 		if (!lib->loaded) {
 			do_actual_load(item->value, lib, 0);
+			TRACE_LD("Loaded %s at 0x%x", item->value, lib->base);
 		}
 
 	}
@@ -475,9 +497,16 @@ static void * do_actual_load(const char * filename, elf_t * lib, int flags) {
 	fclose(lib->file);
 
 	if (lib->ctors) {
-		for (size_t i = 0; i < lib->ctors_size; i += sizeof(uintptr_t)) {
+		for (size_t i = 0; i < lib->ctors_size; i++) {
 			TRACE_LD(" 0x%x()", lib->ctors[i]);
 			lib->ctors[i]();
+		}
+	}
+
+	if (lib->init_array) {
+		for (size_t i = 0; i < lib->init_array_size; i++) {
+			TRACE_LD(" 0x%x()", lib->init_array[i]);
+			lib->init_array[i]();
 		}
 	}
 
@@ -494,8 +523,17 @@ static void * dlopen_ld(const char * filename, int flags) {
 
 	elf_t * lib = open_object(filename);
 
-	return do_actual_load(filename, lib, flags);
+	if (!lib) {
+		return NULL;
+	}
 
+	if (lib->loaded) {
+		return lib;
+	}
+
+	void * ret = do_actual_load(filename, lib, flags);
+	TRACE_LD("Loaded %s at 0x%x", filename, lib->base);
+	return ret;
 }
 
 static int dlclose_ld(elf_t * lib) {
@@ -549,6 +587,7 @@ int main(int argc, char * argv[]) {
 	}
 
 	elf_t * main_obj = open_object(file);
+	_main_obj = main_obj;
 
 	if (!main_obj) {
 		fprintf(stderr, "%s: error: failed to open object '%s'.\n", argv[0], file);
@@ -562,6 +601,10 @@ int main(int argc, char * argv[]) {
 	object_find_copy_relocations(main_obj);
 
 	hashmap_t * libs = hashmap_create(10);
+
+	while (end_addr & 0xFFF) {
+		end_addr++;
+	}
 
 	list_t * ctor_libs = list_create();
 	list_t * init_libs = list_create();
@@ -591,7 +634,7 @@ int main(int argc, char * argv[]) {
 		fclose(lib->file);
 
 		/* Execute constructors */
-		if (lib->ctors) {
+		if (lib->ctors || lib->init_array) {
 			list_insert(ctor_libs, lib);
 		}
 		if (lib->init) {
@@ -617,9 +660,16 @@ nope:
 			elf_t * lib = node->value;
 			if (lib->ctors) {
 				TRACE_LD("Executing ctors...");
-				for (size_t i = 0; i < lib->ctors_size; i += sizeof(uintptr_t)) {
+				for (size_t i = 0; i < lib->ctors_size; i++) {
 					TRACE_LD(" 0x%x()", lib->ctors[i]);
 					lib->ctors[i]();
+				}
+			}
+			if (lib->init_array) {
+				TRACE_LD("Executing init_array...");
+				for (size_t i = 0; i < lib->init_array_size; i++) {
+					TRACE_LD(" 0x%x()", lib->init_array[i]);
+					lib->init_array[i]();
 				}
 			}
 		}
@@ -628,6 +678,13 @@ nope:
 	foreach(node, init_libs) {
 		elf_t * lib = node->value;
 		lib->init();
+	}
+
+	if (main_obj->init_array) {
+		for (size_t i = 0; i < main_obj->init_array_size; i++) {
+			TRACE_LD(" 0x%x()", main_obj->init_array[i]);
+			main_obj->init_array[i]();
+		}
 	}
 
 	if (main_obj->init) {

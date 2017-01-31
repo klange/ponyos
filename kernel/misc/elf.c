@@ -27,11 +27,6 @@ int exec_elf(char * path, fs_node_t * file, int argc, char ** argv, char ** env,
 		return -1;
 	}
 
-	if (!interp) {
-		current_process->name = strdup(path);
-		current_process->cmdline = argv;
-	}
-
 	if (file->mask & 0x800) {
 		debug_print(WARNING, "setuid binary executed [%s, uid:%d]", file->name, file->uid);
 		current_process->user = file->uid;
@@ -48,7 +43,7 @@ int exec_elf(char * path, fs_node_t * file, int argc, char ** argv, char ** env,
 			debug_print(WARNING, "Dynamic executable");
 
 			unsigned int nargc = argc + 3;
-			char * args[nargc];
+			char * args[nargc+1];
 			args[0] = "ld.so";
 			args[1] = "-e";
 			args[2] = strdup(current_process->name);
@@ -175,6 +170,14 @@ int exec_elf(char * path, fs_node_t * file, int argc, char ** argv, char ** env,
 
 	current_process->image.start = entry;
 
+	/* Close all fds >= 3 */
+	for (unsigned int i = 3; i < current_process->fds->length; ++i) {
+		if (current_process->fds->entries[i]) {
+			close_fs(current_process->fds->entries[i]);
+			current_process->fds->entries[i] = NULL;
+		}
+	}
+
 	/* Go go go */
 	enter_user_jmp(entry, argc, argv_, USER_STACK_TOP);
 
@@ -212,7 +215,7 @@ int exec_shebang(char * path, fs_node_t * file, int argc, char ** argv, char ** 
 	memcpy(script, path, strlen(path)+1);
 
 	unsigned int nargc = argc + (arg ? 2 : 1);
-	char * args[nargc];
+	char * args[nargc + 1];
 	args[0] = cmd;
 	args[1] = arg ? arg : script;
 	args[2] = arg ? script : NULL;
@@ -277,6 +280,9 @@ int exec(
 
 	debug_print(WARNING, "First four bytes: %c%c%c%c", head[0], head[1], head[2], head[3]);
 
+	current_process->name = strdup(path);
+	gettimeofday((struct timeval *)&current_process->start, NULL);
+
 	for (unsigned int i = 0; i < sizeof(fmts) / sizeof(exec_def_t); ++i) {
 		if (matches(fmts[i].bytes, head, fmts[i].match)) {
 			debug_print(WARNING, "Matched executor: %s", fmts[i].name);
@@ -305,6 +311,9 @@ system(
 	set_process_environment((process_t*)current_process, clone_directory(current_directory));
 	current_directory = current_process->thread.page_directory;
 	switch_page_directory(current_directory);
+
+	current_process->cmdline = argv_;
+
 	exec(path,argc,argv_,env);
 	debug_print(ERROR, "Failed to execute process!");
 	kexit(-1);

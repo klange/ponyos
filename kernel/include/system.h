@@ -10,6 +10,8 @@
 #include <process.h>
 #include <libc.h>
 
+#define ASSUME(cond) __extension__ ({ if (!(cond)) { __builtin_unreachable(); } })
+
 #define STR(x) #x
 #define STRSTR(x) STR(x)
 
@@ -189,11 +191,6 @@ extern void get_time(uint16_t * hours, uint16_t * minutes, uint16_t * seconds);
 extern void get_date(uint16_t * month, uint16_t * day);
 extern uint32_t boot_time;
 extern uint32_t read_cmos(void);
-
-struct timeval {
-	uint32_t tv_sec;
-	uint32_t tv_usec;
-};
 
 extern int gettimeofday(struct timeval * t, void * z);
 extern uint32_t now(void);

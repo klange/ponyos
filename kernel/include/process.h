@@ -103,12 +103,17 @@ typedef struct process {
 	node_t *      timed_sleep_node;
 	uint8_t       is_tasklet;
 	volatile uint8_t sleep_interrupted;
+	list_t *      node_waits;
+	int           awoken_index;
+	node_t *      timeout_node;
+	struct timeval start;
 } process_t;
 
 typedef struct {
 	unsigned long end_tick;
 	unsigned long end_subtick;
 	process_t * process;
+	int is_fswait;
 } sleeper_t;
 
 extern void initialize_process_tree(void);
@@ -134,6 +139,10 @@ extern volatile process_t * current_process;
 extern process_t * kernel_idle_task;
 extern list_t * process_list;
 
+extern int process_wait_nodes(process_t * process,fs_node_t * nodes[], int timeout);
+extern int process_alert_node(process_t * process, void * value);
+extern int process_awaken_from_fswait(process_t * process, int index);
+
 typedef void (*tasklet_t) (void *, char *);
 extern int create_kernel_tasklet(tasklet_t tasklet, char * name, void * argp);
 
@@ -143,5 +152,7 @@ extern void release_directory_for_exec(page_directory_t * dir);
 extern void cleanup_process(process_t * proc, int retval);
 extern void reap_process(process_t * proc);
 extern int waitpid(int pid, int * status, int options);
+
+extern int is_valid_process(process_t * process);
 
 #endif

@@ -70,6 +70,8 @@ typedef struct {
 
 	int default_mouse;
 	uint32_t server_flags;
+
+	int opacity;
 } yutani_server_window_t;
 
 typedef struct {
@@ -167,6 +169,10 @@ typedef struct {
 	int current_cursor;
 	int resize_on_next;
 
+	uint32_t timer_precison;
+	list_t * timer_subscribers;
+
+	uint32_t last_mouse_buttons;
 } yutani_globals_t;
 
 struct key_bind {

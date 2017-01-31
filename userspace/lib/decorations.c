@@ -1,8 +1,7 @@
-/* This file is part of ToaruOS and is released under the terms
- * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2012-2014 Kevin Lange
- */
 /* vim: tabstop=4 shiftwidth=4 noexpandtab
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2012-2017 Kevin Lange
  *
  * Client-side Window Decoration library
  */
@@ -149,7 +148,7 @@ void decor_set_resize_callback(void (*callback)(yutani_window_t *)) {
 
 static int within_decors(yutani_window_t * window, int x, int y) {
 	if ((x <= decor_left_width || x >= window->width - decor_right_width) && (x > 0 && x < window->width)) return 1;
-	if ((y <= decor_top_height || y >= window->height - decor_bottom_height) && (y > 0 && y < window->width)) return 1;
+	if ((y <= decor_top_height || y >= window->height - decor_bottom_height) && (y > 0 && y < window->height)) return 1;
 	return 0;
 }
 

@@ -17,6 +17,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 #include <getopt.h>
 #include <errno.h>
@@ -24,7 +25,6 @@
 #include <wchar.h>
 
 #include "lib/utf8decode.h"
-#include "lib/pthread.h"
 #include "lib/kbd.h"
 #include "lib/graphics.h"
 
@@ -49,6 +49,8 @@ uint8_t  cursor_on      = 1;    /* Whether or not the cursor should be rendered 
 uint8_t  _login_shell   = 0;    /* Whether we're going to display a login shell or not */
 uint8_t  _hold_out      = 0;    /* state indicator on last cell ignore \n */
 
+uint64_t mouse_ticks = 0;
+
 #define char_width 1
 #define char_height 1
 
@@ -64,8 +66,12 @@ void term_clear();
 
 void dump_buffer();
 
-wchar_t box_chars_in[] = L"▒␉␌␍␊°±␤␋┘┐┌└┼⎺⎻─⎼⎽├┤┴┬│≤≥▄";
-wchar_t box_chars_out[] =  {176,0,0,0,0,248,241,0,0,217,191,218,192,197,196,196,196,196,196,195,180,193,194,179,243,242,220};
+static uint64_t get_ticks(void) {
+	struct timeval now;
+	gettimeofday(&now, NULL);
+
+	return (uint64_t)now.tv_sec * 1000000LL + (uint64_t)now.tv_usec;
+}
 
 static int color_distance(uint32_t a, uint32_t b) {
 	int a_r = (a & 0xFF0000) >> 16;
@@ -166,16 +172,167 @@ char vga_to_ansi[] = {
 };
 
 uint32_t ununicode(uint32_t c) {
-	wchar_t * w = box_chars_in;
-	while (*w) {
-		if (*w == c) {
-			return box_chars_out[w-box_chars_in];
-		}
-		w++;
-	}
 	switch (c) {
+		case L'☺': return 1;
+		case L'☻': return 2;
+		case L'♥': return 3;
+		case L'♦': return 4;
+		case L'♣': return 5;
+		case L'♠': return 6;
+		case L'•': return 7;
+		case L'◘': return 8;
+		case L'○': return 9;
+		case L'◙': return 10;
+		case L'♂': return 11;
+		case L'♀': return 12;
+		case L'♪': return 13;
+		case L'♫': return 14;
+		case L'☼': return 15;
+		case L'►': return 16;
+		case L'◄': return 17;
+		case L'↕': return 18;
+		case L'‼': return 19;
+		case L'¶': return 20;
+		case L'§': return 21;
+		case L'▬': return 22;
+		case L'↨': return 23;
+		case L'↑': return 24;
+		case L'↓': return 25;
+		case L'→': return 26;
+		case L'←': return 27;
+		case L'∟': return 28;
+		case L'↔': return 29;
+		case L'▲': return 30;
+		case L'▼': return 31;
+		/* ASCII text */
+		case L'⌂': return 127;
+		case L'Ç': return 128;
+		case L'ü': return 129;
+		case L'é': return 130;
+		case L'â': return 131;
+		case L'ä': return 132;
+		case L'à': return 133;
+		case L'å': return 134;
+		case L'ç': return 135;
+		case L'ê': return 136;
+		case L'ë': return 137;
+		case L'è': return 138;
+		case L'ï': return 139;
+		case L'î': return 140;
+		case L'ì': return 141;
+		case L'Ä': return 142;
+		case L'Å': return 143;
+		case L'É': return 144;
+		case L'æ': return 145;
+		case L'Æ': return 146;
+		case L'ô': return 147;
+		case L'ö': return 148;
+		case L'ò': return 149;
+		case L'û': return 150;
+		case L'ù': return 151;
+		case L'ÿ': return 152;
+		case L'Ö': return 153;
+		case L'Ü': return 154;
+		case L'¢': return 155;
+		case L'£': return 156;
+		case L'¥': return 157;
+		case L'₧': return 158;
+		case L'ƒ': return 159;
+		case L'á': return 160;
+		case L'í': return 161;
+		case L'ó': return 162;
+		case L'ú': return 163;
+		case L'ñ': return 164;
+		case L'Ñ': return 165;
+		case L'ª': return 166;
+		case L'º': return 167;
+		case L'¿': return 168;
+		case L'⌐': return 169;
+		case L'¬': return 170;
+		case L'½': return 171;
+		case L'¼': return 172;
+		case L'¡': return 173;
+		case L'«': return 174;
 		case L'»': return 175;
+		case L'░': return 176;
+		case L'▒': return 177;
+		case L'▓': return 178;
+		case L'│': return 179;
+		case L'┤': return 180;
+		case L'╡': return 181;
+		case L'╢': return 182;
+		case L'╖': return 183;
+		case L'╕': return 184;
+		case L'╣': return 185;
+		case L'║': return 186;
+		case L'╗': return 187;
+		case L'╝': return 188;
+		case L'╜': return 189;
+		case L'╛': return 190;
+		case L'┐': return 191;
+		case L'└': return 192;
+		case L'┴': return 193;
+		case L'┬': return 194;
+		case L'├': return 195;
+		case L'─': return 196;
+		case L'┼': return 197;
+		case L'╞': return 198;
+		case L'╟': return 199;
+		case L'╚': return 200;
+		case L'╔': return 201;
+		case L'╩': return 202;
+		case L'╦': return 203;
+		case L'╠': return 204;
+		case L'═': return 205;
+		case L'╬': return 206;
+		case L'╧': return 207;
+		case L'╨': return 208;
+		case L'╤': return 209;
+		case L'╥': return 210;
+		case L'╙': return 211;
+		case L'╘': return 212;
+		case L'╒': return 213;
+		case L'╓': return 214;
+		case L'╫': return 215;
+		case L'╪': return 216;
+		case L'┘': return 217;
+		case L'┌': return 218;
+		case L'█': return 219;
+		case L'▄': return 220;
+		case L'▌': return 221;
+		case L'▐': return 222;
+		case L'▀': return 223;
+		case L'α': return 224;
+		case L'ß': return 225;
+		case L'Γ': return 226;
+		case L'π': return 227;
+		case L'Σ': return 228;
+		case L'σ': return 229;
+		case L'µ': return 230;
+		case L'τ': return 231;
+		case L'Φ': return 232;
+		case L'Θ': return 233;
+		case L'Ω': return 234;
+		case L'δ': return 235;
+		case L'∞': return 236;
+		case L'φ': return 237;
+		case L'ε': return 238;
+		case L'∩': return 239;
+		case L'≡': return 240;
+		case L'±': return 241;
+		case L'≥': return 242;
+		case L'≤': return 243;
+		case L'⌠': return 244;
+		case L'⌡': return 245;
+		case L'÷': return 246;
+		case L'≈': return 247;
+		case L'°': return 248;
+		case L'∙': return 249;
 		case L'·': return 250;
+		case L'√': return 251;
+		case L'ⁿ': return 252;
+		case L'²': return 253;
+		case L'■': return 254;
 	}
 	return 4;
 }
@@ -252,7 +409,7 @@ void render_cursor() {
 
 void draw_cursor() {
 	if (!cursor_on) return;
-	timer_tick = 0;
+	mouse_ticks = get_ticks();
 	render_cursor();
 }
 
@@ -553,18 +710,6 @@ void key_event(int ret, key_event_t * event) {
 	}
 }
 
-void * wait_for_exit(void * garbage) {
-	int pid;
-	do {
-		pid = waitpid(-1, NULL, 0);
-	} while (pid == -1 && errno == EINTR);
-	/* Clean up */
-	exit_application = 1;
-	/* Exit */
-	char exit_message[] = "[Process terminated]\n";
-	write(fd_slave, exit_message, sizeof(exit_message));
-}
-
 void usage(char * argv[]) {
 	printf(
 			"VGA Terminal Emulator\n"
@@ -611,43 +756,29 @@ void reinit(int send_sig) {
 }
 
 
-
-void * handle_incoming(void * garbage) {
-	int kfd = open("/dev/kbd", O_RDONLY);
-	key_event_t event;
-	char c;
-
-	key_event_state_t kbd_state = {0};
-
-	/* Prune any keyboard input we got before the terminal started. */
-	struct stat s;
-	fstat(kfd, &s);
-	for (int i = 0; i < s.st_size; i++) {
-		char tmp[1];
-		read(kfd, tmp, 1);
+void maybe_flip_cursor(void) {
+	uint64_t ticks = get_ticks();
+	if (ticks > mouse_ticks + 600000LL) {
+		mouse_ticks = ticks;
+		flip_cursor();
 	}
-
-	while (!exit_application) {
-		int r = read(kfd, &c, 1);
-		if (r > 0) {
-			int ret = kbd_scancode(&kbd_state, c, &event);
-			key_event(ret, &event);
-		}
-	}
-	pthread_exit(0);
 }
 
-void * blink_cursor(void * garbage) {
-	while (!exit_application) {
-		timer_tick++;
-		if (timer_tick == 3) {
-			timer_tick = 0;
-			flip_cursor();
-		}
-		usleep(90000);
-	}
-	pthread_exit(0);
+
+void check_for_exit(void) {
+	if (exit_application) return;
+
+	int pid = waitpid(-1, NULL, WNOHANG);
+
+	if (pid != child_pid) return;
+
+	/* Clean up */
+	exit_application = 1;
+	/* Exit */
+	char exit_message[] = "[Process terminated]\n";
+	write(fd_slave, exit_message, sizeof(exit_message));
 }
+
 
 int main(int argc, char ** argv) {
 
@@ -725,20 +856,44 @@ int main(int argc, char ** argv) {
 
 		child_pid = f;
 
-		pthread_t wait_for_exit_thread;
-		pthread_create(&wait_for_exit_thread, NULL, wait_for_exit, NULL);
+		int kfd = open("/dev/kbd", O_RDONLY);
+		key_event_t event;
+		char c;
 
-		pthread_t handle_incoming_thread;
-		pthread_create(&handle_incoming_thread, NULL, handle_incoming, NULL);
+		key_event_state_t kbd_state = {0};
 
-		pthread_t cursor_blink_thread;
-		pthread_create(&cursor_blink_thread, NULL, blink_cursor, NULL);
+		/* Prune any keyboard input we got before the terminal started. */
+		struct stat s;
+		fstat(kfd, &s);
+		for (int i = 0; i < s.st_size; i++) {
+			char tmp[1];
+			read(kfd, tmp, 1);
+		}
+
+		int fds[2] = {fd_master, kfd};
 
 		unsigned char buf[1024];
 		while (!exit_application) {
-			int r = read(fd_master, buf, 1024);
-			for (uint32_t i = 0; i < r; ++i) {
-				ansi_put(ansi_state, buf[i]);
+
+			int index = syscall_fswait2(2,fds,200);
+
+			check_for_exit();
+
+			if (index == 0) {
+				maybe_flip_cursor();
+				int r = read(fd_master, buf, 1024);
+				for (uint32_t i = 0; i < r; ++i) {
+					ansi_put(ansi_state, buf[i]);
+				}
+			} else if (index == 1) {
+				maybe_flip_cursor();
+				int r = read(kfd, &c, 1);
+				if (r > 0) {
+					int ret = kbd_scancode(&kbd_state, c, &event);
+					key_event(ret, &event);
+				}
+			} else if (index == 2) {
+				maybe_flip_cursor();
 			}
 		}
 

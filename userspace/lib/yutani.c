@@ -514,6 +514,34 @@ yutani_msg_t * yutani_msg_build_window_resize_start(yutani_wid_t wid, yutani_sca
 	return msg;
 }
 
+yutani_msg_t * yutani_msg_build_timer_request(uint32_t precision, uint32_t flags) {
+	size_t s = sizeof(struct yutani_message) + sizeof(struct yutani_msg_timer_request);
+	yutani_msg_t * msg = malloc(s);
+
+	msg->magic = YUTANI_MSG__MAGIC;
+	msg->type  = YUTANI_MSG_TIMER_REQUEST;
+	msg->size  = s;
+
+	struct yutani_msg_timer_request * tr = (void *)msg->data;
+
+	tr->precision = precision;
+	tr->flags = flags;
+
+	return msg;
+}
+
+yutani_msg_t * yutani_msg_build_timer_tick(void) {
+	size_t s = sizeof(struct yutani_message);
+	yutani_msg_t * msg = malloc(s);
+
+	msg->magic = YUTANI_MSG__MAGIC;
+	msg->type  = YUTANI_MSG_TIMER_TICK;
+	msg->size  = s;
+
+	return msg;
+}
+
+
 int yutani_msg_send(yutani_t * y, yutani_msg_t * msg) {
 	return pex_reply(y->sock, msg->size, (char *)msg);
 }
@@ -709,7 +737,7 @@ void yutani_window_advertise(yutani_t * yctx, yutani_window_t * window, char * n
 
 void yutani_window_advertise_icon(yutani_t * yctx, yutani_window_t * window, char * name, char * icon) {
 
-	uint32_t flags = window->focused; /* currently no client flags */
+	uint32_t flags = 0; /* currently no client flags */
 	uint16_t offsets[5] = {0,0,0,0,0};
 	uint32_t length = strlen(name) + strlen(icon) + 2;
 	char * strings = malloc(length);
@@ -778,6 +806,12 @@ void yutani_window_drag_start(yutani_t * yctx, yutani_window_t * window) {
 	free(m);
 }
 
+void yutani_window_drag_start_wid(yutani_t * yctx, yutani_wid_t wid) {
+	yutani_msg_t * m = yutani_msg_build_window_drag_start(wid);
+	int result = yutani_msg_send(yctx, m);
+	free(m);
+}
+
 void yutani_window_update_shape(yutani_t * yctx, yutani_window_t * window, int set_shape) {
 	yutani_msg_t * m = yutani_msg_build_window_update_shape(window->wid, set_shape);
 	int result = yutani_msg_send(yctx, m);
@@ -802,6 +836,11 @@ void yutani_window_resize_start(yutani_t * yctx, yutani_window_t * window, yutan
 	free(m);
 }
 
+void yutani_timer_request(yutani_t * yctx, uint32_t precision, uint32_t flags) {
+	yutani_msg_t * m = yutani_msg_build_timer_request(precision, flags);
+	int result = yutani_msg_send(yctx, m);
+	free(m);
+}
 
 gfx_context_t * init_graphics_yutani(yutani_window_t * window) {
 	gfx_context_t * out = malloc(sizeof(gfx_context_t));
@@ -834,3 +873,9 @@ void reinit_graphics_yutani(gfx_context_t * out, yutani_window_t * window) {
 	}
 }
 
+void release_graphics_yutani(gfx_context_t * gfx) {
+	if (gfx->backbuffer != gfx->buffer) {
+		free(gfx->backbuffer);
+	}
+	free(gfx);
+}

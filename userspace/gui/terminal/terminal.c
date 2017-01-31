@@ -26,6 +26,7 @@
 #include <sys/stat.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
+#include <sys/time.h>
 #include <getopt.h>
 #include <errno.h>
 #include <ft2build.h>
@@ -39,7 +40,6 @@
 #include "lib/graphics.h"
 #include "lib/yutani.h"
 #include "lib/decorations.h"
-#include "lib/pthread.h"
 #include "lib/kbd.h"
 #include "lib/spinlock.h"
 
@@ -62,8 +62,8 @@ uint16_t font_size      = 13;   /* Font size according to Freetype */
 uint16_t char_width     = 8;    /* Width of a cell in pixels */
 uint16_t char_height    = 12;   /* Height of a cell in pixels */
 uint16_t char_offset    = 0;    /* Offset of the font within the cell */
-uint16_t csr_x          = 0;    /* Cursor X */
-uint16_t csr_y          = 0;    /* Cursor Y */
+int      csr_x          = 0;    /* Cursor X */
+int      csr_y          = 0;    /* Cursor Y */
 term_cell_t * term_buffer    = NULL; /* The terminal cell buffer */
 uint32_t current_fg     = 7;    /* Current foreground color */
 uint32_t current_bg     = 0;    /* Current background color */
@@ -80,7 +80,7 @@ int      last_mouse_x   = -1;
 int      last_mouse_y   = -1;
 int      button_state   = 0;
 
-static volatile int display_lock = 0;
+uint64_t mouse_ticks = 0;
 
 yutani_window_t * window       = NULL; /* GUI window */
 yutani_t * yctx = NULL;
@@ -94,9 +94,6 @@ int32_t r_y = -1;
 
 void reinit(); /* Defined way further down */
 void term_redraw_cursor();
-
-/* Cursor bink timer */
-static unsigned int timer_tick = 0;
 
 /* Some GUI-only options */
 uint32_t window_width  = 640;
@@ -114,6 +111,13 @@ void dump_buffer();
 /* Trigger to exit the terminal when the child process dies or
  * we otherwise receive an exit signal */
 volatile int exit_application = 0;
+
+static uint64_t get_ticks(void) {
+	struct timeval now;
+	gettimeofday(&now, NULL);
+
+	return (uint64_t)now.tv_sec * 1000000LL + (uint64_t)now.tv_usec;
+}
 
 static void display_flip(void) {
 	if (l_x != INT32_MAX && l_y != INT32_MAX) {
@@ -403,6 +407,7 @@ static void cell_set(uint16_t x, uint16_t y, uint32_t c, uint32_t fg, uint32_t b
 }
 
 static void redraw_cell_image(uint16_t x, uint16_t y, term_cell_t * cell) {
+	if (x >= term_width || y >= term_height) return;
 	uint32_t * data = (uint32_t *)cell->fg;
 	for (uint32_t yy = 0; yy < char_height; ++yy) {
 		for (uint32_t xx = 0; xx < char_width; ++xx) {
@@ -459,14 +464,20 @@ void render_cursor() {
 
 void draw_cursor() {
 	if (!cursor_on) return;
-	timer_tick = 0;
+	mouse_ticks = get_ticks();
 	render_cursor();
 }
 
 void term_redraw_all() { 
-	for (uint16_t y = 0; y < term_height; ++y) {
-		for (uint16_t x = 0; x < term_width; ++x) {
-			cell_redraw(x,y);
+	for (int i = 0; i < term_height; i++) {
+		for (int x = 0; x < term_width; ++x) {
+			term_cell_t * cell = (term_cell_t *)((uintptr_t)term_buffer + (i * term_width + x) * sizeof(term_cell_t));
+			if (cell->flags & ANSI_EXT_IMG) { redraw_cell_image(x,i,cell); continue; }
+			if (((uint32_t *)cell)[0] == 0x00000000) {
+				term_write_char(' ', x * char_width, i * char_height, TERM_DEFAULT_FG, TERM_DEFAULT_BG, TERM_DEFAULT_FLAGS);
+			} else {
+				term_write_char(cell->c, x * char_width, i * char_height, cell->fg, cell->bg, cell->flags);
+			}
 		}
 	}
 }
@@ -479,6 +490,8 @@ void term_scroll(int how_much) {
 	if (how_much == 0) {
 		return;
 	}
+
+	cell_redraw(csr_x, csr_y);
 	if (how_much > 0) {
 		/* Shift terminal cells one row up */
 		memmove(term_buffer, (void *)((uintptr_t)term_buffer + sizeof(term_cell_t) * term_width), sizeof(term_cell_t) * term_width * (term_height - how_much));
@@ -571,6 +584,7 @@ void save_scrollback() {
 void redraw_scrollback() {
 	if (!scrollback_offset) {
 		term_redraw_all();
+		display_flip();
 		return;
 	}
 	if (scrollback_offset < term_height) {
@@ -656,6 +670,8 @@ void term_write(char c) {
 			csr_x = 0;
 			return;
 		}
+		if (csr_x < 0) csr_x = 0;
+		if (csr_y < 0) csr_y = 0;
 		if (csr_x == term_width) {
 			csr_x = 0;
 			++csr_y;
@@ -876,17 +892,31 @@ void clear_input() {
 uint32_t child_pid = 0;
 
 void handle_input(char c) {
-	spin_lock(&display_lock);
 	write(fd_master, &c, 1);
 	display_flip();
-	spin_unlock(&display_lock);
 }
 
 void handle_input_s(char * c) {
-	spin_lock(&display_lock);
 	write(fd_master, c, strlen(c));
 	display_flip();
-	spin_unlock(&display_lock);
+}
+
+void scroll_up(int amount) {
+	int i = 0;
+	while (i < amount && scrollback_list && scrollback_offset < scrollback_list->length) {
+		scrollback_offset ++;
+		i++;
+	}
+	redraw_scrollback();
+}
+
+void scroll_down(int amount) {
+	int i = 0;
+	while (i < amount && scrollback_list && scrollback_offset != 0) {
+		scrollback_offset -= 1;
+		i++;
+	}
+	redraw_scrollback();
 }
 
 void key_event(int ret, key_event_t * event) {
@@ -939,12 +969,10 @@ void key_event(int ret, key_event_t * event) {
 			case KEY_F12:
 				/* Toggle decorations */
 				if (!_fullscreen) {
-					spin_lock(&display_lock);
 					_no_frame = !_no_frame;
 					window_width = window->width - decor_width() * (!_no_frame);
 					window_height = window->height - decor_height() * (!_no_frame);
 					reinit(1);
-					spin_unlock(&display_lock);
 				}
 				break;
 			case KEY_ARROW_UP:
@@ -1009,33 +1037,33 @@ void key_event(int ret, key_event_t * event) {
 				break;
 			case KEY_PAGE_UP:
 				if (event->modifiers & KEY_MOD_LEFT_SHIFT) {
-					int i = 0;
-					while (i < 5 && scrollback_list && scrollback_offset < scrollback_list->length) {
-						scrollback_offset ++;
-						i++;
-					}
-					redraw_scrollback();
+					scroll_up(term_height/2);
 				} else {
 					handle_input_s("\033[5~");
 				}
 				break;
 			case KEY_PAGE_DOWN:
 				if (event->modifiers & KEY_MOD_LEFT_SHIFT) {
-					int i = 0;
-					while (i < 5 && scrollback_list && scrollback_offset != 0) {
-						scrollback_offset -= 1;
-						i++;
-					}
-					redraw_scrollback();
+					scroll_down(term_height/2);
 				} else {
 					handle_input_s("\033[6~");
 				}
 				break;
 			case KEY_HOME:
-				handle_input_s("\033OH");
+				if (event->modifiers & KEY_MOD_LEFT_SHIFT) {
+					scrollback_offset = scrollback_list->length;
+					redraw_scrollback();
+				} else {
+					handle_input_s("\033OH");
+				}
 				break;
 			case KEY_END:
-				handle_input_s("\033OF");
+				if (event->modifiers & KEY_MOD_LEFT_SHIFT) {
+					scrollback_offset = 0;
+					redraw_scrollback();
+				} else {
+					handle_input_s("\033OF");
+				}
 				break;
 			case KEY_DEL:
 				handle_input_s("\033[3~");
@@ -1047,11 +1075,13 @@ void key_event(int ret, key_event_t * event) {
 	}
 }
 
-void * wait_for_exit(void * garbage) {
-	int pid;
-	do {
-		pid = waitpid(-1, NULL, 0);
-	} while (pid == -1 && errno == EINTR);
+void check_for_exit(void) {
+	if (exit_application) return;
+
+	int pid = waitpid(-1, NULL, WNOHANG);
+
+	if (pid != child_pid) return;
+
 	/* Clean up */
 	exit_application = 1;
 	/* Exit */
@@ -1133,13 +1163,19 @@ void reinit(int send_sig) {
 		term_cell_t * new_term_buffer = malloc(sizeof(term_cell_t) * term_width * term_height);
 
 		memset(new_term_buffer, 0x0, sizeof(term_cell_t) * term_width * term_height);
+
+		int offset = 0;
+		if (term_height < old_height) {
+			offset = old_height - term_height;
+		}
 		for (int row = 0; row < min(old_height, term_height); ++row) {
 			for (int col = 0; col < min(old_width, term_width); ++col) {
-				term_cell_t * old_cell = (term_cell_t *)((uintptr_t)term_buffer + (row * old_width + col) * sizeof(term_cell_t));
+				term_cell_t * old_cell = (term_cell_t *)((uintptr_t)term_buffer + ((row + offset) * old_width + col) * sizeof(term_cell_t));
 				term_cell_t * new_cell = (term_cell_t *)((uintptr_t)new_term_buffer + (row * term_width + col) * sizeof(term_cell_t));
 				*new_cell = *old_cell;
 			}
 		}
+		csr_y -= offset;
 		free(term_buffer);
 
 		term_buffer = new_term_buffer;
@@ -1160,6 +1196,8 @@ void reinit(int send_sig) {
 	struct winsize w;
 	w.ws_row = term_height;
 	w.ws_col = term_width;
+	w.ws_xpixel = term_width * char_width;
+	w.ws_ypixel = term_height * char_height;
 	ioctl(fd_master, TIOCSWINSZ, &w);
 
 	if (send_sig) {
@@ -1203,10 +1241,8 @@ static void resize_finish(int width, int height) {
 	window_width  = window->width  - extra_x;
 	window_height = window->height - extra_y;
 
-	spin_lock(&display_lock);
 	reinit_graphics_yutani(ctx, window);
 	reinit(1);
-	spin_unlock(&display_lock);
 
 	yutani_window_resize_done(yctx, window);
 	yutani_flip(yctx, window);
@@ -1218,112 +1254,113 @@ void mouse_event(int button, int x, int y) {
 	handle_input_s(buf);
 }
 
-void * handle_incoming(void * garbage) {
-	while (!exit_application) {
-		yutani_msg_t * m = yutani_poll(yctx);
-		if (m) {
-			switch (m->type) {
-				case YUTANI_MSG_KEY_EVENT:
-					{
-						struct yutani_msg_key_event * ke = (void*)m->data;
-						int ret = (ke->event.action == KEY_ACTION_DOWN) && (ke->event.key);
-						key_event(ret, &ke->event);
+void * handle_incoming(void) {
+
+	yutani_msg_t * m = yutani_poll(yctx);
+	if (m) {
+		switch (m->type) {
+			case YUTANI_MSG_KEY_EVENT:
+				{
+					struct yutani_msg_key_event * ke = (void*)m->data;
+					int ret = (ke->event.action == KEY_ACTION_DOWN) && (ke->event.key);
+					key_event(ret, &ke->event);
+				}
+				break;
+			case YUTANI_MSG_WINDOW_FOCUS_CHANGE:
+				{
+					struct yutani_msg_window_focus_change * wf = (void*)m->data;
+					yutani_window_t * win = hashmap_get(yctx->windows, (void*)wf->wid);
+					if (win) {
+						win->focused = wf->focused;
+						render_decors();
 					}
-					break;
-				case YUTANI_MSG_WINDOW_FOCUS_CHANGE:
-					{
-						struct yutani_msg_window_focus_change * wf = (void*)m->data;
-						yutani_window_t * win = hashmap_get(yctx->windows, (void*)wf->wid);
-						if (win) {
-							win->focused = wf->focused;
-							render_decors();
+				}
+				break;
+			case YUTANI_MSG_SESSION_END:
+				{
+					kill(child_pid, SIGKILL);
+					exit_application = 1;
+				}
+				break;
+			case YUTANI_MSG_RESIZE_OFFER:
+				{
+					struct yutani_msg_window_resize * wr = (void*)m->data;
+					resize_finish(wr->width, wr->height);
+				}
+				break;
+			case YUTANI_MSG_WINDOW_MOUSE_EVENT:
+				{
+					struct yutani_msg_window_mouse_event * me = (void*)m->data;
+					if (!_no_frame) {
+						if (decor_handle_event(yctx, m) == DECOR_CLOSE) {
+							kill(child_pid, SIGKILL);
+							exit_application = 1;
+							break;
 						}
 					}
-					break;
-				case YUTANI_MSG_SESSION_END:
-					{
-						kill(child_pid, SIGKILL);
-						exit_application = 1;
+					if (me->new_x < 0 || me->new_x >= window_width || me->new_y < 0 || me->new_y >= window_height) {
+						break;
 					}
-					break;
-				case YUTANI_MSG_RESIZE_OFFER:
-					{
-						struct yutani_msg_window_resize * wr = (void*)m->data;
-						resize_finish(wr->width, wr->height);
-					}
-					break;
-				case YUTANI_MSG_WINDOW_MOUSE_EVENT:
-					{
-						struct yutani_msg_window_mouse_event * me = (void*)m->data;
+					/* Map Cursor Action */
+					if (ansi_state->mouse_on) {
+						int new_x = me->new_x;
+						int new_y = me->new_y;
 						if (!_no_frame) {
-							if (decor_handle_event(yctx, m) == DECOR_CLOSE) {
-								kill(child_pid, SIGKILL);
-								exit_application = 1;
-								break;
-							}
+							new_x -= decor_left_width;
+							new_y -= decor_top_height;
 						}
-						/* Map Cursor Action */
-						if (ansi_state->mouse_on) {
-							int new_x = me->new_x;
-							int new_y = me->new_y;
-							if (!_no_frame) {
-								new_x -= decor_left_width;
-								new_y -= decor_top_height;
-							}
-							/* Convert from coordinate to cell positon */
-							new_x /= char_width;
-							new_y /= char_height;
+						/* Convert from coordinate to cell positon */
+						new_x /= char_width;
+						new_y /= char_height;
 
-							if (me->buttons & YUTANI_MOUSE_SCROLL_UP) {
-								mouse_event(32+32, new_x, new_y);
-							} else if (me->buttons & YUTANI_MOUSE_SCROLL_DOWN) {
-								mouse_event(32+32+1, new_x, new_y);
-							}
+						if (me->buttons & YUTANI_MOUSE_SCROLL_UP) {
+							mouse_event(32+32, new_x, new_y);
+						} else if (me->buttons & YUTANI_MOUSE_SCROLL_DOWN) {
+							mouse_event(32+32+1, new_x, new_y);
+						}
 
-							if (me->buttons != button_state) {
-								/* Figure out what changed */
-								if (me->buttons & YUTANI_MOUSE_BUTTON_LEFT && !(button_state & YUTANI_MOUSE_BUTTON_LEFT)) mouse_event(0, new_x, new_y);
-								if (me->buttons & YUTANI_MOUSE_BUTTON_MIDDLE && !(button_state & YUTANI_MOUSE_BUTTON_MIDDLE)) mouse_event(1, new_x, new_y);
-								if (me->buttons & YUTANI_MOUSE_BUTTON_RIGHT && !(button_state & YUTANI_MOUSE_BUTTON_RIGHT)) mouse_event(2, new_x, new_y);
-								if (!(me->buttons & YUTANI_MOUSE_BUTTON_LEFT) && button_state & YUTANI_MOUSE_BUTTON_LEFT) mouse_event(3, new_x, new_y);
-								if (!(me->buttons & YUTANI_MOUSE_BUTTON_MIDDLE) && button_state & YUTANI_MOUSE_BUTTON_MIDDLE) mouse_event(3, new_x, new_y);
-								if (!(me->buttons & YUTANI_MOUSE_BUTTON_RIGHT) && button_state & YUTANI_MOUSE_BUTTON_RIGHT) mouse_event(3, new_x, new_y);
-								last_mouse_x = new_x;
-								last_mouse_y = new_y;
-								button_state = me->buttons;
-							} else if (ansi_state->mouse_on == 2) {
-								/* Report motion for pressed buttons */
-								if (last_mouse_x == new_x && last_mouse_y == new_y) break;
-								if (button_state & YUTANI_MOUSE_BUTTON_LEFT) mouse_event(32, new_x, new_y);
-								if (button_state & YUTANI_MOUSE_BUTTON_MIDDLE) mouse_event(33, new_x, new_y);
-								if (button_state & YUTANI_MOUSE_BUTTON_RIGHT) mouse_event(34, new_x, new_y);
-								last_mouse_x = new_x;
-								last_mouse_y = new_y;
-							}
+						if (me->buttons != button_state) {
+							/* Figure out what changed */
+							if (me->buttons & YUTANI_MOUSE_BUTTON_LEFT && !(button_state & YUTANI_MOUSE_BUTTON_LEFT)) mouse_event(0, new_x, new_y);
+							if (me->buttons & YUTANI_MOUSE_BUTTON_MIDDLE && !(button_state & YUTANI_MOUSE_BUTTON_MIDDLE)) mouse_event(1, new_x, new_y);
+							if (me->buttons & YUTANI_MOUSE_BUTTON_RIGHT && !(button_state & YUTANI_MOUSE_BUTTON_RIGHT)) mouse_event(2, new_x, new_y);
+							if (!(me->buttons & YUTANI_MOUSE_BUTTON_LEFT) && button_state & YUTANI_MOUSE_BUTTON_LEFT) mouse_event(3, new_x, new_y);
+							if (!(me->buttons & YUTANI_MOUSE_BUTTON_MIDDLE) && button_state & YUTANI_MOUSE_BUTTON_MIDDLE) mouse_event(3, new_x, new_y);
+							if (!(me->buttons & YUTANI_MOUSE_BUTTON_RIGHT) && button_state & YUTANI_MOUSE_BUTTON_RIGHT) mouse_event(3, new_x, new_y);
+							last_mouse_x = new_x;
+							last_mouse_y = new_y;
+							button_state = me->buttons;
+						} else if (ansi_state->mouse_on == 2) {
+							/* Report motion for pressed buttons */
+							if (last_mouse_x == new_x && last_mouse_y == new_y) break;
+							if (button_state & YUTANI_MOUSE_BUTTON_LEFT) mouse_event(32, new_x, new_y);
+							if (button_state & YUTANI_MOUSE_BUTTON_MIDDLE) mouse_event(33, new_x, new_y);
+							if (button_state & YUTANI_MOUSE_BUTTON_RIGHT) mouse_event(34, new_x, new_y);
+							last_mouse_x = new_x;
+							last_mouse_y = new_y;
+						}
+					} else {
+						if (me->buttons & YUTANI_MOUSE_SCROLL_UP) {
+							scroll_up(5);
+						} else if (me->buttons & YUTANI_MOUSE_SCROLL_DOWN) {
+							scroll_down(5);
 						}
 					}
-					break;
-				default:
-					break;
-			}
-			free(m);
+				}
+				break;
+			default:
+				break;
 		}
+		free(m);
 	}
-	pthread_exit(0);
 }
 
-void * blink_cursor(void * garbage) {
-	while (!exit_application) {
-		timer_tick++;
-		if (timer_tick == 3) {
-			timer_tick = 0;
-			spin_lock(&display_lock);
-			flip_cursor();
-			spin_unlock(&display_lock);
-		}
-		usleep(90000);
+void maybe_flip_cursor(void) {
+	uint64_t ticks = get_ticks();
+	if (ticks > mouse_ticks + 600000LL) {
+		mouse_ticks = ticks;
+		flip_cursor();
 	}
-	pthread_exit(0);
 }
 
 int main(int argc, char ** argv) {
@@ -1505,24 +1542,28 @@ int main(int argc, char ** argv) {
 
 		child_pid = f;
 
-		pthread_t wait_for_exit_thread;
-		pthread_create(&wait_for_exit_thread, NULL, wait_for_exit, NULL);
-
-		pthread_t handle_incoming_thread;
-		pthread_create(&handle_incoming_thread, NULL, handle_incoming, NULL);
-
-		pthread_t cursor_blink_thread;
-		pthread_create(&cursor_blink_thread, NULL, blink_cursor, NULL);
+		int fds[2] = {fd_master, fileno(yctx->sock)};
 
 		unsigned char buf[1024];
 		while (!exit_application) {
-			int r = read(fd_master, buf, 1024);
-			spin_lock(&display_lock);
-			for (uint32_t i = 0; i < r; ++i) {
-				ansi_put(ansi_state, buf[i]);
+
+			int index = syscall_fswait2(2,fds,200);
+
+			check_for_exit();
+
+			if (index == 0) {
+				maybe_flip_cursor();
+				int r = read(fd_master, buf, 1024);
+				for (uint32_t i = 0; i < r; ++i) {
+					ansi_put(ansi_state, buf[i]);
+				}
+				display_flip();
+			} else if (index == 1) {
+				maybe_flip_cursor();
+				handle_incoming();
+			} else if (index == 2) {
+				maybe_flip_cursor();
 			}
-			display_flip();
-			spin_unlock(&display_lock);
 		}
 
 	}

@@ -19,6 +19,7 @@ kernel/symbols.S
 .userspace-check
 .disk_size
 .ramdisk_size
+.toolchain
 tmp/
 ramdisk_source/
 util/*.img
@@ -58,8 +59,11 @@ initrd/boot
 initrd/etc
 tags
 toaru-pdfviewer
+toaru-python
+pycairo
 toaru-toolkit
 toaruos-disk.img
+netboot.img.gz
 toaruos-initrd
 toaruos-kernel
 toolchain/build
@@ -81,4 +85,4 @@ hdd/usr/etc
 hdd/usr/share/doc
 hdd/usr/share/fontconfig
 hdd/usr/share/xml
-
+hdd/usr/python

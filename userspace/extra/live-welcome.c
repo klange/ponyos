@@ -10,7 +10,6 @@
 #define TRACE_APP_NAME "live-welcome"
 
 int main(int argc, char * argv[]) {
-	TRACE("Starting session manager and launching demo...");
 
 	int _session_pid = fork();
 	if (!_session_pid) {
@@ -27,7 +26,7 @@ int main(int argc, char * argv[]) {
 		setuid(1000);
 		toaru_auth_set_vars();
 
-		char * args[] = {"/bin/live-wizard", NULL};
+		char * args[] = {"/bin/wizard.py", NULL};
 		execvp(args[0], args);
 		TRACE("wizard start failed?");
 	}
@@ -37,6 +36,11 @@ int main(int argc, char * argv[]) {
 		pid = wait(NULL);
 	} while ((pid > 0 && pid != _session_pid) || (pid == -1 && errno == EINTR));
 
+	char * args[] = {"/bin/glogin",NULL};
+	execvp(args[0],args);
+
+	TRACE("failed to start glogin after log out, trying to reboot instead.");
 	system("reboot");
 
+	return 1;
 }

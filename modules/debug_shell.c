@@ -18,6 +18,7 @@
 #include <pipe.h>
 #include <elf.h>
 #include <module.h>
+#include <args.h>
 
 #include <mod/shell.h>
 
@@ -225,8 +226,12 @@ static int shell_cd(fs_node_t * tty, int argc, char * argv[]) {
 }
 
 static int shell_ls(fs_node_t * tty, int argc, char * argv[]) {
-	/* Okay, we're going to take the working directory... */
-	fs_node_t * wd = kopen(current_process->wd_name, 0);
+	fs_node_t * wd;
+	if (argc < 2) {
+		wd = kopen(current_process->wd_name, 0);
+	} else {
+		wd = kopen(argv[1], 0);
+	}
 	uint32_t index = 0;
 	struct dirent * kentry = readdir_fs(wd, index);
 	while (kentry) {
@@ -237,6 +242,33 @@ static int shell_ls(fs_node_t * tty, int argc, char * argv[]) {
 		kentry = readdir_fs(wd, index);
 	}
 	close_fs(wd);
+	return 0;
+}
+
+static int shell_cat(fs_node_t * tty, int argc, char * argv[]) {
+	if (argc < 2) {
+		fprintf(tty, "Usage: cat <file>\n");
+		return 1;
+	}
+
+	fs_node_t * node = kopen(argv[1], 0);
+	if (!node) {
+		fprintf(tty, "Could not open %s.\n", argv[1]);
+		return 1;
+	}
+
+#define CHUNK_SIZE 4096
+	uint8_t * buf = malloc(CHUNK_SIZE);
+	memset(buf, 0, CHUNK_SIZE);
+	size_t offset = 0;
+	while (1) {
+		size_t r = read_fs(node, offset, CHUNK_SIZE, buf);
+		if (!r) break;
+		write_fs(tty, 0, r, buf);
+		offset += r;
+	}
+
+	close_fs(node);
 	return 0;
 }
 
@@ -277,11 +309,11 @@ static void scan_hit_list(uint32_t device, uint16_t vendorid, uint16_t deviceid,
 			pci_vendor_lookup(vendorid),
 			pci_device_lookup(vendorid,deviceid));
 
-	fprintf(tty, " BAR0: 0x%8x\n", pci_read_field(device, PCI_BAR0, 4));
-	fprintf(tty, " BAR1: 0x%8x\n", pci_read_field(device, PCI_BAR1, 4));
-	fprintf(tty, " BAR2: 0x%8x\n", pci_read_field(device, PCI_BAR2, 4));
-	fprintf(tty, " BAR3: 0x%8x\n", pci_read_field(device, PCI_BAR3, 4));
-	fprintf(tty, " BAR4: 0x%8x\n", pci_read_field(device, PCI_BAR4, 4));
+	fprintf(tty, " BAR0: 0x%8x", pci_read_field(device, PCI_BAR0, 4));
+	fprintf(tty, " BAR1: 0x%8x", pci_read_field(device, PCI_BAR1, 4));
+	fprintf(tty, " BAR2: 0x%8x", pci_read_field(device, PCI_BAR2, 4));
+	fprintf(tty, " BAR3: 0x%8x", pci_read_field(device, PCI_BAR3, 4));
+	fprintf(tty, " BAR4: 0x%8x", pci_read_field(device, PCI_BAR4, 4));
 	fprintf(tty, " BAR6: 0x%8x\n", pci_read_field(device, PCI_BAR5, 4));
 
 }
@@ -326,17 +358,29 @@ static int shell_mod(fs_node_t * tty, int argc, char * argv[]) {
 }
 
 static int shell_symbols(fs_node_t * tty, int argc, char * argv[]) {
-	extern char kernel_symbols_start[];
-	extern char kernel_symbols_end[];
 
-	struct ksym {
-		uintptr_t addr;
-		char name[];
-	} * k = (void*)&kernel_symbols_start;
+	if (argc > 1 && !strcmp(argv[1],"--all")) {
+		list_t * hash_keys = hashmap_keys(modules_get_symbols());
+		foreach(_key, hash_keys) {
+			char * key = (char *)_key->value;
+			uintptr_t a = (uintptr_t)hashmap_get(modules_get_symbols(), key);
+			fprintf(tty, "0x%x - %s\n", a, key);
+		}
+		free(hash_keys);
+	} else {
 
-	while ((uintptr_t)k < (uintptr_t)&kernel_symbols_end) {
-		fprintf(tty, "0x%x - %s\n", k->addr, k->name);
-		k = (void *)((uintptr_t)k + sizeof(uintptr_t) + strlen(k->name) + 1);
+		extern char kernel_symbols_start[];
+		extern char kernel_symbols_end[];
+
+		struct ksym {
+			uintptr_t addr;
+			char name[];
+		} * k = (void*)&kernel_symbols_start;
+
+		while ((uintptr_t)k < (uintptr_t)&kernel_symbols_end) {
+			fprintf(tty, "0x%x - %s\n", k->addr, k->name);
+			k = (void *)((uintptr_t)k + sizeof(uintptr_t) + strlen(k->name) + 1);
+		}
 	}
 
 	return 0;
@@ -358,26 +402,32 @@ static int shell_print(fs_node_t * tty, int argc, char * argv[]) {
 		deref = 1;
 	}
 
-	extern char kernel_symbols_start[];
-	extern char kernel_symbols_end[];
+	void * addr = hashmap_get(modules_get_symbols(),symbol);
+	if (!addr) return 1;
 
-	struct ksym {
-		uintptr_t addr;
-		char name[];
-	} * k = (void*)&kernel_symbols_start;
-
-	while ((uintptr_t)k < (uintptr_t)&kernel_symbols_end) {
-		if (!strcmp(symbol, k->name)) {
-			if (deref) {
-				fprintf(tty, format, k->addr);
-			} else {
-				fprintf(tty, format, *((uintptr_t *)k->addr));
-			}
-			fprintf(tty, "\n");
-			break;
-		}
-		k = (void *)((uintptr_t)k + sizeof(uintptr_t) + strlen(k->name) + 1);
+	if (deref) {
+		fprintf(tty, format, addr);
+	} else {
+		fprintf(tty, format, *((uintptr_t *)addr));
 	}
+	fprintf(tty, "\n");
+
+	return 0;
+}
+
+static int shell_call(fs_node_t * tty, int argc, char * argv[]) {
+
+	if (argc < 2) {
+		fprintf(tty, "call function_name\n");
+		return 1;
+	}
+
+	char * symbol = argv[1];
+
+	void (*addr)(void) = (void (*)(void))(uintptr_t)hashmap_get(modules_get_symbols(),symbol);
+	if (!addr) return 1;
+
+	addr();
 
 	return 0;
 }
@@ -571,6 +621,8 @@ static struct shell_command shell_commands[] = {
 		"Change current directory."},
 	{"ls",    &shell_ls,
 		"List files in current or other directory."},
+	{"cat",   &shell_cat,
+		"Read a file to the console."},
 	{"log", &shell_log,
 		"Configure serial debug logging."},
 	{"pci", &shell_pci,
@@ -585,6 +637,8 @@ static struct shell_command shell_commands[] = {
 		"Set pid to trace syscalls for."},
 	{"print", &shell_print,
 		"[dangerous] Print the value of a symbol using a format string."},
+	{"call", &shell_call,
+		"[dangerous] Call a function by name."},
 	{"modules", &shell_modules,
 		"Print names and addresses of all loaded modules."},
 	{"divine-size", &shell_divinesize,
@@ -749,8 +803,10 @@ int debug_shell_start(void) {
 
 	debug_hook = debug_shell_actual;
 
-	int i = create_kernel_tasklet(debug_shell_run, "[kttydebug]", NULL);
-	debug_print(NOTICE, "Started tasklet with pid=%d", i);
+	if (args_present("kdebug")) {
+		int i = create_kernel_tasklet(debug_shell_run, "[kttydebug]", NULL);
+		debug_print(NOTICE, "Started tasklet with pid=%d", i);
+	}
 
 	return 0;
 }

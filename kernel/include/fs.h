@@ -51,6 +51,8 @@ typedef int (*get_size_type_t) (struct fs_node *);
 typedef int (*chmod_type_t) (struct fs_node *, int mode);
 typedef void (*symlink_type_t) (struct fs_node *, char * name, char * value);
 typedef int (*readlink_type_t) (struct fs_node *, char * buf, size_t size);
+typedef int (*selectcheck_type_t) (struct fs_node *);
+typedef int (*selectwait_type_t) (struct fs_node *, void * process);
 
 typedef struct fs_node {
 	char name[256];         /* The filename. */
@@ -89,6 +91,9 @@ typedef struct fs_node {
 	uint32_t offset;       /* Offset for read operations XXX move this to new "file descriptor" entry */
 	int32_t refcount;
 	uint32_t nlink;
+
+	selectcheck_type_t selectcheck;
+	selectwait_type_t selectwait;
 } fs_node_t;
 
 struct dirent {
@@ -118,11 +123,14 @@ struct stat  {
 struct vfs_entry {
 	char * name;
 	fs_node_t * file;
+	char * device;
+	char * fs_type;
 };
 
 extern fs_node_t *fs_root;
 extern int pty_create(void *size, fs_node_t ** fs_master, fs_node_t ** fs_slave);
 
+int has_permission(fs_node_t *node, int permission_bit);
 uint32_t read_fs(fs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer);
 uint32_t write_fs(fs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer);
 void open_fs(fs_node_t *node, unsigned int flags);
@@ -139,6 +147,8 @@ int chmod_fs(fs_node_t *node, int mode);
 int unlink_fs(char * name);
 int symlink_fs(char * value, char * name);
 int readlink_fs(fs_node_t * node, char * buf, size_t size);
+int selectcheck_fs(fs_node_t * node);
+int selectwait_fs(fs_node_t * node, void * process);
 
 void vfs_install(void);
 void * vfs_mount(char * path, fs_node_t * local_root);

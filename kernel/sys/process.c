@@ -36,6 +36,16 @@ static bitset_t pid_set;
 /* Default process name string */
 char * default_name = "[unnamed]";
 
+int is_valid_process(process_t * process) {
+	foreach(lnode, process_list) {
+		if (lnode->value == process) {
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
 /*
  * This makes a nice 4096-byte bitmap. It also happens
  * to be pid_max on 32-bit Linux, so that's kinda nice.
@@ -111,6 +121,13 @@ process_t * next_ready_process(void) {
 	if (!process_available()) {
 		return kernel_idle_task;
 	}
+	if (process_queue->head->owner != process_queue) {
+		debug_print(ERROR, "Erroneous process located in process queue: node 0x%x has owner 0x%x, but process_queue is 0x%x", process_queue->head, process_queue->head->owner, process_queue);
+
+		process_t * proc = process_queue->head->value;
+
+		debug_print(ERROR, "PID associated with this node is %d", proc->id);
+	}
 	node_t * np = list_dequeue(process_queue);
 	assert(np && "Ready queue is empty.");
 	process_t * next = np->value;
@@ -143,6 +160,11 @@ void make_process_ready(process_t * proc) {
 			spin_unlock(wait_lock_tmp);
 		}
 	}
+	if (proc->sched_node.owner) {
+		debug_print(WARNING, "Can't make process ready without removing from owner list: %d", proc->id);
+		debug_print(WARNING, "  (This is a bug) Current owner list is 0x%x (ready queue is 0x%x)", proc->sched_node.owner, process_queue);
+		return;
+	}
 	spin_lock(process_queue_lock);
 	list_append(process_queue, &proc->sched_node);
 	spin_unlock(process_queue_lock);
@@ -173,9 +195,15 @@ void delete_process(process_t * proc) {
 	/* Remove the entry. */
 	spin_lock(tree_lock);
 	/* Reparent everyone below me to init */
+	int has_children = entry->children->length;
 	tree_remove_reparent_root(process_tree, entry);
 	list_delete(process_list, list_find(process_list, proc));
 	spin_unlock(tree_lock);
+
+	if (has_children) {
+		process_t * init = process_tree->root->value;
+		wakeup_queue(init->wait_queue);
+	}
 
 	bitset_clear(&pid_set, proc->id);
 
@@ -210,6 +238,8 @@ process_t * spawn_kidle(void) {
 	idle->wait_queue = list_create();
 	idle->shm_mappings = list_create();
 	idle->signal_queue = list_create();
+
+	gettimeofday(&idle->start, NULL);
 
 	set_process_environment(idle, current_directory);
 	return idle;
@@ -425,6 +455,8 @@ process_t * spawn_process(volatile process_t * parent, int reuse_fds) {
 
 	proc->is_tasklet = 0;
 
+	gettimeofday(&proc->start, NULL);
+
 	/* Insert the process into the process tree as a child
 	 * of the parent process. */
 	tree_node_t * entry = tree_node_create(proc);
@@ -635,11 +667,17 @@ void wakeup_sleepers(unsigned long seconds, unsigned long subseconds) {
 	if (sleep_queue->length) {
 		sleeper_t * proc = ((sleeper_t *)sleep_queue->head->value);
 		while (proc && (proc->end_tick < seconds || (proc->end_tick == seconds && proc->end_subtick <= subseconds))) {
-			process_t * process = proc->process;
-			process->sleep_node.owner = NULL;
-			process->timed_sleep_node = NULL;
-			if (!process_is_ready(process)) {
-				make_process_ready(process);
+
+			if (proc->is_fswait) {
+				proc->is_fswait = -1;
+				process_alert_node(proc->process,proc);
+			} else {
+				process_t * process = proc->process;
+				process->sleep_node.owner = NULL;
+				process->timed_sleep_node = NULL;
+				if (!process_is_ready(process)) {
+					make_process_ready(process);
+				}
 			}
 			free(proc);
 			free(list_dequeue(sleep_queue));
@@ -675,6 +713,7 @@ void sleep_until(process_t * process, unsigned long seconds, unsigned long subse
 	proc->process     = process;
 	proc->end_tick    = seconds;
 	proc->end_subtick = subseconds;
+	proc->is_fswait = 0;
 	process->timed_sleep_node = list_insert_after(sleep_queue, before, proc);
 	spin_unlock(sleep_lock);
 	IRQ_RES;
@@ -689,6 +728,13 @@ void cleanup_process(process_t * proc, int retval) {
 	list_free(proc->signal_queue);
 	free(proc->signal_queue);
 	free(proc->wd_name);
+
+
+	if (proc->node_waits) {
+		list_free(proc->node_waits);
+		free(proc->node_waits);
+		proc->node_waits = NULL;
+	}
 	debug_print(INFO, "Releasing shared memory for %d", proc->id);
 	shm_release_all(proc);
 	free(proc->shm_mappings);
@@ -800,5 +846,118 @@ int waitpid(int pid, int * status, int options) {
 			}
 		}
 	} while (1);
+}
+
+int process_wait_nodes(process_t * process,fs_node_t * nodes[], int timeout) {
+	assert(!process->node_waits && "Tried to wait on nodes while already waiting on nodes.");
+
+	fs_node_t ** n = nodes;
+	int index = 0;
+	if (*n) {
+		do {
+			int result = selectcheck_fs(*n);
+			if (result < 0) {
+				debug_print(NOTICE, "An invalid descriptor was specified: %d (0x%x) (pid=%d)", index, *n, current_process->id);
+				return -1;
+			}
+			if (result == 0) {
+				return index;
+			}
+			n++;
+			index++;
+		} while (*n);
+	}
+
+	if (timeout == 0) {
+		return -2;
+	}
+
+	n = nodes;
+
+	process->node_waits = list_create();
+	if (*n) {
+		do {
+			if (selectwait_fs(*n, process) < 0) {
+				debug_print(NOTICE, "Bad selectwait? 0x%x", *n);
+			}
+			n++;
+		} while (*n);
+	}
+
+	if (timeout > 0) {
+		debug_print(NOTICE, "fswait with a timeout of %d (pid=%d)", timeout, current_process->id);
+		unsigned long s, ss;
+		relative_time(0, timeout, &s, &ss);
+
+		IRQ_OFF;
+		spin_lock(sleep_lock);
+		node_t * before = NULL;
+		foreach(node, sleep_queue) {
+			sleeper_t * candidate = ((sleeper_t *)node->value);
+			if (candidate->end_tick > s || (candidate->end_tick == s && candidate->end_subtick > ss)) {
+				break;
+			}
+			before = node;
+		}
+		sleeper_t * proc = malloc(sizeof(sleeper_t));
+		proc->process     = process;
+		proc->end_tick    = s;
+		proc->end_subtick = ss;
+		proc->is_fswait = 1;
+		list_insert(((process_t *)process)->node_waits, proc);
+		process->timeout_node = list_insert_after(sleep_queue, before, proc);
+		spin_unlock(sleep_lock);
+		IRQ_RES;
+	} else {
+		process->timeout_node = NULL;
+	}
+
+	process->awoken_index = -1;
+	/* Wait. */
+	switch_task(0);
+
+	return process->awoken_index;
+}
+
+int process_awaken_from_fswait(process_t * process, int index) {
+	process->awoken_index = index;
+	list_free(process->node_waits);
+	free(process->node_waits);
+	process->node_waits = NULL;
+	if (process->timeout_node && process->timeout_node->owner == sleep_queue) {
+		sleeper_t * proc = process->timeout_node->value;
+		if (proc->is_fswait != -1) {
+			list_delete(sleep_queue, process->timeout_node);
+			free(process->timeout_node->value);
+			free(process->timeout_node);
+		}
+	}
+	process->timeout_node = NULL;
+	make_process_ready(process);
+	return 0;
+}
+
+int process_alert_node(process_t * process, void * value) {
+
+	if (!is_valid_process(process)) {
+		debug_print(WARNING, "Invalid process in alert from fswait.");
+		return 0;
+	}
+
+
+
+	if (!process->node_waits) {
+		return 0; /* Possibly already returned. Wait for another call. */
+	}
+
+	int index = 0;
+	foreach(node, process->node_waits) {
+		if (value == node->value) {
+			return process_awaken_from_fswait(process, index);
+		}
+		index++;
+	}
+
+	return -1;
 }
 

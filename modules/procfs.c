@@ -11,6 +11,8 @@
 #include <printf.h>
 #include <module.h>
 
+#include <mod/net.h>
+
 #define PROCFS_STANDARD_ENTRIES (sizeof(std_entries) / sizeof(struct procfs_entry))
 #define PROCFS_PROCDIR_ENTRIES  (sizeof(procdir_entries) / sizeof(struct procfs_entry))
 
@@ -35,6 +37,9 @@ static fs_node_t * procfs_generic_create(char * name, read_type_t read_func) {
 	fnode->close   = NULL;
 	fnode->readdir = NULL;
 	fnode->finddir = NULL;
+	fnode->ctime   = now();
+	fnode->mtime   = now();
+	fnode->atime   = now();
 	return fnode;
 }
 
@@ -110,13 +115,30 @@ static uint32_t proc_status_func(fs_node_t *node, uint32_t offset, uint32_t size
 			"Pid:\t%d\n" /* pid */
 			"PPid:\t%d\n" /* parent pid */
 			"Uid:\t%d\n"
+			"Ueip:\t0x%x\n"
+			"SCid:\t%d\n"
+			"SC0:\t0x%x\n"
+			"SC1:\t0x%x\n"
+			"SC2:\t0x%x\n"
+			"SC3:\t0x%x\n"
+			"SC4:\t0x%x\n"
+			"Path:\t%s\n"
 			,
 			name,
 			state,
 			proc->group ? proc->group : proc->id,
 			proc->id,
 			parent ? parent->id : 0,
-			proc->user);
+			proc->user,
+			proc->syscall_registers ? proc->syscall_registers->eip : 0,
+			proc->syscall_registers ? proc->syscall_registers->eax : 0,
+			proc->syscall_registers ? proc->syscall_registers->ebx : 0,
+			proc->syscall_registers ? proc->syscall_registers->ecx : 0,
+			proc->syscall_registers ? proc->syscall_registers->edx : 0,
+			proc->syscall_registers ? proc->syscall_registers->esi : 0,
+			proc->syscall_registers ? proc->syscall_registers->edi : 0,
+			proc->cmdline ? proc->cmdline[0] : "(none)"
+			);
 
 	size_t _bsize = strlen(buf);
 	if (offset > _bsize) return 0;
@@ -175,7 +197,8 @@ static fs_node_t * finddir_procfs_procdir(fs_node_t * node, char * name) {
 }
 
 
-static fs_node_t * procfs_procdir_create(pid_t pid) {
+static fs_node_t * procfs_procdir_create(process_t * process) {
+	pid_t pid = process->id;
 	fs_node_t * fnode = malloc(sizeof(fs_node_t));
 	memset(fnode, 0x00, sizeof(fs_node_t));
 	fnode->inode = pid;
@@ -191,6 +214,9 @@ static fs_node_t * procfs_procdir_create(pid_t pid) {
 	fnode->readdir = readdir_procfs_procdir;
 	fnode->finddir = finddir_procfs_procdir;
 	fnode->nlink   = 1;
+	fnode->ctime   = process->start.tv_sec;
+	fnode->mtime   = process->start.tv_sec;
+	fnode->atime   = process->start.tv_sec;
 	return fnode;
 }
 
@@ -198,11 +224,19 @@ static uint32_t cpuinfo_func(fs_node_t *node, uint32_t offset, uint32_t size, ui
 	return 0;
 }
 
+extern uintptr_t heap_end;
+extern uintptr_t kernel_heap_alloc_point;
+
 static uint32_t meminfo_func(fs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
 	char buf[1024];
 	unsigned int total = memory_total();
 	unsigned int free  = total - memory_use();
-	sprintf(buf, "MemTotal: %d kB\nMemFree: %d kB\n", total, free);
+	unsigned int kheap = (heap_end - kernel_heap_alloc_point) / 1024;
+	sprintf(buf,
+		"MemTotal: %d kB\n"
+		"MemFree: %d kB\n"
+		"KHeapUse: %d kB\n"
+		, total, free, kheap);
 
 	size_t _bsize = strlen(buf);
 	if (offset > _bsize) return 0;
@@ -273,6 +307,103 @@ static uint32_t compiler_func(fs_node_t *node, uint32_t offset, uint32_t size, u
 	return size;
 }
 
+extern tree_t * fs_tree; /* kernel/fs/vfs.c */
+
+static void mount_recurse(char * buf, tree_node_t * node, size_t height) {
+	/* End recursion on a blank entry */
+	if (!node) return;
+	char * tmp = malloc(512);
+	memset(tmp, 0, 512);
+	char * c = tmp;
+	/* Indent output */
+	for (uint32_t i = 0; i < height; ++i) {
+		c += sprintf(c, "  ");
+	}
+	/* Get the current process */
+	struct vfs_entry * fnode = (struct vfs_entry *)node->value;
+	/* Print the process name */
+	if (fnode->file) {
+		c += sprintf(c, "%s → %s 0x%x (%s, %s)", fnode->name, fnode->device, fnode->file, fnode->fs_type, fnode->file->name);
+	} else {
+		c += sprintf(c, "%s → (empty)", fnode->name);
+	}
+	/* Linefeed */
+	sprintf(buf+strlen(buf),"%s\n",tmp);
+	free(tmp);
+	foreach(child, node->children) {
+		/* Recursively print the children */
+		mount_recurse(buf+strlen(buf),child->value, height + 1);
+	}
+}
+
+static uint32_t mounts_func(fs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+	char * buf = malloc(4096);
+
+	buf[0] = '\0';
+
+	mount_recurse(buf, fs_tree->root, 0);
+
+	size_t _bsize = strlen(buf);
+	if (offset > _bsize) return 0;
+	if (size > _bsize - offset) size = _bsize - offset;
+
+	memcpy(buffer, buf, size);
+	free(buf);
+	return size;
+}
+
+static uint32_t netif_func(fs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+	char * buf = malloc(4096);
+
+	/* In order to not directly depend on the network module, we dynamically locate the symbols we need. */
+	void (*ip_ntoa)(uint32_t, char *) = (void (*)(uint32_t,char*))(uintptr_t)hashmap_get(modules_get_symbols(),"ip_ntoa");
+
+	struct netif * (*get_netif)(void) = (struct netif *(*)(void))(uintptr_t)hashmap_get(modules_get_symbols(),"get_default_network_interface");
+
+	uint32_t (*get_dns)(void) = (uint32_t (*)(void))(uintptr_t)hashmap_get(modules_get_symbols(),"get_primary_dns");
+
+	if (get_netif) {
+		struct netif * netif = get_netif();
+		char ip[16];
+		ip_ntoa(netif->source, ip);
+		char dns[16];
+		ip_ntoa(get_dns(), dns);
+
+		if (netif->hwaddr[0] == 0 &&
+			netif->hwaddr[1] == 0 &&
+			netif->hwaddr[2] == 0 &&
+			netif->hwaddr[3] == 0 &&
+			netif->hwaddr[4] == 0 &&
+			netif->hwaddr[5] == 0) {
+
+			sprintf(buf, "no network\n");
+		} else {
+			sprintf(buf,
+				"ip:\t%s\n"
+				"mac:\t%2x:%2x:%2x:%2x:%2x:%2x\n"
+				"device:\t%s\n"
+				"dns:\t%s\n"
+				,
+				ip,
+				netif->hwaddr[0], netif->hwaddr[1], netif->hwaddr[2], netif->hwaddr[3], netif->hwaddr[4], netif->hwaddr[5],
+				netif->driver,
+				dns
+			);
+		}
+	} else {
+		sprintf(buf, "no network\n");
+	}
+
+	size_t _bsize = strlen(buf);
+	if (offset > _bsize) return 0;
+	if (size > _bsize - offset) size = _bsize - offset;
+
+	memcpy(buffer, buf, size);
+	free(buf);
+	return size;
+
+}
+
 static struct procfs_entry std_entries[] = {
 	{-1, "cpuinfo",  cpuinfo_func},
 	{-2, "meminfo",  meminfo_func},
@@ -280,6 +411,8 @@ static struct procfs_entry std_entries[] = {
 	{-4, "cmdline",  cmdline_func},
 	{-5, "version",  version_func},
 	{-6, "compiler", compiler_func},
+	{-7, "mounts",   mounts_func},
+	{-8, "netif",    netif_func},
 };
 
 static struct dirent * readdir_procfs_root(fs_node_t *node, uint32_t index) {
@@ -299,7 +432,15 @@ static struct dirent * readdir_procfs_root(fs_node_t *node, uint32_t index) {
 		return out;
 	}
 
-	index -= 2;
+	if (index == 2) {
+		struct dirent * out = malloc(sizeof(struct dirent));
+		memset(out, 0x00, sizeof(struct dirent));
+		out->ino = 0;
+		strcpy(out->name, "self");
+		return out;
+	}
+
+	index -= 3;
 
 	if (index < PROCFS_STANDARD_ENTRIES) {
 		struct dirent * out = malloc(sizeof(struct dirent));
@@ -346,8 +487,12 @@ static fs_node_t * finddir_procfs_root(fs_node_t * node, char * name) {
 		if (!proc) {
 			return NULL;
 		}
-		fs_node_t * out = procfs_procdir_create(pid);
+		fs_node_t * out = procfs_procdir_create(proc);
 		return out;
+	}
+
+	if (!strcmp(name,"self")) {
+		return procfs_procdir_create((process_t *)current_process);
 	}
 
 	for (unsigned int i = 0; i < PROCFS_STANDARD_ENTRIES; ++i) {
@@ -377,6 +522,9 @@ static fs_node_t * procfs_create(void) {
 	fnode->readdir = readdir_procfs_root;
 	fnode->finddir = finddir_procfs_root;
 	fnode->nlink   = 1;
+	fnode->ctime   = now();
+	fnode->mtime   = now();
+	fnode->atime   = now();
 	return fnode;
 }
 

@@ -280,6 +280,34 @@ int pty_available_output(fs_node_t * node) {
 	return ring_buffer_unread(pty->out);
 }
 
+static int check_pty_master(fs_node_t * node) {
+	pty_t * pty = (pty_t *)node->device;
+	if (ring_buffer_unread(pty->out) > 0) {
+		return 0;
+	}
+	return 1;
+}
+
+static int check_pty_slave(fs_node_t * node) {
+	pty_t * pty = (pty_t *)node->device;
+	if (ring_buffer_unread(pty->in) > 0) {
+		return 0;
+	}
+	return 1;
+}
+
+static int wait_pty_master(fs_node_t * node, void * process) {
+	pty_t * pty = (pty_t *)node->device;
+	ring_buffer_select_wait(pty->out, process);
+	return 0;
+}
+
+static int wait_pty_slave(fs_node_t * node, void * process) {
+	pty_t * pty = (pty_t *)node->device;
+	ring_buffer_select_wait(pty->in, process);
+	return 0;
+}
+
 fs_node_t * pty_master_create(pty_t * pty) {
 	fs_node_t * fnode = malloc(sizeof(fs_node_t));
 	memset(fnode, 0x00, sizeof(fs_node_t));
@@ -288,11 +316,14 @@ fs_node_t * pty_master_create(pty_t * pty) {
 	sprintf(fnode->name, "pty master");
 	fnode->uid   = 0;
 	fnode->gid   = 0;
+	fnode->mask  = 0666;
 	fnode->flags = FS_PIPE;
 	fnode->read  =  read_pty_master;
 	fnode->write = write_pty_master;
 	fnode->open  =  open_pty_master;
 	fnode->close = close_pty_master;
+	fnode->selectcheck = check_pty_master;
+	fnode->selectwait  = wait_pty_master;
 	fnode->readdir = NULL;
 	fnode->finddir = NULL;
 	fnode->ioctl = ioctl_pty_master;
@@ -311,11 +342,14 @@ fs_node_t * pty_slave_create(pty_t * pty) {
 	sprintf(fnode->name, "pty slave");
 	fnode->uid   = 0;
 	fnode->gid   = 0;
+	fnode->mask  = 0666;
 	fnode->flags = FS_PIPE;
 	fnode->read  =  read_pty_slave;
 	fnode->write = write_pty_slave;
 	fnode->open  =  open_pty_slave;
 	fnode->close = close_pty_slave;
+	fnode->selectcheck = check_pty_slave;
+	fnode->selectwait  = wait_pty_slave;
 	fnode->readdir = NULL;
 	fnode->finddir = NULL;
 	fnode->ioctl = ioctl_pty_slave;

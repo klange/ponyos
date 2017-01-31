@@ -59,6 +59,7 @@ static int __attribute__((noreturn)) sys_exit(int retval) {
 static int sys_read(int fd, char * ptr, int len) {
 	if (FD_CHECK(fd)) {
 		PTR_VALIDATE(ptr);
+
 		fs_node_t * node = FD_ENTRY(fd);
 		uint32_t out = read_fs(node, node->offset, len, (uint8_t *)ptr);
 		node->offset += out;
@@ -94,6 +95,10 @@ static int sys_write(int fd, char * ptr, int len) {
 	if (FD_CHECK(fd)) {
 		PTR_VALIDATE(ptr);
 		fs_node_t * node = FD_ENTRY(fd);
+		if (!has_permission(node, 02)) {
+			debug_print(WARNING, "access denied (write, fd=%d)", fd);
+			return -EACCES;
+		}
 		uint32_t out = write_fs(node, node->offset, len, (uint8_t *)ptr);
 		node->offset += out;
 		return out;
@@ -112,11 +117,27 @@ static int sys_open(const char * file, int flags, int mode) {
 	PTR_VALIDATE(file);
 	debug_print(NOTICE, "open(%s) flags=0x%x; mode=0x%x", file, flags, mode);
 	fs_node_t * node = kopen((char *)file, flags);
+
+	if (node && !has_permission(node, 04)) {
+		debug_print(WARNING, "access denied (read, sys_open, file=%s)", file);
+		return -EACCES;
+	}
+	if (node && ((flags & O_RDWR) || (flags & O_APPEND) || (flags & O_WRONLY))) {
+		if (!has_permission(node, 02)) {
+			debug_print(WARNING, "access denied (write, sys_open, file=%s)", file);
+			return -EACCES;
+		}
+	}
+
 	if (!node && (flags & O_CREAT)) {
+		/* TODO check directory permissions */
 		debug_print(NOTICE, "- file does not exist and create was requested.");
 		/* Um, make one */
-		if (!create_file_fs((char *)file, mode)) {
+		int result = create_file_fs((char *)file, mode);
+		if (!result) {
 			node = kopen((char *)file, flags);
+		} else {
+			return result;
 		}
 	}
 	if (!node) {
@@ -227,6 +248,8 @@ static int sys_execve(const char * filename, char *const argv[], char *const env
 	debug_print(INFO,"Releasing all shmem regions...");
 	shm_release_all((process_t *)current_process);
 
+	current_process->cmdline = argv_;
+
 	debug_print(INFO,"Executing...");
 	/* Discard envp */
 	exec((char *)filename, argc, (char **)argv_, (char **)envp_);
@@ -264,7 +287,7 @@ static int stat_node(fs_node_t * fn, uintptr_t st) {
 		debug_print(INFO, "stat: This file doesn't exist");
 		return -1;
 	}
-	f->st_dev   = 0;
+	f->st_dev   = (uint16_t)(((uint32_t)fn->device & 0xFFFF0) >> 8);
 	f->st_ino   = fn->inode;
 
 	uint32_t flags = 0;
@@ -554,13 +577,6 @@ static int sys_sysfunc(int fn, char ** args) {
 		}
 	}
 	switch (fn) {
-		case 8:
-			PTR_VALIDATE(args);
-			debug_print(WARNING, "0x%x 0x%x 0x%x 0x%x", args[0], args[1], args[2], args[3]);
-			_debug_print(args[0], (uintptr_t)args[1], (uint32_t)args[2], args[3]);
-			return 0;
-			break;
-
 		/* The following functions are here to support the loader and are probably bad. */
 		case 9:
 			{
@@ -609,6 +625,59 @@ static int sys_sysfunc(int fn, char ** args) {
 
 				return 0;
 			}
+
+		case 11:
+			{
+				/* Set command line (meant for threads to set descriptions) */
+				int count = 0;
+				char **arg = args;
+				PTR_VALIDATE(args);
+				while (*arg) {
+					PTR_VALIDATE(*args);
+					count++;
+					arg++;
+				}
+				/*
+				 * XXX We have a pretty obvious leak in storing command lines, since
+				 *     we never free them! Unfortunately, at the moment, they are
+				 *     shared between different processes, so until that gets fixed
+				 *     we're going to be just as bad as the rest of the codebase and
+				 *     just not free the previous value.
+				 */
+				current_process->cmdline = malloc(sizeof(char*)*(count+1));
+				int i = 0;
+				while (i < count) {
+					current_process->cmdline[i] = strdup(args[i]);
+					i++;
+				}
+				current_process->cmdline[i] = NULL;
+				return 0;
+			}
+
+		case 12:
+			/*
+			 * Print a debug message to the kernel console
+			 * XXX: This probably should be a thing normal users can do.
+			 */
+			PTR_VALIDATE(args);
+			debug_print(WARNING, "0x%x 0x%x 0x%x 0x%x", args[0], args[1], args[2], args[3]);
+			_debug_print(args[0], (uintptr_t)args[1], (uint32_t)args[2], args[3] ? args[3] : "(null)");
+			return 0;
+			break;
+
+		case 13:
+			/*
+			 * Set VGA text-mode cursor location
+			 * (Not actually used to place a cursor, we use this to move the cursor off screen)
+			 */
+			PTR_VALIDATE(args);
+			outportb(0x3D4, 14);
+			outportb(0x3D5, (unsigned int)args[0]);
+			outportb(0x3D4, 15);
+			outportb(0x3D5, (unsigned int)args[1]);
+
+			return 0;
+
 		default:
 			debug_print(ERROR, "Bad system function %d", fn);
 			break;
@@ -766,6 +835,38 @@ static int sys_lstat(char * file, uintptr_t st) {
 	return result;
 }
 
+static int sys_fswait(int c, int fds[]) {
+	PTR_VALIDATE(fds);
+	for (int i = 0; i < c; ++i) {
+		if (!FD_CHECK(fds[i])) return -1;
+	}
+	fs_node_t ** nodes = malloc(sizeof(fs_node_t *)*(c+1));
+	for (int i = 0; i < c; ++i) {
+		nodes[i] = FD_ENTRY(fds[i]);
+	}
+	nodes[c] = NULL;
+
+	int result = process_wait_nodes((process_t *)current_process, nodes, -1);
+	free(nodes);
+	return result;
+}
+
+static int sys_fswait_timeout(int c, int fds[], int timeout) {
+	PTR_VALIDATE(fds);
+	for (int i = 0; i < c; ++i) {
+		if (!FD_CHECK(fds[i])) return -1;
+	}
+	fs_node_t ** nodes = malloc(sizeof(fs_node_t *)*(c+1));
+	for (int i = 0; i < c; ++i) {
+		nodes[i] = FD_ENTRY(fds[i]);
+	}
+	nodes[c] = NULL;
+
+	int result = process_wait_nodes((process_t *)current_process, nodes, timeout);
+	free(nodes);
+	return result;
+}
+
 /*
  * System Call Internals
  */
@@ -818,6 +919,8 @@ static int (*syscalls[])() = {
 	[SYS_SYMLINK]      = sys_symlink,
 	[SYS_READLINK]     = sys_readlink,
 	[SYS_LSTAT]        = sys_lstat,
+	[SYS_FSWAIT]       = sys_fswait,
+	[SYS_FSWAIT2]      = sys_fswait_timeout,
 };
 
 uint32_t num_syscalls = sizeof(syscalls) / sizeof(*syscalls);
