@@ -94,7 +94,7 @@ class ClockWidget(BaseWidget):
         self.tr.draw(window)
 
     def focus_enter(self):
-        self.font.font_color = 0xFF8EDBFF
+        self.font.font_color = 0xFFba82e3
 
     def focus_leave(self):
         self.font.font_color = self.color
@@ -132,7 +132,7 @@ class LogOutWidget(BaseWidget):
         tmp = cairo.Context(self.icon_hilight)
         tmp.set_operator(cairo.OPERATOR_ATOP)
         tmp.rectangle(0,0,24,24)
-        tmp.set_source_rgb(0x8E/0xFF,0xD8/0xFF,1)
+        tmp.set_source_rgb(186/0xFF,130/0xFF,227/0xFF)
         tmp.paint()
         self.hilighted = False
 
@@ -159,7 +159,8 @@ class VolumeWidget(BaseWidget):
 
     width = 28
     color = (0xE6/0xFF,0xE6/0xFF,0xE6/0xFF)
-    hilight_color = (0x8E/0xFF,0xD8/0xFF,1)
+    hilight_color = (186/0xFF,130/0xFF,227/0xFF)
+
     icon_names = ['volume-mute','volume-low','volume-medium','volume-full']
     check_time = 10
 
@@ -272,7 +273,7 @@ class NetworkWidget(BaseWidget):
 
     width = 28
     color = (0xE6/0xFF,0xE6/0xFF,0xE6/0xFF)
-    hilight_color = (0x8E/0xFF,0xD8/0xFF,1)
+    hilight_color = (186/0xFF,130/0xFF,227/0xFF)
     icon_names = ['net-active','net-disconnected']
     check_time = 10
 
@@ -357,7 +358,7 @@ class WindowListWidget(BaseWidget):
     width = -1
     text_y_offset = 5
     color = 0xFFE6E6E6
-    hilight = 0xFF8ED8FF
+    hilight = 0xFFba82e3
     icon_width = 48
 
     def __init__(self):
@@ -366,8 +367,8 @@ class WindowListWidget(BaseWidget):
         self.font_hilight = toaru_fonts.Font(toaru_fonts.FONT_SANS_SERIF, 13, self.hilight)
         self.font_hilight.set_shadow((0xFF000000, 2, 1, 1, 3.0))
         self.gradient = cairo.LinearGradient(0,0,0,PANEL_HEIGHT)
-        self.gradient.add_color_stop_rgba(0.0,72/255,167/255,255/255,0.7)
-        self.gradient.add_color_stop_rgba(1.0,72/255,167/255,255/255,0.0)
+        self.gradient.add_color_stop_rgba(0.0,186/255,130/255,227/255,0.7)
+        self.gradient.add_color_stop_rgba(1.0,186/255,130/255,227/255,0.0)
 
         self.divider = cairo.LinearGradient(0,0,0,PANEL_HEIGHT)
         self.divider.add_color_stop_rgba(0.1,1,1,1,0.0)
@@ -465,7 +466,7 @@ class ApplicationsMenuWidget(BaseWidget):
     text_y_offset = 4
     text_x_offset = 10
     color = 0xFFE6E6E6
-    hilight = 0xFF8ED8FF
+    hilight = 0xFFba82e3
 
     def __init__(self):
         self.width = 140
@@ -514,7 +515,7 @@ class ApplicationsMenuWidget(BaseWidget):
         ]
         games.extend(self.extra('games'))
         graphics = [
-            MenuEntryAction("ToaruPaint","applications-painting",launch_app,"painting.py"),
+            MenuEntryAction("Paint","applications-painting",launch_app,"painting.py"),
         ]
         graphics.extend(self.extra('graphics'))
         settings = [
@@ -531,7 +532,7 @@ class ApplicationsMenuWidget(BaseWidget):
             MenuEntrySubmenu("Settings",settings),
             MenuEntryDivider(),
             MenuEntryAction("Help","help",launch_app,"help-browser.py"),
-            MenuEntryAction("About ToaruOS","star",launch_app,"about-applet.py"),
+            MenuEntryAction("About PonyOS","star",launch_app,"about-applet.py"),
             MenuEntryAction("Log Out","exit",logout_callback,""),
         ]
 

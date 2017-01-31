@@ -25,7 +25,7 @@ from dialog import DialogWindow, OpenFileDialog
 
 import yutani_mainloop
 
-app_name = "ToaruPaint"
+app_name = "PonyPaint"
 version = "1.0.0"
 _description = f"<b>{app_name} {version}</b>\n© 2017 Kevin Lange\n\nDraw stuff, maybe.\n\n<color 0x0000FF>http://github.com/klange/toaruos</color>"
 

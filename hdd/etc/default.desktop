@@ -1,5 +1,5 @@
 utilities-terminal,terminal,Terminal
-applications-painting,draw,Draw!
-julia,julia,Julia Fractals
 folder,file_browser.py,Documents
 package,gsudo package_manager.py,Packages
+applications-painting,painting.py,Painting
+julia,julia,Julia Fractals

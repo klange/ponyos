@@ -144,7 +144,15 @@ void draw_prompt(int ret) {
 		printf("\033[38;5;167m%d ", ret);
 	}
 
-	printf("\033[0m%s%s\033[0m ", _cwd, getuid() == 0 ? "\033[1;38;5;196m#" : "\033[1;38;5;47m$");
+	//printf("\033[0m%s%s\033[0m ", _cwd, getuid() == 0 ? "\033[1;38;5;196m#" : "\033[1;38;5;47m$");
+	printf("\033[0m");
+	fflush(stdout);
+	pid_t p = fork();
+	if (!p) {
+		execvp("/bin/cat-img",(char *[]){"cat-img","-sn","/usr/share/scoot.png",NULL});
+	}
+	waitpid(-1, NULL, 0);
+	printf(" ");
 	fflush(stdout);
 }
 
