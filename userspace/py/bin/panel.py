@@ -218,7 +218,7 @@ class MouseModeWidget(BaseWidget):
 
     width = 28
     color = (0xE6/0xFF,0xE6/0xFF,0xE6/0xFF)
-    hilight_color = (0x8E/0xFF,0xD8/0xFF,1)
+    hilight_color = (186/0xFF,130/0xFF,227/0xFF)
     icon_names = ['mouse-status', 'mouse-relative']
     check_time = 10
 
