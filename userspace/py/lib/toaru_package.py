@@ -9,7 +9,7 @@ import hashlib
 import os
 import stat
 
-url = 'http://toaruos.org'
+url = 'http://toaruos.org/ponyos'
 
 MANIFEST_PATH = '/tmp/.manifest.json'
 INSTALLED_PATH = '/tmp/.installed.json'

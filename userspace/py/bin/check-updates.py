@@ -32,7 +32,7 @@ if __name__ == '__main__':
     # Check for updates...
     try:
         current = list(map(int,version().split(".")))
-        latest_str = subprocess.check_output(['fetch','http://toaruos.org/latest']).decode('utf-8').strip()
+        latest_str = subprocess.check_output(['fetch','http://toaruos.org/ponyos/latest']).decode('utf-8').strip()
         latest = list(map(int,latest_str.split(".")))
     except:
         print("Unable to parse latest version.")
@@ -44,10 +44,10 @@ if __name__ == '__main__':
         def derp():
             sys.exit(0)
         def updates():
-            subprocess.Popen(['help-browser.py','http://toaruos.org/update.trt'])
+            subprocess.Popen(['help-browser.py','http://toaruos.org/ponyos/update.trt'])
             sys.exit(0)
 
-        DialogWindow(d,"Update Available",f"A new release of ToaruOS (v{latest_str}) is available.\nPlease visit <link target=\"#\">https://github.com/klange/toaruos</link> to upgrade.",callback=derp,cancel_callback=updates,icon='star',cancel_label="What's New?",close_is_cancel=False)
+        DialogWindow(d,"Update Available",f"A new release of PonyOS (v{latest_str}) is available.\nPlease visit <link target=\"#\">http://ponyos.org/</link> to upgrade.",callback=derp,cancel_callback=updates,icon='utilities-terminal',cancel_label="What's New?",close_is_cancel=False)
 
         yutani_mainloop.mainloop()
 
