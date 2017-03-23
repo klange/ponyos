@@ -98,7 +98,7 @@
 
 			<h2>Using the CD</h2>
 			<p>The CD should boot in QEMU, VirtualBox, VMWare, or even on real hardware if you're a brave pony!</p>
-			<p>When using VirtualBox, select "Other/Unknown" for the OS type. For VMware, use a 64-bit guest configuration (PonyOS is not 64-bit, but this configuration provides optimal hardware). For QEMU, <code>qemu-system-i386 -m 1G -M arch=kvm:tcg -soundhw ac97 -cdrom ponyos.iso</code> should suffice.</p>
+			<p>For all VMs, 1GB of RAM is recommended. When using VirtualBox, select "Other/Unknown" for the OS type. For VMware, use a 64-bit guest configuration (PonyOS is not 64-bit, but this configuration provides optimal hardware). For QEMU, <code>qemu-system-i386 -m 1G -M arch=kvm:tcg -soundhw ac97 -cdrom ponyos.iso</code> should suffice.</p>
 			<p>The CD will automatically log in the user <code>local</code>. If you are asked for a password for this user, that password is also <code>local</code>.</p>
 
 			<h2>Building from Scratch</h2>
@@ -126,6 +126,9 @@
 
 			<h3>How do I change the display resolution?</h3>
 			<p>In VirtualBox, the display should automatically resize to fit the host window. In QEMU and VMWare, you can use <code>sudo kdebug</code> in a terminal to launch a kernel debug shell and then <code>set_mode 1280 720</code> or similar to set the resolution.</p>
+
+			<h3>I'm trying to play Quake and the mouse isn't working!</h3>
+			<p>In QEMU and VMware, click the mouse cursor icon in the panel to switch to relative mouse mode before running Quake. In VirtualBox, disable "Mouse Integration" in the "Input" menu.</p>
 
 			<h3>Does PonyOS support networking?</h3>
 			<p>Yes! While the network stack in PonyOS 4.0 is far from mature, it should provide functioning Internet access on supported configurations.</p>
