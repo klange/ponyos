@@ -1,0 +1,69 @@
+## Private workspace directory
+
+_/
+/*.pony
+
+
+## Hidden files
+
+.*
+!.git*
+
+
+## Backup files
+
+*~
+\#*\#
+*.swp
+*.swo
+*.bak
+
+
+## Compile files
+
+/completion/*-completion.pony*
+/completion/*-completion-think.*
+/completion/pony*.pony*
+/truncater
+*.install
+*.gz
+*.xz
+*.bzip2
+*.zip
+*.info
+*.ps
+*.dvi
+/Makefile
+/quotes/
+/*ponies/heights
+/*ponies/onlyheights
+/*ponies/widths
+/*ponies/metadata
+/ponysay
+/bin/
+/obj/
+
+
+## Texinfo manual stuff
+
+/ponysay.aux
+/ponysay.cp
+/ponysay.cps
+/ponysay.fn
+/ponysay.ky
+/ponysay.log
+/ponysay.pg
+/ponysay.toc
+/ponysay.tp
+/ponysay.vr
+/ponysay.op
+/ponysay.ops
+/ponysay.pgs
+/ponysay.vrs
+
+
+## Python just in time compilation cache for heuristic optimisation
+
+__pycache__/
+*.pyc
+
