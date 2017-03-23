@@ -14,14 +14,14 @@
 #include "lib/graphics.h"
 
 #include "gui/terminal/lib/termemu.h"
-#include "toaru_logo.h"
+#include "pony_logo.h"
 
 #define NUM_DATA_LINES 30
 
 char data_lines[NUM_DATA_LINES][100];
 const char * prog_lines[NUM_DATA_LINES] = {NULL};
 
-#define C_A "\033[34;1m"
+#define C_A "\033[35;1m"
 #define C_O "\033[0m"
 
 void print_thing(int j) {
@@ -43,7 +43,7 @@ int main(int argc, char * argv[]) {
 	int i = 0;
 	prog_lines[i] = "hostname";
 	sprintf(data_lines[i++], C_A "%s" C_O "@" C_A, user);
-	sprintf(data_lines[i++], C_A "OS: " C_O "ToaruOS");
+	sprintf(data_lines[i++], C_A "OS: " C_O "PonyOS");
 	prog_lines[i] = "uname -sr";
 	sprintf(data_lines[i++], C_A "Kernel: " C_O);
 	prog_lines[i] = "uptime -p";
