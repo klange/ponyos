@@ -7,9 +7,16 @@
 		<meta name="description" content="PonyOS: A Hobby Operating System for Everypony">
 		<link href="assets/css/bootstrap.css" rel="stylesheet">
 		<style type="text/css">
+			@font-face {
+				font-family: "Equestria";
+				src: url("assets/Equestria.ttf");
+			}
 			body {
 				padding-top: 60;
 				padding-bottom: 40px;
+			}
+			h1, h2, h3, .brand {
+				font-family: "Equestria", sans-serif;
 			}
 		</style>
 		<link href="assets/css/bootstrap-responsive.css" rel="stylesheet">
@@ -39,83 +46,78 @@
 		<div class="container">
 			<div class="hero-unit">
 				<center>
-					<h1>PonyOS 3.0</h1>
-					<p>BFG Edition</p>
-					<img src="assets/img/logo.png">
+					<h1>PonyOS 4.0</h1>
+					<p>An OS for Every Pony!</p>
+					<img src="assets/img/logo-new.png">
 				</center>
 			</div>
 		</div>
 
 		<div class="container">
 			<h1>What is PonyOS?</h1>
-			<p>PonyOS is a hobby Unix-like operating system.</p>
+			<p>PonyOS is a hobby Unix-like operating system, designed for ponies like you!</p>
 
 			<h2>Is PonyOS a Linux distribution?</h2>
 			<p>No! PonyOS uses its own kernel, built from scratch.</p>
 
 			<a name="screenshots"></a>
 			<h2>Screenshots</h2>
-			<blockquote class="imgur-embed-pub" lang="en" data-id="a/vZ6tV"><a href="//imgur.com/vZ6tV">Screenshots</a></blockquote><script async src="//s.imgur.com/min/embed.js" charset="utf-8"></script>
+			<p>todo</p>
 
 			<div></div>
 
 			<a name="whats_new"></a>
-			<h2>What's New in 3.0?</h2>
-			<p>PonyOS 3.0 is the biggest improvement in PonyOS history:</p>
+			<h2>What's New in 4.0?</h2>
+			<p>PonyOS 4.0 is light-years ahead of its predecessors!</p>
 			<ul>
-				<li><b>Brand New Window Compositor</b> - This one doesn't eat your CPU.</li>
-				<li><b>All Sorts of Unix Stuff</b> - Like pipes and whatnot.</li>
-				<li><b>Python</b> - The language, not the snake. No snakes are included in PonyOS.</li>
-				<li><b>Satantic Rituals</b> - Now shipping with shareware Doom!</li>
+				<li><b>Python 3.6</b> - The newest Python interpreter!</li>
+				<li><b>Ponysay</b> - The tool everypony has been asking for!</li>
+				<li><b>Live CD</b> - Now distributed on a bootable live CD!</li>
+				<li><b>Networking</b> - Access the Internet! (Web browser not included.)</li>
+				<li><b>Packages</b> - Install more software!</li>
+				<li><b>Dynamic Libraries</b> - If you don't know, don't ask!</li>
 			</ul>
 
 			<a name="downloads"></a>
 			<h2>Downloads</h2>
-			<h3><img src="assets/img/elementary-disk-icon.png"> Hard Disk Images</h3>
-			<p><a href="https://www.dropbox.com/s/j1ejdldnfj8z39i/ponyos3-disk.tar.gz?dl=0">Raw disk image in a tarball (1GB)</a> - 189MB download; MD5: 022bdf425d06ee44c6b1c81a27d9aa81</p>
-			<p><a href="https://github.com/klange/ponyos/releases/tag/3.0">Mirror #1</a></p>
+			<p>24MB Live CD link goes here</p>
 
-			<h2>Using the Disk Image</h2>
-			<p>The raw disk image can be used with QEMU. Other emulators may work but are not supported.</p>
-			<p>Extract the disk image from the tarball and then execute QEMU as follows:</p>
-			<pre>qemu-system-i386 -m 1024 -hda ponyos-disk.img -vga std -enable-kvm -sdl</pre>
-			<p>(If you do not have sufficient RAM on your host, you may use <code>-m 512</code> instead.)</p>
-			<p>The default user is <code>local</code> and the default password for that user is also <code>local</code>.</p>
-			<p>There is also a <code>root</code> user with password <code>toor</code>.</p>
+			<h2>Using the CD</h2>
+			<p>The CD should boot in QEMU, VirtualBox, VMWare, or even on real hardware if you're a brave pony!</p>
+			<p>When using VirtualBox, select "Other/Unknown" for the OS type. For VMware, use a 64-bit guest configuration (PonyOS is not 64-bit, but this configuration provides optimal hardware). For QEMU, <code>qemu-system-i386 -m 1G -M arch=kvm:tcg -soundhw ac97 -cdrom ponyos.iso</code> should suffice.</p>
+			<p>The CD will automatically log in the user <code>local</code>. If you are asked for a password for this user, that password is also <code>local</code>.</p>
 
 			<h2>Building from Scratch</h2>
 			<p>To build PonyOS from scratch, please use an Ubuntu or Debian-derived host.</p>
 			<p>Clone from <a href="https://github.com/klange/ponyos">our git repository</a> and then run <code>make toolchain</code>. Note that we do not support building PonyOS from scratch and this process may not work. Complete builds may take anywhere from thirty minutes to many hours, depending on your hardware.</p>
-			<p>The standard build set up does not include GCC. Use the additional <code>toolchain/cross-gcc.sh</code> to build a native GCC if you so desire.</p>
 
 			<h2>Git Repository</h2>
 			<p>PonyOS is developed through Github. You can find our repository at <a href="http://github.com/klange/ponyos">klange/ponyos</a>.</p>
 
 			<h2>FAQ</h2>
 			<h3>Does PonyOS work on real hardware?</h3>
-			<p>Yes! PonyOS works on many different machines.</p>
+			<p>Yes! PonyOS works on many different machines. Hardware driver support is limited, though, so for the best PonyOS experience you should use one of the supported virtual machines listed above. If you're feeling brave, you'll need a PS/2 keyboard and mouse (or legacy compatibility support in your motherboard).</p>
 
 			<h3>Is this <i>really</i> not a Linux distro?</h3>
-			<p>It's been two years - if you still don't believe us, we're not sure what to do.</p>
+			<p>Four years later and people still don't believe us! PonyOS is not a Linux distribution - it's also not a BSD, or Hurd, or a Minix!</p>
 
 			<h3>Does PonyOS come with a compiler?</h3>
-			<p>Yes! PonyOS comes with a fully functioning installation of GCC!</p>
-			<p>PonyOS 3.0 BFG Edition also comes with Python 2.7.</p>
+			<p>PonyOS 4.0 does not include a compiler on the CD. You can use the package manager to install the <code>build-essential</code> package and get a full GCC toolchain. PonyOS 4.0 does come with Python 3.6 if you want to get coding.</p>
 
 			<h3>Can I put this on a bootable USB drive?</h3>
-			<p>No. Please stop asking this.</p>
+			<p>Probably, but see "Does PonyOS work on real hardware?" above. Directly copying the ISO to a USB stick should work (eg., using <code>dd</code>).</p>
 
 			<h3>How do I move windows?</h3>
 			<p>You can drag them by their title bars or hold <code>Alt</code> and the click and drag anywhere.</p>
 
 			<h3>Does PonyOS support networking?</h3>
-			<p>Experimental kernel support for TCP is included in this release, but you can't use it for anything.</p>
+			<p>Yes! While the network stack in PonyOS 4.0 is far from mature, it should provide functioning Internet access on supported configurations.</p>
 
 			<h3>I started an application and it doesn't have a title bar, how do I exit it?</h3>
-			<p>Try mashing <code>q</code> or <code>esc</code> or possibly even <code>Alt+F4</code>. One of those should work. If all else fails, <code>kill</code> it.</p>
+			<p>Alt+F4.</p>
 
 			<h3>Can I upgrade from an earlier release of PonyOS?</h3>
-			<p>Upgrading is not supported. Previous releases of PonyOS did not support writing to disk anyway.</p>
+			<p>No. Please use the latest live CD of PonyOS 4.0.</p>
 
 		</div>
 
@@ -152,10 +154,10 @@
 			<a name="contact"></a>
 			<h2>Contact</h2>
 			<p>You can find me on Twitter <a href="http://twitter.profile.dakko.us">@kevinlange</a>.</p>
-			<p>PonyOS is a distribution of <a href="http://toaruos.org">とあるOS</a>.</p>
+			<p>PonyOS is based on <a href="http://toaruos.org">ToaruOS</a>.</p>
 			<p style="color: #555555">Happy April Fools Day</p>
 			<center>
-				<small>Copyright 2013-2015 Kevin Lange</small>
+				<small>Copyright 2013-2017 Kevin Lange</small>
 			</center>
 		</div>
 
