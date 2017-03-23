@@ -2,6 +2,7 @@
 Provides basic nested menus.
 """
 import cairo
+import math
 
 import yutani
 import text_region
@@ -9,6 +10,10 @@ import toaru_fonts
 from icon_cache import get_icon
 
 menu_windows = {}
+
+def close_enough(msg):
+    return msg.command == yutani.MouseEvent.RAISE and \
+            math.sqrt((msg.new_x - msg.old_x) ** 2 + (msg.new_y - msg.old_y) ** 2) < 10
 
 class MenuBarWidget(object):
     """Widget for display multiple menus."""
@@ -61,11 +66,17 @@ class MenuBarWidget(object):
             title, menu = e
             w = self.font.width(title) + 10
             if x >= offset and x < offset + w:
-                if msg.command == yutani.MouseEvent.CLICK: # or raise
+                if msg.command == yutani.MouseEvent.CLICK or close_enough(msg):
                     menu = MenuWindow(menu,(self.window.x+self.window.decorator.left_width()+offset,self.window.y+self.window.decorator.top_height()+self.height),root=self.window)
                     self.active_menu = menu
                     self.active_entry = e
-                    break
+                elif self.active_menu and self.active_menu in self.window.menus.values() and e != self.active_entry:
+                    self.active_menu.definitely_close()
+                    menu = MenuWindow(menu,(self.window.x+self.window.decorator.left_width()+offset,self.window.y+self.window.decorator.top_height()+self.height),root=self.window)
+                    self.active_menu = menu
+                    self.active_entry = e
+                    self.window.draw()
+                break
             offset += w
 
 
@@ -81,7 +92,7 @@ class MenuEntryAction(object):
     hilight_gradient_bottom = (56/255,137/255,220/55)
     hilight_border_bottom = (47/255,106/255,167/255)
 
-    def __init__(self, title, icon, action=None, data=None):
+    def __init__(self, title, icon, action=None, data=None, rich=False):
         self.title = title
         self.icon = get_icon(icon,16) if icon else None
         self.action = action
@@ -91,23 +102,30 @@ class MenuEntryAction(object):
         self.width = self.font.width(self.title) + 50 # Arbitrary bit of extra space.
         # Fit width to hold title?
         self.tr = text_region.TextRegion(0,0,self.width - 22, 20, self.font)
-        self.tr.set_text(title)
+        self.rich = rich
+        self.update_text()
         self.hilight = False
         self.window = None
         self.gradient = cairo.LinearGradient(0,0,0,self.height-2)
         self.gradient.add_color_stop_rgba(0.0,*self.hilight_gradient_top,1.0)
         self.gradient.add_color_stop_rgba(1.0,*self.hilight_gradient_bottom,1.0)
 
+    def update_text(self):
+        if self.rich:
+            self.tr.set_richtext(self.title)
+        else:
+            self.tr.set_text(self.title)
+
     def focus_enter(self,keyboard=False):
         if self.window and self.window.child:
             self.window.child.definitely_close()
         self.tr.set_font(self.font_hilight)
-        self.tr.set_text(self.title)
+        self.update_text()
         self.hilight = True
 
     def focus_leave(self):
         self.tr.set_font(self.font)
-        self.tr.set_text(self.title)
+        self.update_text()
         self.hilight = False
 
     def draw(self, window, offset, ctx):
@@ -150,8 +168,11 @@ class MenuEntryAction(object):
                 k.definitely_close()
             self.window.root.draw()
 
+    def close_enough(self, msg):
+        return close_enough(msg) and msg.old_y >= self.offset and msg.old_y < self.offset + self.height
+
     def mouse_action(self, msg):
-        if msg.command == yutani.MouseEvent.CLICK:
+        if msg.command == yutani.MouseEvent.CLICK or self.close_enough(msg):
             self.activate()
 
         return False

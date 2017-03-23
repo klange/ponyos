@@ -552,7 +552,7 @@ static void load_fonts(yutani_globals_t * yg) {
  */
 static void yutani_add_clip(yutani_globals_t * yg, double x, double y, double w, double h) {
 	cairo_rectangle(yg->framebuffer_ctx, x, y, w, h);
-	if (yg->width > 2600) {
+	if (yg->width > 2490) {
 		x = 0;
 		w = yg->width;
 	}
@@ -1096,8 +1096,10 @@ static void redraw_windows(yutani_globals_t * yg) {
 
 		if (!yutani_options.nested) {
 			reinit_graphics_fullscreen(yg->backend_ctx);
+			yg->stride = framebuffer_stride();
 		} else {
 			reinit_graphics_yutani(yg->backend_ctx, yg->host_window);
+			yg->stride = yg->backend_ctx->width * 4;
 			yutani_window_resize_done(yg->host_context, yg->host_window);
 		}
 		yg->width = yg->backend_ctx->width;
@@ -1108,7 +1110,7 @@ static void redraw_windows(yutani_globals_t * yg) {
 		yg->framebuffer_surface = cairo_image_surface_create_for_data(
 				yg->backend_framebuffer, CAIRO_FORMAT_ARGB32, yg->width, yg->height, stride);
 		yg->real_surface = cairo_image_surface_create_for_data(
-				yg->backend_ctx->buffer, CAIRO_FORMAT_ARGB32, yg->width, yg->height, stride);
+				yg->backend_ctx->buffer, CAIRO_FORMAT_ARGB32, yg->width, yg->height, yg->stride);
 
 		yg->framebuffer_ctx = cairo_create(yg->framebuffer_surface);
 		yg->real_ctx = cairo_create(yg->real_surface);
@@ -1134,7 +1136,7 @@ void yutani_cairo_init(yutani_globals_t * yg) {
 	yg->framebuffer_surface = cairo_image_surface_create_for_data(
 			yg->backend_framebuffer, CAIRO_FORMAT_ARGB32, yg->width, yg->height, stride);
 	yg->real_surface = cairo_image_surface_create_for_data(
-			yg->backend_ctx->buffer, CAIRO_FORMAT_ARGB32, yg->width, yg->height, stride);
+			yg->backend_ctx->buffer, CAIRO_FORMAT_ARGB32, yg->width, yg->height, yg->stride);
 
 	yg->framebuffer_ctx = cairo_create(yg->framebuffer_surface);
 	yg->real_ctx = cairo_create(yg->real_surface);
@@ -1762,6 +1764,8 @@ static void handle_mouse_event(yutani_globals_t * yg, struct yutani_msg_mouse_ev
 					if (yg->mouse_window) {
 						device_to_window(yg->mouse_window, yg->mouse_x / MOUSE_SCALE, yg->mouse_y / MOUSE_SCALE, &yg->mouse_click_x, &yg->mouse_click_y);
 						yutani_msg_t * response = yutani_msg_build_window_mouse_event(yg->mouse_window->wid, yg->mouse_click_x, yg->mouse_click_y, -1, -1, me->event.buttons, YUTANI_MOUSE_EVENT_DOWN);
+						yg->mouse_click_x_orig = yg->mouse_click_x;
+						yg->mouse_click_y_orig = yg->mouse_click_y;
 						pex_send(yg->server, yg->mouse_window->owner, response->size, (char *)response);
 						free(response);
 					}
@@ -1866,8 +1870,8 @@ static void handle_mouse_event(yutani_globals_t * yg, struct yutani_msg_mouse_ev
 				if (!(me->event.buttons & yg->mouse_drag_button)) {
 					/* Mouse released */
 					yg->mouse_state = YUTANI_MOUSE_STATE_NORMAL;
-					int32_t old_x = yg->mouse_click_x;
-					int32_t old_y = yg->mouse_click_y;
+					int32_t old_x = yg->mouse_click_x_orig;
+					int32_t old_y = yg->mouse_click_y_orig;
 					if (yg->mouse_window) {
 						device_to_window(yg->mouse_window, yg->mouse_x / MOUSE_SCALE, yg->mouse_y / MOUSE_SCALE, &yg->mouse_click_x, &yg->mouse_click_y);
 						if (!yg->mouse_moved) {
@@ -2015,10 +2019,12 @@ int main(int argc, char * argv[]) {
 		yutani_window_move(yg->host_context, yg->host_window, 50, 50);
 		yutani_window_advertise_icon(yg->host_context, yg->host_window, "Compositor", "compositor");
 		yg->backend_ctx = init_graphics_yutani_double_buffer(yg->host_window);
+		yg->stride = yg->backend_ctx->width * 4;
 	} else {
 		_static_yg = yg;
 		signal(SIGWINEVENT, yutani_display_resize_handle);
 		yg->backend_ctx = init_graphics_fullscreen_double_buffer();
+		yg->stride = framebuffer_stride();
 	}
 
 	if (!yg->backend_ctx) {
@@ -2099,6 +2105,7 @@ int main(int argc, char * argv[]) {
 	}
 
 	int fds[4], mfd, kfd, amfd;
+	int vmmouse = 0;
 	mouse_device_packet_t packet;
 	key_event_t event;
 	key_event_state_t state = {0};
@@ -2111,6 +2118,10 @@ int main(int argc, char * argv[]) {
 		mfd = open("/dev/mouse", O_RDONLY);
 		kfd = open("/dev/kbd", O_RDONLY);
 		amfd = open("/dev/absmouse", O_RDONLY);
+		if (amfd == -1) {
+			amfd = open("/dev/vmmouse", O_RDONLY);
+			vmmouse = 1;
+		}
 
 		fds[1] = mfd;
 		fds[2] = kfd;
@@ -2199,7 +2210,11 @@ int main(int argc, char * argv[]) {
 			} else if (index == 3) {
 				int r = read(amfd, (char *)&packet, sizeof(mouse_device_packet_t));
 				if (r > 0) {
-					packet.buttons = yg->last_mouse_buttons & 0xF;
+					if (!vmmouse) {
+						packet.buttons = yg->last_mouse_buttons & 0xF;
+					} else {
+						yg->last_mouse_buttons = packet.buttons;
+					}
 					yutani_msg_t * m = yutani_msg_build_mouse_event(0, &packet, YUTANI_MOUSE_EVENT_TYPE_ABSOLUTE);
 					handle_mouse_event(yg, (struct yutani_msg_mouse_event *)m->data);
 					free(m);

@@ -47,7 +47,7 @@ pushd build
 
         pushd binutils
             $DIR/tarballs/binutils-2.27/configure --target=$TARGET --prefix=$PREFIX --with-sysroot=$TOARU_SYSROOT --disable-werror || bail
-            make -j || bail
+            make -j4 || bail
             make install || bail
         popd
 
@@ -57,7 +57,7 @@ pushd build
 
         pushd binutils-elf
             $DIR/tarballs/binutils-2.27/configure --target=i686-elf --prefix=$PREFIX  --disable-werror || bail
-            make -j || bail
+            make -j4 || bail
             make install || bail
         popd
     fi
@@ -72,7 +72,7 @@ pushd build
 
         pushd gcc
             $DIR/tarballs/gcc-6.3.0/configure --target=i686-pc-toaru --prefix=$PREFIX --with-sysroot=$TOARU_SYSROOT --disable-nls --enable-languages=c,c++,go --disable-libssp --with-newlib || baiol
-            make -j all-gcc all-target-libgcc || bail
+            make -j4 all-gcc all-target-libgcc || bail
             make install-gcc install-target-libgcc || bail
         popd
 
@@ -83,7 +83,7 @@ pushd build
 
         pushd gcc-elf
             $DIR/tarballs/gcc-6.3.0/configure --target=i686-elf --prefix=$PREFIX --disable-nls --enable-languages=c --disable-libssp --without-headers || baiol
-            make -j all-gcc all-target-libgcc || bail
+            make -j4 all-gcc all-target-libgcc || bail
             make install-gcc install-target-libgcc || bail
         popd
     fi
@@ -160,7 +160,7 @@ pushd build
 
     if $BUILD_ZLIB; then
         # XXX zlib can not be built in a separate directory
-        pushd $DIR/tarballs/zlib*
+        pushd $DIR/tarballs/zlib*/
             CC=i686-pc-toaru-gcc ./configure --static --prefix=$VIRTPREFIX || bail
             make || bail
             make DESTDIR=$TOARU_SYSROOT install || bail
@@ -205,7 +205,7 @@ pushd build
 
     if $BUILD_MESA; then
         # XXX Mesa can not be built from a separate directory (configure script doesn't provide a Makefile)
-        pushd $DIR/tarballs/Mesa-*
+        pushd $DIR/tarballs/Mesa-*/
             ./configure --enable-32-bit --host=$TARGET --prefix=$VIRTPREFIX  --with-osmesa-bits=8 --with-driver=osmesa --disable-egl --disable-shared --without-x --disable-glw --disable-glut --disable-driglx-direct --disable-gallium || bail
             make || bail
             make DESTDIR=$TOARU_SYSROOT install || bail
