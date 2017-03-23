@@ -19,8 +19,8 @@ class MenuBarWidget(object):
     """Widget for display multiple menus."""
 
     height = 24
-    hilight_gradient_top = (93/255,163/255,236/255)
-    hilight_gradient_bottom = (56/255,137/255,220/55)
+    hilight_gradient_top = (201/255,73/255,187/255)
+    hilight_gradient_bottom = (150/255,0/255,134/255)
 
     def __init__(self, window, entries):
         self.window = window
@@ -87,10 +87,10 @@ class MenuEntryAction(object):
     # but we're going to be lazy for now and just assume they're all this big.
     height = 20
 
-    hilight_border_top = (54/255,128/255,205/255)
-    hilight_gradient_top = (93/255,163/255,236/255)
-    hilight_gradient_bottom = (56/255,137/255,220/55)
-    hilight_border_bottom = (47/255,106/255,167/255)
+    hilight_border_top = (150/255,0/255,134/255)
+    hilight_gradient_top = (201/255,73/255,187/255)
+    hilight_gradient_bottom = (150/255,0/255,134/255)
+    hilight_border_bottom = (201/255,73/255,187/255)
 
     def __init__(self, title, icon, action=None, data=None, rich=False):
         self.title = title

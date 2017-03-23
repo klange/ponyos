@@ -26,10 +26,10 @@ app_name = "Package Manager"
 version = "1.0.0"
 _description = f"<b>{app_name} {version}</b>\n© 2017 Kevin Lange\n\nBrowse and install software packages.\n\n<color 0x0000FF>http://github.com/klange/toaruos</color>"
 
-hilight_border_top = (54/255,128/255,205/255)
-hilight_gradient_top = (93/255,163/255,236/255)
-hilight_gradient_bottom = (56/255,137/255,220/55)
-hilight_border_bottom = (47/255,106/255,167/255)
+hilight_border_top = (150/255,0/255,134/255)
+hilight_gradient_top = (201/255,73/255,187/255)
+hilight_gradient_bottom = (150/255,0/255,134/255)
+hilight_border_bottom = (201/255,73/255,187/255)
 
 def install(name):
     toaru_package.process_package(name)

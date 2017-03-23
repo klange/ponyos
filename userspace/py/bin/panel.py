@@ -187,7 +187,7 @@ class LabelWidget(BaseWidget):
     text_y_offset = 4
     text_x_offset = 10
     color = 0xFFE6E6E6
-    hilight = 0xFF8ED8FF
+    hilight = 0xFFba82e3
 
     def __init__(self, text):
         self.width = 140
@@ -796,7 +796,7 @@ class WallpaperIcon(object):
         tmp.paint()
         tmp.set_operator(cairo.OPERATOR_ATOP)
         tmp.rectangle(0,0,self.icon_hilight.get_width(),self.icon_hilight.get_height())
-        tmp.set_source_rgba(0x8E/0xFF,0xD8/0xFF,1,0.3)
+        tmp.set_source_rgba(0xba/0xFF,0x82/0xFF,0xe3/0xFF,0.3)
         tmp.paint()
 
         self.font = toaru_fonts.Font(toaru_fonts.FONT_SANS_SERIF, 13, 0xFFFFFFFF)

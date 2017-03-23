@@ -17,7 +17,7 @@ def version():
         return release[:release.index('-')]
     return release
 
-_default_text = f"<b>ToaruOS {version()}</b>\n© 2011-2017 Kevin Lange, et al.\n\nToaruOS is free software released under the NCSA/University of Illinois license.\n\n<color 0x0000FF>http://toaruos.org\nhttps://github.com/klange/toaruos</color>"
+_default_text = f"<b>PonyOS {version()}</b>\n© 2011-2017 Kevin Lange, et al.\n\n<color 0x0000FF>http://ponyos.org/</color>"
 
 
 if __name__ == '__main__':
@@ -30,7 +30,7 @@ if __name__ == '__main__':
     if len(sys.argv) > 4:
         window = AboutAppletWindow(d,sys.argv[1],sys.argv[3],sys.argv[4],sys.argv[2],on_close=quit)
     else:
-        window = AboutAppletWindow(d,"About ToaruOS",'/usr/share/logo_login.png',_default_text,on_close=quit)
+        window = AboutAppletWindow(d,"About PonyOS",'/usr/share/logo_small.png',_default_text,on_close=quit)
 
     yutani_mainloop.mainloop()
 

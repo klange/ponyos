@@ -46,7 +46,7 @@ class LoginWindow(yutani.Window):
         self.font = toaru_fonts.Font(toaru_fonts.FONT_SANS_SERIF, 11, 0xFFFFFFFF)
         self.font.set_shadow((0xFF000000, 2, 1, 1, 3.0))
         self.tr = text_region.TextRegion(0,0,200,30,font=self.font)
-        self.tr.set_text(f"ToaruOS {os.uname().release}")
+        self.tr.set_text(f"PonyOS {os.uname().release}")
 
         self.load_wallpaper()
 

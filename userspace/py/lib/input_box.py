@@ -31,7 +31,7 @@ def draw_input_box(ctx,x,y,w,h,focused):
     # Outer
     rounded_rectangle(ctx,x,y,w,h,4)
     if focused:
-        ctx.set_source_rgb(0x8E/0xFF,0xD8/0xFF,1)
+        ctx.set_source_rgb(0xba/0xFF,0x82/0xFF,0xe3/0xFF)
     else:
         ctx.set_source_rgb(192/255,192/255,192/255)
     ctx.fill()
