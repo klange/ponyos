@@ -120,10 +120,10 @@ class ClockWidget(BaseWidget):
 class DateWidget(ClockWidget):
     """Displays the weekday and date on separate lines."""
 
-    text_y_offset = 4
+    text_y_offset = -1
     color = 0xFFE6E6E6
     width = 70
-    font_size = 9
+    font_size = 12
     alignment = 2
     time_format = '%A\n<b>%B %e</b>'
 
