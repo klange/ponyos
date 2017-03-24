@@ -82,10 +82,10 @@ class CalendarMenuEntry(MenuEntryDivider):
 class ClockWidget(BaseWidget):
     """Displays a simple clock"""
 
-    text_y_offset = 4
+    text_y_offset = -2
     width = 80
     color = 0xFFE6E6E6
-    font_size = 16
+    font_size = 22
     alignment = 0
     time_format = '<b>%H:%M:%S</b>'
 
