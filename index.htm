@@ -11,6 +11,16 @@
 				font-family: "Equestria";
 				src: url("assets/Equestria.ttf");
 			}
+			.hero-unit {
+				background-color: #000;
+				background-image: url('assets/img/blurred.png');
+				background-size: cover;
+				background-position: center;
+				background-repeat: no-repeat;
+				background-attachment: fixed;
+				color: #fff;
+				border-radius: 0;
+			}
 			body {
 				padding-top: 60;
 				padding-bottom: 40px;
@@ -49,14 +59,12 @@
 			</div>
 		</div>
 
-		<div class="container">
-			<div class="hero-unit">
-				<center>
-					<h1>PonyOS 4.0</h1>
-					<p>An OS for Everypony!</p>
-					<img src="assets/img/logo-new.png">
-				</center>
-			</div>
+		<div class="hero-unit">
+			<center>
+				<h1>PonyOS 4.0</h1>
+				<p>An OS for Everypony!</p>
+				<img src="assets/img/logo-new.png">
+			</center>
 		</div>
 
 		<div class="container">
@@ -89,6 +97,7 @@
 				<li><b>Networking</b> - Access the Internet!</li>
 				<li><b>Packages</b> - Install more software!</li>
 				<li><b>Dynamic Libraries</b> - If you don't know, don't ask!</li>
+				<li><b>Brand new logo</b> - Now with more of the name in it!</li>
 			</ul>
 
 			<a name="downloads"></a>
@@ -127,7 +136,7 @@
 			<p>In VirtualBox, the display should automatically resize to fit the host window. In QEMU and VMWare, you can use <code>sudo kdebug</code> in a terminal to launch a kernel debug shell and then <code>set_mode 1280 720</code> or similar to set the resolution.</p>
 
 			<h3>I'm trying to play Quake and the mouse isn't working!</h3>
-			<p>In QEMU and VMware, click the mouse cursor icon in the panel to switch to relative mouse mode before running Quake. In VirtualBox, disable "Mouse Integration" in the "Input" menu.</p>
+			<p>In virtual machines where absolute cursor positioning is available, click the mouse cursor icon in the panel to switch to relative mouse mode before running Quake.</p>
 
 			<h3>Does PonyOS support networking?</h3>
 			<p>Yes! While the network stack in PonyOS 4.0 is far from mature, it should provide functioning Internet access on supported configurations.</p>
