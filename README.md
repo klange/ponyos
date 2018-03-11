@@ -9,3 +9,4 @@ The wallpaper that comes with PonyOS is by BlueDragonHans and is released under 
 # DISCLAIMER
 This is a completely useless OS that can't even do the simplest of tasks, why use it?
 because you're all furfags
+P.S. We're also sensitive little babies where we strike down people who give the smallest of criticisms 
