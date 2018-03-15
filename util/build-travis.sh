@@ -1,53 +1,49 @@
 #!/bin/bash
 
-COOKIE=".2016-12-25-gcc-6-3.cookie"
+# Locale stuff
+. /opt/build/base.sh
 
-unset CC
+# Build toolchain
+. /opt/toaruos/toolchain/activate.sh
 
-if [ ! -e "toolchain/local/$COOKIE" ]; then
-    echo "=== Cleaning any preexisting stuff... ==="
-    rm -fr toolchain/build
-    rm -fr toolchain/local
-    rm -fr toolchain/tarballs/*
-    echo "=== Starting watchdog ==="
-    (
-        while [ 1 == 1 ]; do
-            echo "..."
-            sleep 1m
-        done
-    ) &
-    watchdog_pid=$!
-    echo "=== Begin Toolchain Build ==="
-    pushd toolchain
-        unset PKG_CONFIG_LIBDIR
-        ./prepare.sh
-        ./install.sh
-        date > ./local/$COOKIE
-    popd
-    echo "=== End Toolchain Build ==="
-    echo "=== Stopping watchdog ==="
-    kill $watchdog_pid
-else
-    echo "=== Toolchain was cached. ==="
+# Print environment for reference
+env
+
+# Print cross GCC version for reference
+i686-pc-toaru-gcc --version
+
+# Cheating and copying /usr/python from toolchain
+if [ -d hdd/usr/python ]; then
+    rm -r hdd/usr/python
 fi
+cp -r /opt/toaruos/hdd/usr/python hdd/usr/python
 
-. toolchain/activate.sh
+pushd hdd/usr
+    if [ ! -d bin ]; then
+        mkdir bin
+    fi
 
-make || exit 1
+    if [ ! -d lib ]; then
+        mkdir lib
+    fi
 
-echo "=== Running test suite. ==="
+    pushd bin
 
-expect util/test-travis.exp || exit 1
+        # Can never be too careful.
+        ln -s ../python/bin/python3.6 python3.6
+        ln -s ../python/bin/python3.6 python3
+        ln -s ../python/bin/python3.6 python
 
-echo "=== Building live CD ==="
+    popd
 
-git fetch --unshallow
+    pushd lib
 
-git clone . _cdsource || exit 1
+        ln -s ../python/lib/libpython3.6m.so
 
-cd _cdsource
+    popd
+popd
 
-make cdrom || exit 1
+# Build the CD
+make cdrom
 
-echo "=== Done. ==="
-
+# We're done!
