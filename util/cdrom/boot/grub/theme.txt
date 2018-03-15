@@ -1,4 +1,4 @@
-title-text: "PonyOS 4.0"
+title-text: "PonyOS 5.0"
 title-color: "white"
 message-color: "white"
 message-bg-color: "black"
