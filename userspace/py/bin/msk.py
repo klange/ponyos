@@ -14,7 +14,10 @@ import subprocess
 import sys
 import tarfile
 
-server_url = 'http://ponyos.org/packages'
+if os.path.exists('/usr/bin/fetch'):
+    server_url = 'https://ponyos.org/packages'
+else:
+    server_url = 'http://ponyos.org/packages'
 var_dir = '/var/msk'
 manifest_path = f'{var_dir}/manifest.json'
 manifest_url = f'{server_url}/manifest.json'
