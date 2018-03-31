@@ -54,6 +54,7 @@
 							<li class="active"><a href="#">Home</a></li>
 							<li><a href="#screenshots">Screenshots</a></li>
 							<li><a href="#downloads">Downloads</a></li>
+							<li><a href="https://ponyos.org/packages/">Packages</a></li>
 						</ul>
 					</div><!--/.nav-collapse -->
 				</div>
@@ -62,7 +63,7 @@
 
 		<div class="hero-unit">
 			<center>
-				<h1>PonyOS 4.0</h1>
+				<h1>PonyOS 5.0</h1>
 				<p>An OS for Everypony!</p>
 				<img src="assets/img/logo-new.png">
 			</center>
@@ -78,37 +79,33 @@
 			<a name="screenshots"></a>
 			<h2>Screenshots</h2>
 			<center>
-				<a href="assets/img/screens/browser.png"><img class="screenshot" src="assets/img/screens/thumb/browser.png"></a>
-				<a href="assets/img/screens/apps.png"><img class="screenshot" src="assets/img/screens/thumb/apps.png"></a>
-				<a href="assets/img/screens/wizard.png"><img class="screenshot" src="assets/img/screens/thumb/wizard.png"></a>
-				<a href="assets/img/screens/quake.png"><img class="screenshot" src="assets/img/screens/thumb/quake.png"></a>
-				<a href="assets/img/screens/wttr.png"><img class="screenshot" src="assets/img/screens/thumb/wttr.png"></a>
-				<a href="assets/img/screens/terminal.png"><img class="screenshot" src="assets/img/screens/thumb/terminal.png"></a>
+				<a href="assets/img/screens5/terminal.png"><img class="screenshot" src="assets/img/screens5/thumb/terminal.png"></a>
+				<a href="assets/img/screens5/packages.png"><img class="screenshot" src="assets/img/screens5/thumb/packages.png"></a>
+				<a href="assets/img/screens5/wizard.png"><img class="screenshot" src="assets/img/screens5/thumb/wizard.png"></a>
+				<a href="assets/img/screens5/vim.png"><img class="screenshot" src="assets/img/screens5/thumb/vim.png"></a>
+				<a href="assets/img/screens5/browser.png"><img class="screenshot" src="assets/img/screens5/thumb/browser.png"></a>
+				<a href="assets/img/screens5/ponysay.png"><img class="screenshot" src="assets/img/screens5/thumb/ponysay.png"></a>
 			</center>
 
 			<div></div>
 
 			<a name="whats_new"></a>
-			<h2>What's New in 4.0?</h2>
-			<p>PonyOS 4.0 is light-years ahead of its predecessors!</p>
+			<h2>What's New in 5.0?</h2>
+			<p>PonyOS 5.0 is great leap forward!</p>
 			<ul>
-				<li><b>Python 3.6</b> - The newest Python interpreter!</li>
-				<li><b>Ponysay</b> - The tool everypony has been asking for!</li>
-				<li><b>Live CD</b> - Now distributed on a bootable live CD!</li>
-				<li><b>Networking</b> - Access the Internet!</li>
-				<li><b>Packages</b> - Install more software!</li>
-				<li><b>Dynamic Libraries</b> - If you don't know, don't ask!</li>
-				<li><b>Brand new logo</b> - Now with more of the name in it!</li>
-				<li><b>Redesigned panel</b> - The panel / taskbar has been completely redesigned, with new widgets!</li>
+				<li><b>New Package Manager</b> - With actual packages!</li>
+				<li><b>SSL/TLS support</b> - For all your security needs!</li>
+				<li><b>A Web Browser?</b> - Maybe? If you can find it...</li>
+				<li><b>Lots of bug fixes</b> - Not sure if we got all of them, though...</li>
 			</ul>
 
 			<a name="downloads"></a>
 			<h2>Downloads</h2>
-			<p><a href="https://github.com/klange/ponyos/releases/tag/v4.0"><img src="assets/img/package.png"> 23 MB Live CD ISO</a></p>
+			<p><a href="https://github.com/klange/ponyos/releases/tag/v5.0"><img src="assets/img/package.png"> 23 MB Live CD ISO</a></p>
 
 			<h2>Using the CD</h2>
 			<p>The CD should boot in QEMU, VirtualBox, VMWare, or even on real hardware if you're a brave pony!</p>
-			<p>For all VMs, 1GB of RAM is recommended. When using VirtualBox, select "Other/Unknown" for the OS type. For VMware, use a 64-bit guest configuration (PonyOS is not 64-bit, but this configuration provides optimal hardware). For QEMU, <code>qemu-system-i386 -m 1G -M arch=kvm:tcg -soundhw ac97 -cdrom ponyos.iso</code> should suffice.</p>
+			<p>For all VMs, 1GB of RAM is recommended. When using VirtualBox, select "Other/Unknown" for the OS type. For VMware, use a 64-bit guest configuration (PonyOS is not 64-bit, but this configuration provides optimal hardware). For QEMU, <code>qemu-system-i386 -m 1G -enable-kvm -soundhw ac97 -cdrom ponyos.iso</code> should suffice.</p>
 			<p>The CD will automatically log in the user <code>local</code>. If you are asked for a password for this user, that password is also <code>local</code>.</p>
 
 			<h2>Building from Scratch</h2>
@@ -123,10 +120,10 @@
 			<p>Yes! PonyOS works on many different machines. Hardware driver support is limited, though, so for the best PonyOS experience you should use one of the supported virtual machines listed above. If you're feeling brave, you'll need a PS/2 keyboard and mouse (or legacy compatibility support in your motherboard).</p>
 
 			<h3>Is this <i>really</i> not a Linux distro?</h3>
-			<p>Four years later and people still don't believe us! PonyOS is not a Linux distribution - it's also not a BSD, or Hurd, or a Minix!</p>
+			<p>Four years later and people still don't believe us! PonyOS is not a Linux distribution - it's also not a BSD, or a Hurd, or a Minix, or a Solaris!</p>
 
 			<h3>Does PonyOS come with a compiler?</h3>
-			<p>PonyOS 4.0 does not include a compiler on the CD. You can use the package manager to install the <code>build-essential</code> package and get a full GCC toolchain. PonyOS 4.0 does come with Python 3.6 if you want to get coding.</p>
+			<p>PonyOS 4.0 does not include a compiler on the CD, as significantly increases the size of disc image. You can use the package manager to install the <code>build-essential</code> package and get a full GCC toolchain. PonyOS 4.0 does come with Python 3.6 if you want to get coding without Internet access.</p>
 
 			<h3>Can I put this on a bootable USB drive?</h3>
 			<p>Probably, but see "Does PonyOS work on real hardware?" above. Directly copying the ISO to a USB stick should work (eg., using <code>dd</code>).</p>
@@ -145,6 +142,9 @@
 
 			<h3>I started an application and it doesn't have a title bar, how do I exit it?</h3>
 			<p>Alt+F4.</p>
+
+			<h3>How do I install PonyOS?</h3>
+			<p>At the moment, PonyOS is only offered as a live CD with no installation option, for your safety. Experienced users can manually install PonyOS to a system with an existing GRUB installation and room for an Ext2 filesystem partition in the first 4GB of an available PATA or emulated PATA hard disk.</p>
 
 			<h3>Can I upgrade from an earlier release of PonyOS?</h3>
 			<p>No. Please use the latest live CD of PonyOS 4.0.</p>
@@ -186,12 +186,12 @@
 		<div class="container">
 			<center>
 				<small>
-					Copyright 2013-2017 Kevin Lange<br>
+					Copyright 2013-2018 K Lange<br>
 					PonyOS is based on <a href="http://toaruos.org/">ToaruOS</a>, which is free software released under the terms of the NCSA/University of Illinois license.<br>
 					PonyOS contains software from third parties under several other licenses, which may be found in the Help Browser application within the OS.<br>
 					PonyOS is a work of parody, and its fair use of characters and other intellectual property of Hasbro, Inc. is protected by copyright laws of the United States as well as international treaties and conventions.<br>
 					PonyOS is not endorsed by or affiliated with Hasbro, Inc.<br>
-					Happy April Fools Day 2017!
+					Happy April Fools Day 2018!
 				</small>
 			</center>
 		</div>
