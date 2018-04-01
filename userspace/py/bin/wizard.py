@@ -95,7 +95,7 @@ class HintWindow(yutani.Window):
 
 logo = "/usr/share/logo_login.png"
 pages = [
-    (f"<img src=\"{logo}\"></img>\n\n<h1>Welcome to PonyOS!</h1>\n\nThis tutorial will guide you through the features of the operating system, as well as give you a feel for the UI and design principles.\n\n<color 0x555555>Happy April Fools 2017!</color>",[]),
+    (f"<img src=\"{logo}\"></img>\n\n<h1>Welcome to PonyOS!</h1>\n\nThis tutorial will guide you through the features of the operating system, as well as give you a feel for the UI and design principles.\n\n<color 0x555555>Happy April Fools 2018!</color>",[]),
     (f"<img src=\"{logo}\"></img>\n\nIf you wish to exit the tutorial at any time, you can click the × in the upper right corner of the window.",[HintArrow(620,-5,90,True)]),
     (f"<img src=\"{logo}\"></img>\n\nAs a reminder, PonyOS is a hobby project with few developers.\nAs such, do not expect things to work perfectly, or in some cases, at all, as the kernel and drivers are very much \"work-in-progress\".",[]),
     (f"\n<img src=\"/usr/share/icons/48/utilities-terminal.png\"></img>\nPonyOS aims to provide a Unix-like environment. You can find familiar command-line tools by opening a terminal. Application shortcuts on the desktop, as well as files in the file browser, are opened with a single click. You can also find more applications in the Applications menu.",[HintHole(70.5,80.5,50),HintArrow(110,120,-135)]),

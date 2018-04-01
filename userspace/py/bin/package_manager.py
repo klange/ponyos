@@ -25,7 +25,7 @@ import yutani_mainloop
 
 app_name = "Package Manager"
 version = "1.2.0"
-_description = f"<b>{app_name} {version}</b>\n© 2017 Kevin Lange\n\nBrowse and install software packages.\n\n<color 0x0000FF>http://github.com/klange/toaruos</color>"
+_description = f"<b>{app_name} {version}</b>\n© 2017 K Lange\n\nBrowse and install software packages.\n\n<color 0x0000FF>http://github.com/klange/toaruos</color>"
 
 hilight_border_top = (150/255,0/255,134/255)
 hilight_gradient_top = (201/255,73/255,187/255)
