@@ -14,7 +14,6 @@ BUILD_FREETYPE=true
 BUILD_PNG=true
 BUILD_PIXMAN=true
 BUILD_CAIRO=true
-BUILD_MESA=true
 BUILD_NCURSES=true
 BUILD_VIM=true
 
@@ -27,7 +26,6 @@ BUILD_VIM=true
 #BUILD_PNG=false
 #BUILD_PIXMAN=false
 #BUILD_CAIRO=false
-#BUILD_MESA=false
 #BUILD_NCURSES=false
 #BUILD_VIM=false
 
@@ -71,7 +69,7 @@ pushd build
         unset PKG_CONFIG_LIBDIR
 
         pushd gcc
-            $DIR/tarballs/gcc-6.3.0/configure --target=i686-pc-toaru --prefix=$PREFIX --with-sysroot=$TOARU_SYSROOT --disable-nls --enable-languages=c,c++,go --disable-libssp --with-newlib || baiol
+            $DIR/tarballs/gcc-6.4.0/configure --target=i686-pc-toaru --prefix=$PREFIX --with-sysroot=$TOARU_SYSROOT --disable-nls --enable-languages=c,c++,go --disable-libssp --with-newlib || baiol
             make -j4 all-gcc all-target-libgcc || bail
             make install-gcc install-target-libgcc || bail
         popd
@@ -82,7 +80,7 @@ pushd build
         mkdir gcc-elf
 
         pushd gcc-elf
-            $DIR/tarballs/gcc-6.3.0/configure --target=i686-elf --prefix=$PREFIX --disable-nls --enable-languages=c --disable-libssp --without-headers || baiol
+            $DIR/tarballs/gcc-6.4.0/configure --target=i686-elf --prefix=$PREFIX --disable-nls --enable-languages=c --disable-libssp --without-headers || baiol
             make -j4 all-gcc all-target-libgcc || bail
             make install-gcc install-target-libgcc || bail
         popd
@@ -198,15 +196,6 @@ pushd build
             cp $DIR/patches/cairo-Makefile test/Makefile
             cp $DIR/patches/cairo-Makefile perf/Makefile
             echo -e "\n\n#define CAIRO_NO_MUTEX 1" >> config.h
-            make || bail
-            make DESTDIR=$TOARU_SYSROOT install || bail
-        popd
-    fi
-
-    if $BUILD_MESA; then
-        # XXX Mesa can not be built from a separate directory (configure script doesn't provide a Makefile)
-        pushd $DIR/tarballs/Mesa-*/
-            ./configure --enable-32-bit --host=$TARGET --prefix=$VIRTPREFIX  --with-osmesa-bits=8 --with-driver=osmesa --disable-egl --disable-shared --without-x --disable-glw --disable-glut --disable-driglx-direct --disable-gallium || bail
             make || bail
             make DESTDIR=$TOARU_SYSROOT install || bail
         popd

@@ -36,8 +36,10 @@ def draw_progress_bar(ctx,x,y,w,h,percent):
     ctx.set_source_rgb(217/255,217/255,217/255)
     ctx.fill()
 
-    rounded_rectangle(ctx,x+2,y+2,(w-4) * percent,h-4,4)
-    ctx.set_source_rgb(0,92/255,229/255)
+    _t = (w-4) * percent
+    _r = _t if _t < 4 else 4
+    rounded_rectangle(ctx,x+2,y+2,(w-4) * percent,h-4,_r)
+    ctx.set_source_rgb(244/255,73/255,202/255)
     ctx.fill()
 
 class ProgressBarWindow(yutani.Window):

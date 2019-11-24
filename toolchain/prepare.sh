@@ -14,7 +14,7 @@ pushd "$DIR" > /dev/null
     fi
     pushd tarballs > /dev/null
         $INFO "wget" "Pulling source packages..."
-        grab "gcc"  "http://www.netgull.com/gcc/releases/gcc-6.3.0" "gcc-6.3.0.tar.gz" || bail
+        grab "gcc"  "http://www.netgull.com/gcc/releases/gcc-6.4.0" "gcc-6.4.0.tar.gz" || bail
         #grab "mpc"  "http://www.multiprecision.org/mpc/download" "mpc-0.9.tar.gz"
         #grab "mpfr" "http://www.mpfr.org/mpfr-3.0.1" "mpfr-3.0.1.tar.gz"
         #grab "gmp"  "ftp://ftp.gmplib.org/pub/gmp-5.0.1" "gmp-5.0.1.tar.gz"
@@ -25,13 +25,12 @@ pushd "$DIR" > /dev/null
         grab "libpng" "http://b.dakko.us/~klange/mirrors" "libpng-1.5.13.tar.gz" || bail
         grab "pixman" "http://www.cairographics.org/releases" "pixman-0.26.2.tar.gz" || bail
         grab "cairo" "http://www.cairographics.org/releases" "cairo-1.12.2.tar.xz" || bail
-        grab "mesa" "http://b.dakko.us/~klange/mirrors" "MesaLib-7.5.2.tar.gz" || bail
         grab "ncurses" "http://b.dakko.us/~klange/mirrors" "ncurses-5.9.tar.gz" || bail
         grab "vim" "ftp://ftp.vim.org/pub/vim/unix" "vim-7.3.tar.bz2" || bail
         $INFO "wget" "Pulled source packages."
-        rm -rf "binutils-2.27" "freetype-2.4.9" "gcc-6.3.0" "gmp-5.0.1" "libpng-1.5.13" "mpc-0.9" "mpfr-3.0.1" "newlib-1.19.0" "zlib-1.2.7" "pixman-0.28.2" "Mesa-7.5.2" "ncurses-5.9" "vim73"
+        rm -rf "binutils-2.27" "freetype-2.4.9" "gcc-6.4.0" "gmp-5.0.1" "libpng-1.5.13" "mpc-0.9" "mpfr-3.0.1" "newlib-1.19.0" "zlib-1.2.7" "pixman-0.28.2" "ncurses-5.9" "vim73"
         $INFO "tar"  "Decompressing..."
-        deco "gcc"  "gcc-6.3.0.tar.gz" || bail
+        deco "gcc"  "gcc-6.4.0.tar.gz" || bail
         #deco "mpc"  "mpc-0.9.tar.gz"
         #deco "mpfr" "mpfr-3.0.1.tar.gz"
         #deco "gmp"  "gmp-5.0.1.tar.gz"
@@ -42,12 +41,11 @@ pushd "$DIR" > /dev/null
         deco "libpng" "libpng-1.5.13.tar.gz" || bail
         deco "pixman" "pixman-0.26.2.tar.gz" || bail
         deco "cairo" "cairo-1.12.2.tar.xz" || bail
-        deco "mesa" "MesaLib-7.5.2.tar.gz" || bail
         deco "ncurses" "ncurses-5.9.tar.gz" || bail
         deco "vim" "vim-7.3.tar.bz2" || bail
         $INFO "tar"  "Decompressed source packages."
         $INFO "patch" "Patching..."
-        patc "gcc"  "gcc-6.3.0" || bail
+        patc "gcc"  "gcc-6.4.0" || bail
         #patc "mpc"  "mpc-0.9"
         #patc "mpfr" "mpfr-3.0.1"
         #patc "gmp"  "gmp-5.0.1"
@@ -57,7 +55,6 @@ pushd "$DIR" > /dev/null
         patc "libpng" "libpng-1.5.13" || bail
         patc "pixman" "pixman-0.26.2" || bail
         patc "cairo" "cairo-1.12.2" || bail
-        patc "mesa" "Mesa-7.5.2" || bail
         patc "ncurses" "ncurses-5.9" || bail
         patc "vim" "vim73" || bail
         $INFO "patch" "Patched third-party software."

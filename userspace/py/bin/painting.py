@@ -13,7 +13,6 @@ import cairo
 import yutani
 import text_region
 import toaru_fonts
-import toaru_package
 
 from color_picker import ColorPickerWindow
 
@@ -28,7 +27,7 @@ import yutani_mainloop
 
 app_name = "PonyPaint"
 version = "1.0.0"
-_description = f"<b>{app_name} {version}</b>\n© 2017 Kevin Lange\n\nDraw stuff, maybe.\n\n<color 0x0000FF>http://github.com/klange/toaruos</color>"
+_description = f"<b>{app_name} {version}</b>\n© 2017 K Lange\n\nDraw stuff, maybe.\n\n<color 0x0000FF>http://github.com/klange/toaruos</color>"
 
 class PaintingWindow(yutani.Window):
 

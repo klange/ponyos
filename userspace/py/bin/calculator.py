@@ -26,7 +26,7 @@ operators = {ast.Add: op.add, ast.Sub: op.sub, ast.Mult: op.mul,
 
 app_name = "Calculator"
 version = "1.0.0"
-_description = f"<b>{app_name} {version}</b>\n© 2017 Kevin Lange\n\nSimple four-function calculator using Python.\n\n<color 0x0000FF>http://github.com/klange/toaruos</color>"
+_description = f"<b>{app_name} {version}</b>\n© 2017 K Lange\n\nSimple four-function calculator using Python.\n\n<color 0x0000FF>http://github.com/klange/toaruos</color>"
 
 def eval_expr(expr):
     """

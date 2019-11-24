@@ -17,7 +17,7 @@ def version():
         return release[:release.index('-')]
     return release
 
-_default_text = f"<b>PonyOS {version()}</b>\n© 2011-2017 Kevin Lange, et al.\n\n<color 0x0000FF>http://ponyos.org/</color>"
+_default_text = f"<b>PonyOS {version()}</b>\n© 2011-2018 K Lange, et al.\n\n<color 0x0000FF>http://ponyos.org/</color>"
 
 
 if __name__ == '__main__':

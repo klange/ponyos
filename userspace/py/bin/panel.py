@@ -26,9 +26,12 @@ import yutani
 import text_region
 import toaru_fonts
 import fswait
+import toaru_webp
 
 from menu_bar import MenuEntryAction, MenuEntrySubmenu, MenuEntryDivider, MenuWindow
 from icon_cache import get_icon
+
+import toaru_theme
 
 PANEL_HEIGHT=28
 
@@ -64,7 +67,7 @@ class CalendarMenuEntry(MenuEntryDivider):
     width = 200
 
     def __init__(self):
-        self.font = toaru_fonts.Font(toaru_fonts.FONT_MONOSPACE,13,0xFF000000)
+        self.font = toaru_fonts.Font(toaru_fonts.FONT_MONOSPACE,13,toaru_theme.menu_entry_text)
         self.tr = text_region.TextRegion(0,0,self.width-20,self.height,font=self.font)
         self.calendar = calendar.TextCalendar(calendar.SUNDAY)
         t = time.localtime(current_time)
@@ -72,7 +75,7 @@ class CalendarMenuEntry(MenuEntryDivider):
         self.tr.set_text(self.calendar.formatmonth(t.tm_year,t.tm_mon))
         for tu in self.tr.text_units:
             if tu.string == str(t.tm_mday):
-                tu.set_font(toaru_fonts.Font(toaru_fonts.FONT_MONOSPACE_BOLD,13,0xFF000000))
+                tu.set_font(toaru_fonts.Font(toaru_fonts.FONT_MONOSPACE_BOLD,13,toaru_theme.menu_entry_text))
                 break
 
     def draw(self, window, offset, ctx):
@@ -281,13 +284,15 @@ class WeatherWidget(BaseWidget):
 
     text_y_offset = 4
     width = 50
-    color = 0xFFE6E6E6
+    color = toaru_theme.panel_widget_foreground
     font_size = 14
     alignment = 0
     check_time = 7200 # 2hr
     update_time = 60
     icon_width = 24
     hilight = 0xFFba82e3
+    icon_color = toaru_theme.as_rgb_tuple(toaru_theme.panel_widget_foreground)
+    hilight_color = (186/0xFF,130/0xFF,227/0xFF)
     data_path = '/tmp/weather.json'
     icons_path = '/usr/share/icons/weather/'
 
@@ -299,16 +304,19 @@ class WeatherWidget(BaseWidget):
         self.last_check = 0
         self.last_update = 0
         self.icon = None
+        self.hilighted = False
 
     def draw(self, window, offset, remaining, ctx):
         self.check()
         self.offset = offset
         self.window = window
         if self.icon:
+            icon = self.icon_hilight if self.hilighted else self.icon
             ctx.save()
             ctx.translate(offset,0)
-            ctx.scale(self.icon_width/self.icon.get_width(),self.icon_width/self.icon.get_width())
-            ctx.set_source_surface(self.icon,0,0)
+            if icon.get_width() != self.icon_width:
+                ctx.scale(self.icon_width/icon.get_width(),self.icon_width/icon.get_width())
+            ctx.set_source_surface(icon,0,0)
             ctx.paint()
             ctx.restore()
             self.tr.move(offset + self.icon_width,self.text_y_offset)
@@ -318,9 +326,11 @@ class WeatherWidget(BaseWidget):
 
     def focus_enter(self):
         self.font.font_color = self.hilight
+        self.hilighted = True
 
     def focus_leave(self):
         self.font.font_color = self.color
+        self.hilighted = False
 
     def check(self):
         if current_time - self.last_check > self.check_time:
@@ -354,6 +364,17 @@ class WeatherWidget(BaseWidget):
             self.width = self.icon_width + self.tr.get_offset_at_index(-1)[1][1]
             if weather['conditions'] and os.path.exists(f"{self.icons_path}{weather['icon']}.png"):
                 self.icon = cairo.ImageSurface.create_from_png(f"{self.icons_path}{weather['icon']}.png")
+                tmp = cairo.Context(self.icon)
+                tmp.set_operator(cairo.OPERATOR_ATOP)
+                tmp.rectangle(0,0,24,24)
+                tmp.set_source_rgb(*self.icon_color)
+                tmp.paint()
+                self.icon_hilight = cairo.ImageSurface.create_from_png(f"{self.icons_path}{weather['icon']}.png")
+                tmp = cairo.Context(self.icon_hilight)
+                tmp.set_operator(cairo.OPERATOR_ATOP)
+                tmp.rectangle(0,0,24,24)
+                tmp.set_source_rgb(*self.hilight_color)
+                tmp.paint()
             else:
                 self.icon = None
             self.weather = weather
@@ -605,17 +626,17 @@ class WindowListWidget(FillWidget):
 
     def __init__(self):
         self.font = toaru_fonts.Font(toaru_fonts.FONT_SANS_SERIF, 13, self.color)
-        self.font.set_shadow((0xFF000000, 2, 1, 1, 3.0))
+        self.font.set_shadow(toaru_theme.panel_window_shadow)
         self.font_hilight = toaru_fonts.Font(toaru_fonts.FONT_SANS_SERIF, 13, self.hilight)
-        self.font_hilight.set_shadow((0xFF000000, 2, 1, 1, 3.0))
+        self.font_hilight.set_shadow(toaru_theme.panel_window_shadow)
         self.gradient = cairo.LinearGradient(0,0,0,PANEL_HEIGHT)
         self.gradient.add_color_stop_rgba(0.0,186/255,130/255,227/255,0.7)
         self.gradient.add_color_stop_rgba(1.0,186/255,130/255,227/255,0.0)
 
         self.divider = cairo.LinearGradient(0,0,0,PANEL_HEIGHT)
-        self.divider.add_color_stop_rgba(0.1,1,1,1,0.0)
-        self.divider.add_color_stop_rgba(0.5,1,1,1,1.0)
-        self.divider.add_color_stop_rgba(0.9,1,1,1,0.0)
+        self.divider.add_color_stop_rgba(*toaru_theme.panel_window_divider_top)
+        self.divider.add_color_stop_rgba(*toaru_theme.panel_window_divider_mid)
+        self.divider.add_color_stop_rgba(*toaru_theme.panel_window_divider_low)
         self.hovered = None
         self.unit_width = None
         self.offset = 0
@@ -742,10 +763,6 @@ class ApplicationsMenuWidget(BaseWidget):
                 MenuEntryAction("Cairo Demo","cairo-demo",launch_app,"cairo-demo"),
                 MenuEntryAction("Cairo Snow","snow",launch_app,"make-it-snow"),
                 MenuEntryAction("Pixman Demo","pixman-demo",launch_app,"pixman-demo"),
-            ]),
-            MenuEntrySubmenu("Mesa (swrast)",[
-                MenuEntryAction("Gears","gears",launch_app,"gears"),
-                MenuEntryAction("Teapot","teapot",launch_app,"teapot"),
             ]),
             MenuEntryAction("Draw Lines","drawlines",launch_app,"drawlines"),
             MenuEntryAction("Julia Fractals","julia",launch_app,"julia"),
@@ -900,6 +917,9 @@ class PanelWindow(yutani.Window):
         if redraw:
             self.draw()
 
+    def keyboard_event(self, msg):
+        pass
+
 
 class WallpaperIcon(object):
 
@@ -927,8 +947,8 @@ class WallpaperIcon(object):
         tmp.set_source_rgba(0xba/0xFF,0x82/0xFF,0xe3/0xFF,0.3)
         tmp.paint()
 
-        self.font = toaru_fonts.Font(toaru_fonts.FONT_SANS_SERIF, 13, 0xFFFFFFFF)
-        self.font.set_shadow((0xFF000000, 2, 1, 1, 3.0))
+        self.font = toaru_fonts.Font(toaru_fonts.FONT_SANS_SERIF, 13, toaru_theme.desktop_icon_text)
+        self.font.set_shadow(toaru_theme.desktop_icon_shadow)
         self.tr = text_region.TextRegion(0,0,self.width,15,font=self.font)
         self.tr.set_alignment(2)
         self.tr.set_text(self.name)
@@ -1052,6 +1072,9 @@ class WallpaperWindow(yutani.Window):
                 c = configparser.ConfigParser()
                 c.read_string(conf_str)
                 path = c['desktop'].get('wallpaper',self.fallback)
+
+        if path.endswith('.webp') and toaru_webp.exists():
+            return toaru_webp.load_webp(path)
         return cairo.ImageSurface.create_from_png(path)
 
     def finish_resize(self, msg):
@@ -1188,7 +1211,7 @@ class AlttabWindow(yutani.Window):
     """Displays the currently selected window for Alt-Tab switching."""
 
     icon_width = 48
-    color = 0xFFE6E6E6
+    color = toaru_theme.alt_tab_text
 
     def __init__(self):
         flags = yutani.WindowFlag.FLAG_NO_STEAL_FOCUS | yutani.WindowFlag.FLAG_DISALLOW_DRAG | yutani.WindowFlag.FLAG_DISALLOW_RESIZE
@@ -1209,7 +1232,7 @@ class AlttabWindow(yutani.Window):
 
         ctx.set_operator(cairo.OPERATOR_OVER)
         rounded_rectangle(ctx,0,0,self.width,self.height,10)
-        ctx.set_source_rgba(0,0,0,0.7)
+        ctx.set_source_rgba(*toaru_theme.alt_tab_background)
         ctx.fill()
 
         if new_focused >= 0 and new_focused < len(windows_zorder):
@@ -1240,7 +1263,7 @@ class ApplicationRunnerWindow(yutani.Window):
     """Displays the currently selected window for Alt-Tab switching."""
 
     icon_width = 48
-    color = 0xFFE6E6E6
+    color = toaru_theme.alt_tab_text
 
     def __init__(self):
         super(ApplicationRunnerWindow,self).__init__(400,115,doublebuffer=True)
@@ -1331,7 +1354,7 @@ class ApplicationRunnerWindow(yutani.Window):
 
         ctx.set_operator(cairo.OPERATOR_OVER)
         rounded_rectangle(ctx,0,0,self.width,self.height,10)
-        ctx.set_source_rgba(0,0,0,0.7)
+        ctx.set_source_rgba(*toaru_theme.alt_tab_background)
         ctx.fill()
 
         icon = self.match_icon()
@@ -1350,7 +1373,7 @@ class ApplicationRunnerWindow(yutani.Window):
         tr.set_one_line()
         tr.set_ellipsis()
         tr.set_alignment(2)
-        tr.set_richtext(html.escape(self.data) + '<color 0x888888>' + html.escape(self.complete) + '</color>')
+        tr.set_richtext(html.escape(self.data) + '<color ' + toaru_theme.alt_tab_extra_text + '>' + html.escape(self.complete) + '</color>')
         tr.draw(self)
 
 

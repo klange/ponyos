@@ -562,7 +562,7 @@ int main(int argc, char * argv[]) {
 
 	/* Write the welcome thing to the body */
 	wprintw(body_win, " - Toaru IRC v. %s - \n", VERSION_STRING);
-	wprintw(body_win, " Copyright 2015 Kevin Lange\n");
+	wprintw(body_win, " Copyright 2015 K Lange\n");
 	wprintw(body_win, " http://toaruos.org - http://github.com/klange/toaruos\n");
 	wprintw(body_win, "\n");
 	wprintw(body_win, " For help, type /help.\n");
