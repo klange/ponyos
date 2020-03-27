@@ -46,12 +46,12 @@
 #define MAX_TEXT_WIDTH 180
 #define MIN_TEXT_WIDTH 50
 
-#define HILIGHT_COLOR rgb(142,216,255)
+#define HILIGHT_COLOR rgb(251,123,250)
 #define FOCUS_COLOR   rgb(255,255,255)
 #define TEXT_COLOR    rgb(230,230,230)
 #define ICON_COLOR    rgb(230,230,230)
 
-#define GRADIENT_AT(y) premultiply(rgba(72, 167, 255, ((24-(y))*160)/24))
+#define GRADIENT_AT(y) premultiply(rgba(255, 72, 254, ((24-(y))*160)/24))
 
 #define ALTTAB_WIDTH  250
 #define ALTTAB_HEIGHT 100

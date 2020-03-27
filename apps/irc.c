@@ -24,7 +24,7 @@
 #define TIME_FMT "%02d:%02d:%02d"
 #define TIME_ARGS hr, min, sec
 
-static char * nick = "toaru-user";
+static char * nick = "ponyos-user";
 static char * host = NULL;
 static char * pass = NULL;
 static unsigned short port = 6667;
@@ -397,7 +397,7 @@ void handle_input(char * buf) {
 		WRITE("[help] help text goes here\n");
 	} else if (strstr(buf, "/quit") == buf) {
 		char * m = strstr(buf, " "); if (m) m++;
-		fprintf(sock_w, "QUIT :%s\r\n", m ? m : "https://github.com/klange/toaruos");
+		fprintf(sock_w, "QUIT :%s\r\n", m ? m : "https://github.com/klange/ponyos");
 		fflush(sock_w);
 		fprintf(stderr,"\033[0m\n");
 		set_buffered();
@@ -472,9 +472,9 @@ int main(int argc, char * argv[]) {
 
 	set_unbuffered();
 
-	fprintf(stdout, " - Toaru IRC v %s - \n", VERSION_STRING);
-	fprintf(stdout, " Copyright 2015-2018 K. Lange\n");
-	fprintf(stdout, " https://toaruos.org - https://github.com/klange/toaruos\n");
+	fprintf(stdout, " - PonyOS IRC v %s - \n", VERSION_STRING);
+	fprintf(stdout, " Copyright 2015-2020 K. Lange\n");
+	fprintf(stdout, " https://ponyos.org - https://github.com/klange/ponyos\n");
 	fprintf(stdout, " \n");
 	fprintf(stdout, " For help, type /help\n");
 

@@ -227,10 +227,10 @@ static void draw_file(struct File * f, int offset) {
 		if (f->selected) {
 			/* If this file is selected, paint the icon blue... */
 			if (main_window->focused) {
-				draw_sprite_alpha_paint(contents, icon, center_x_icon + x, y + 2, 0.5, rgb(72,167,255));
+				draw_sprite_alpha_paint(contents, icon, center_x_icon + x, y + 2, 0.5, rgb(255,72,254));
 			}
 			/* And draw the name with a blue background and white text */
-			draw_rounded_rectangle(contents, center_x_text + x - 2, y + 54, name_width + 6, 20, 3, rgb(72,167,255));
+			draw_rounded_rectangle(contents, center_x_text + x - 2, y + 54, name_width + 6, 20, 3, rgb(255,72,254));
 			draw_sdf_string(contents, center_x_text + x, y + 54, name, 16, rgb(255,255,255), SDF_FONT_THIN);
 		} else {
 			if (is_desktop_background) {

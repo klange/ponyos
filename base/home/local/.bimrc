@@ -4,7 +4,7 @@ rundir /usr/share/bim/themes
 # Fallback order - last successful theme "sticks"
 colorscheme ansi
 colorscheme sunsmoke256
-colorscheme sunsmoke
+colorscheme light
 
 # Enable statusbar (default)
 global.statusbar 1

@@ -8,7 +8,7 @@
 
 /* Kernel name. If you change this, you're not
  * my friend any more. */
-char * __kernel_name = "toaru";
+char * __kernel_name = "ponyos";
 
 /* This really shouldn't change, and if it does,
  * always ensure it still has the correct arguments
@@ -16,25 +16,18 @@ char * __kernel_name = "toaru";
 char * __kernel_version_format = "%d.%d.%d-%s";
 
 /* Version numbers X.Y.Z */
-int    __kernel_version_major = 1;
-int    __kernel_version_minor = 12;
+int    __kernel_version_major = 6;
+int    __kernel_version_minor = 0;
 int    __kernel_version_lower = 0;
 
 /* Kernel build suffix, which doesn't necessarily
  * mean anything, but can be used to distinguish
  * between different features included while
  * building multiple kernels. */
-#ifdef KERNEL_GIT_TAG
-# define STR(x) #x
-# define STRSTR(x) STR(x)
-# define KERNEL_VERSION_SUFFIX STRSTR(KERNEL_GIT_TAG)
-#else
-# define KERNEL_VERSION_SUFFIX "r"
-#endif
-char * __kernel_version_suffix   = KERNEL_VERSION_SUFFIX;
+char * __kernel_version_suffix   = "mlp";
 
 /* The release codename. */
-char * __kernel_version_codename = "core";
+char * __kernel_version_codename = "discord";
 
 /* Build architecture (should probably not be
  * here as a string, but rather some sort of

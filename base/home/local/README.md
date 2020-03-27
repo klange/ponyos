@@ -1,6 +1,6 @@
-# Welcome to ToaruOS!
+# Welcome to PonyOS!
 
-ToaruOS provides a familiar Unix-like environment, but please be
+PonyOS provides a familiar Unix-like environment, but please be
 aware that the shell is incomplete and does not implement all Unix
 shell features. For help with the shell's syntax and built-in
 functions, run `help`. For a list of available commands, press Tab

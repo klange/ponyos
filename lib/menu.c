@@ -28,10 +28,10 @@
 #define MENU_BACKGROUND rgb(239,238,232)
 #define MENU_ICON_SIZE 16
 
-#define HILIGHT_BORDER_TOP rgb(54,128,205)
-#define HILIGHT_GRADIENT_TOP rgb(93,163,236)
-#define HILIGHT_GRADIENT_BOTTOM rgb(56,137,220)
-#define HILIGHT_BORDER_BOTTOM rgb(47,106,167)
+#define HILIGHT_BORDER_TOP rgb(150,0,134)
+#define HILIGHT_GRADIENT_TOP rgb(201,73,187)
+#define HILIGHT_GRADIENT_BOTTOM rgb(150,0,134)
+#define HILIGHT_BORDER_BOTTOM rgb(201,73,187)
 
 static hashmap_t * menu_windows = NULL;
 static yutani_t * my_yctx = NULL;
@@ -901,7 +901,7 @@ void menu_bar_render(struct menu_bar * self, gfx_context_t * ctx) {
 		if ((self->active_menu && hashmap_has(menu_get_windows_hash(), (void*)self->active_menu_wid)) && _entries == self->active_entry) {
 			for (int y = _y; y < _y + MENU_BAR_HEIGHT; ++y) {
 				for (int x = offset + 2; x < offset + 2 + w; ++x) {
-					GFX(ctx, x, y) = rgb(93,163,236);
+					GFX(ctx, x, y) = HILIGHT_BORDER_BOTTOM;
 				}
 			}
 		}

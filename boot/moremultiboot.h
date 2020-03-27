@@ -625,7 +625,7 @@ void show_menu(void) {
 
 	do {
 		move_cursor(0,0);
-		set_attr(0x1f);
+		set_attr(0x5f);
 		print_banner(VERSION_TEXT);
 		set_attr(0x07);
 		print_("\n");

@@ -82,6 +82,9 @@ static void redraw(void) {
 		} else if (**copy_str == '%') {
 			draw_string(offset, *copy_str+1, SDF_FONT_THIN, rgb(0,0,255), 16);
 			offset += 20;
+		} else if (**copy_str == '^') {
+			draw_string(offset, *copy_str+1, SDF_FONT_THIN, rgb(120,120,120), 16);
+			offset += 20;
 		} else if (**copy_str == '#') {
 			draw_string(offset, *copy_str+1, SDF_FONT_BOLD, rgb(0,0,0), 23);
 			offset += 20;
@@ -133,9 +136,9 @@ static void circle(int x, int y, int r) {
 
 static char * randomly_select_begging(void) {
 	char * options[] = {
-		"You can help support ToaruOS by donating:",
-		"Your donation helps us continue developing ToaruOS:",
-		"You can sponsor ToaruOS development on Github:",
+		"You can help support PonyOS by donating:",
+		"Your donation helps us continue developing PonyOS:",
+		"You can sponsor PonyOS development on Github:",
 		"Please give me money:",
 	};
 
@@ -153,34 +156,27 @@ static void load_page(int page) {
 	switch (page) {
 		case 0:
 			_prev_enabled = 0;
-			title_str = "Welcome to ToaruOS!";
+			title_str = "Welcome to PonyOS!";
 			icon = &logo;
-			body_text[i++] = "#Welcome to ToaruOS!";
+			body_text[i++] = "#Welcome to PonyOS!";
 			body_text[i++] = "";
 			body_text[i++] = "This tutorial will guide you through the features of the operating";
 			body_text[i++] = "system, as well as give you a feel for the UI and design principles.";
 			body_text[i++] = "";
 			body_text[i++] = "When you're ready to continue, press \"Next\".";
 			body_text[i++] = "";
-			body_text[i++] = "%https://github.com/klange/toaruos - https://toaruos.org";
-			body_text[i++] = "";
-			body_text[i++] = "ToaruOS is free software, released under the terms of the";
-			body_text[i++] = "NCSA/University of Illinois license.";
-			body_text[i++] = "";
-			body_text[i++] = randomly_select_begging();
-			body_text[i++] = "%https://github.com/sponsors/klange";
+			body_text[i++] = "^Happy April Fools 2020!";
 			body_text[i++] = NULL;
 			break;
 		case 1:
 			icon = &logo;
-			body_text[i++] = "ToaruOS is a hobby project. The entire contents of this Live CD";
-			body_text[i++] = "were written by the ToaruOS development team over the course of";
+			body_text[i++] = "PonyOS is a hobby project. The entire contents of this Live CD";
+			body_text[i++] = "were written by the PonyOS development team over the course of";
 			body_text[i++] = "many years, but that development team is very small. Some features";
 			body_text[i++] = "may be missing, incomplete, or unstable. Contributions in the form";
-			body_text[i++] = "of bug-fixes and new software are welcome. You can join our community";
-			body_text[i++] = "through IRC by joining the #toaruos channel on Freenode.";
+			body_text[i++] = "of bug-fixes and new software are welcome.";
 			body_text[i++] = "";
-			body_text[i++] = "You can help support ToaruOS by donating:";
+			body_text[i++] = randomly_select_begging();
 			body_text[i++] = "%https://github.com/sponsors/klange";
 			body_text[i++] = NULL;
 			break;
@@ -196,8 +192,8 @@ static void load_page(int page) {
 		case 3:
 			icon = &terminal;
 			circle(70, 170, 60);
-			body_text[i++] = "ToaruOS aims to provide a Unix-like environment. You can find";
-			body_text[i++] = "familiar command-line tools by opening a terminal. ToaruOS's";
+			body_text[i++] = "PonyOS aims to provide a Unix-like environment. You can find";
+			body_text[i++] = "familiar command-line tools by opening a terminal. PonyOS's";
 			body_text[i++] = "shell provides command history, syntax highlighting, and tab";
 			body_text[i++] = "completion. There is also a growing suite of Unix utilities";
 			body_text[i++] = "and a featureful text editor (bim).";
@@ -206,7 +202,7 @@ static void load_page(int page) {
 		case 4:
 			icon = &package;
 			circle(70, 250, 60);
-			body_text[i++] = "Many third-party software packages have been ported to ToaruOS";
+			body_text[i++] = "Many third-party software packages have been ported to PonyOS";
 			body_text[i++] = "and are available from our package repositories. You can use the";
 			body_text[i++] = "Package Manager to install GCC, Python, Bochs, Quake, and more.";
 			body_text[i++] = "";
@@ -217,11 +213,11 @@ static void load_page(int page) {
 			break;
 		case 5:
 			icon = &mouse_drag;
-			body_text[i++] = "With ToaruOS's window manager, you can drag most windows by";
+			body_text[i++] = "With PonyOS's window manager, you can drag most windows by";
 			body_text[i++] = "holding Alt, or by using the title bar. You can also resize";
 			body_text[i++] = "windows by dragging from their edges or using Alt + Middle Click.";
 			body_text[i++] = "";
-			body_text[i++] = "If you are running ToaruOS in VirtualBox, be sure to select a Host";
+			body_text[i++] = "If you are running PonyOS in VirtualBox, be sure to select a Host";
 			body_text[i++] = "key configuration that does not conflict with these key bindings.";
 			body_text[i++] = NULL;
 			break;
@@ -232,7 +228,7 @@ static void load_page(int page) {
 			body_text[i++] = "";
 			body_text[i++] = "The tutorial is over.";
 			body_text[i++] = "";
-			body_text[i++] = "Press \"Exit\" to close this window and start exploring ToaruOS.";
+			body_text[i++] = "Press \"Exit\" to close this window and start exploring PonyOS.";
 			body_text[i++] = NULL;
 			break;
 		default:

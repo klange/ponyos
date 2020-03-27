@@ -140,7 +140,7 @@ int main(int argc, char * argv[]) {
 	if (!fork()) {
 		check_framebuffer();
 		clear_screen();
-		update_message("ToaruOS is starting up...", 0);
+		update_message("PonyOS is starting up...", 0);
 
 		while (1) {
 			pex_packet_t * p = calloc(PACKET_SIZE, 1);

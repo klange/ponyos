@@ -23,7 +23,7 @@
 char data_lines[NUM_DATA_LINES][100];
 const char * prog_lines[NUM_DATA_LINES] = {NULL};
 
-#define C_A "\033[34;1m"
+#define C_A "\033[35;1m"
 #define C_O "\033[0m"
 
 void print_thing(int j) {
@@ -50,7 +50,7 @@ int main(int argc, char * argv[]) {
 	sprintf(data_lines[i++], C_A "%s" C_O "@" C_A, user);
 
 	/* no command */
-	sprintf(data_lines[i++], C_A "OS: " C_O "ToaruOS");
+	sprintf(data_lines[i++], C_A "OS: " C_O "PonyOS");
 
 	prog_lines[i] = "uname -sr";
 	sprintf(data_lines[i++], C_A "Kernel: " C_O);
