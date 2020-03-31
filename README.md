@@ -1,4 +1,4 @@
-![Logo](hdd/usr/share/logo_login.png)
+![Logo](hdd/usr/share/logo_login.bmp)
 
 # License
 
