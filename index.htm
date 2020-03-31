@@ -29,7 +29,7 @@
 				font-family: "Equestria", sans-serif;
 			}
 			.screenshot {
-				width: 360px;
+				width: 500px;
 				margin: 10px;
 				-webkit-box-shadow: 1px 1px 5px 0px rgba(0,0,0,0.75);
 				   -moz-box-shadow: 1px 1px 5px 0px rgba(0,0,0,0.75);
@@ -54,7 +54,7 @@
 							<li class="active"><a href="#">Home</a></li>
 							<li><a href="#screenshots">Screenshots</a></li>
 							<li><a href="#downloads">Downloads</a></li>
-							<li><a href="https://ponyos.org/packages/">Packages</a></li>
+							<!--<li><a href="https://ponyos.org/packages/">Packages</a></li>-->
 						</ul>
 					</div><!--/.nav-collapse -->
 				</div>
@@ -63,7 +63,7 @@
 
 		<div class="hero-unit">
 			<center>
-				<h1>PonyOS 5.0</h1>
+				<h1>PonyOS 6.0</h1>
 				<p>An OS for Everypony!</p>
 				<img src="assets/img/logo-new.png">
 			</center>
@@ -79,29 +79,24 @@
 			<a name="screenshots"></a>
 			<h2>Screenshots</h2>
 			<center>
-				<a href="assets/img/screens5/terminal.png"><img class="screenshot" src="assets/img/screens5/thumb/terminal.png"></a>
-				<a href="assets/img/screens5/packages.png"><img class="screenshot" src="assets/img/screens5/thumb/packages.png"></a>
-				<a href="assets/img/screens5/wizard.png"><img class="screenshot" src="assets/img/screens5/thumb/wizard.png"></a>
-				<a href="assets/img/screens5/vim.png"><img class="screenshot" src="assets/img/screens5/thumb/vim.png"></a>
-				<a href="assets/img/screens5/browser.png"><img class="screenshot" src="assets/img/screens5/thumb/browser.png"></a>
-				<a href="assets/img/screens5/ponysay.png"><img class="screenshot" src="assets/img/screens5/thumb/ponysay.png"></a>
+				<a href="assets/img/screens6/screenshot.png"><img class="screenshot" src="assets/img/screens6/screenshot.png"></a>
 			</center>
 
 			<div></div>
 
 			<a name="whats_new"></a>
-			<h2>What's New in 5.0?</h2>
-			<p>PonyOS 5.0 is great leap forward!</p>
+			<h2>What's New in 6.0?</h2>
+			<p>PonyOS 6.0 really leads the pack!</p>
 			<ul>
-				<li><b>New Package Manager</b> - With actual packages!</li>
-				<li><b>SSL/TLS support</b> - For all your security needs!</li>
-				<li><b>A Web Browser?</b> - Maybe? If you can find it...</li>
-				<li><b>Lots of bug fixes</b> - Not sure if we got all of them, though...</li>
+				<li><b>Complete Rebuilt</b> - Everything has been reimplemented in C, so it's faster!</li>
+				<li><b>Tons of New Features!</b> - From universal context menus to text selection and a clipboard!</li>
+				<li><b>100% Homegrown!</b> - All software in the standard installation is built from scratch by our team!</li>
 			</ul>
 
 			<a name="downloads"></a>
 			<h2>Downloads</h2>
-			<p><a href="https://github.com/klange/ponyos/releases/tag/v5.0"><img src="assets/img/package.png"> 23 MB Live CD ISO</a></p>
+			<p><a href="https://github.com/klange/ponyos/releases/tag/v6.0"><img src="assets/img/package.png"> 25MB Standard ISO (for emulators)</a></p>
+			<p><a href="https://github.com/klange/ponyos/releases/tag/v6.0"><img src="assets/img/package.png"> 13MB GRUB ISO (if the above doesn't work)</a></p>
 
 			<h2>Using the CD</h2>
 			<p>The CD should boot in QEMU, VirtualBox, VMWare, or even on real hardware if you're a brave pony!</p>
@@ -110,7 +105,7 @@
 
 			<h2>Building from Scratch</h2>
 			<p>To build PonyOS from scratch, please use an Ubuntu or Debian-derived host.</p>
-			<p>Clone from <a href="https://github.com/klange/ponyos">our git repository</a> and then run <code>make toolchain</code>. Note that we do not support building PonyOS from scratch and this process may not work. Complete builds may take anywhere from thirty minutes to many hours, depending on your hardware.</p>
+			<p>Clone from <a href="https://github.com/klange/ponyos">our git repository</a> and then run <code>make</code>. Note that we do not support building PonyOS from scratch and this process may not work. Complete builds may take anywhere from thirty minutes to many hours, depending on your hardware.</p>
 
 			<h2>Git Repository</h2>
 			<p>PonyOS is developed through Github. You can find our repository at <a href="http://github.com/klange/ponyos">klange/ponyos</a>.</p>
@@ -123,10 +118,10 @@
 			<p>Four years later and people still don't believe us! PonyOS is not a Linux distribution - it's also not a BSD, or a Hurd, or a Minix, or a Solaris!</p>
 
 			<h3>Does PonyOS come with a compiler?</h3>
-			<p>PonyOS 5.0 does not include a compiler on the CD, as significantly increases the size of disc image. You can use the package manager to install the <code>build-essential</code> package and get a full GCC toolchain. PonyOS 5.0 does come with Python 3.6 if you want to get coding without Internet access.</p>
+			<p>PonyOS 6.0 does not include a compiler on the CD, as significantly increases the size of disc image. You can use the package manager to install the <code>build-essential</code> package and get a full GCC toolchain.</p>
 
 			<h3>Can I put this on a bootable USB drive?</h3>
-			<p>Probably, but see "Does PonyOS work on real hardware?" above. Directly copying the ISO to a USB stick should work (eg., using <code>dd</code>).</p>
+			<p>Probably, but see "Does PonyOS work on real hardware?" above. Directly copying the GRUB ISO to a USB stick should work (eg., using <code>dd</code>).</p>
 
 			<h3>How do I move windows?</h3>
 			<p>You can drag them by their title bars or hold <code>Alt</code> and then click and drag anywhere.</p>
@@ -147,10 +142,7 @@
 			<p>At the moment, PonyOS is only offered as a live CD with no installation option, for your safety. Experienced users can manually install PonyOS to a system with an existing GRUB installation and room for an Ext2 filesystem partition in the first 4GB of an available PATA or emulated PATA hard disk.</p>
 
 			<h3>Can I upgrade from an earlier release of PonyOS?</h3>
-			<p>No. Please use the latest live CD of PonyOS 5.0.</p>
-
-			<h3>Can I turn off this awful font?</h3>
-			<p>What awful font?</p>
+			<p>No. Please use the latest live CD of PonyOS 6.0.</p>
 
 		</div>
 
@@ -186,12 +178,12 @@
 		<div class="container">
 			<center>
 				<small>
-					Copyright 2013-2018 K Lange<br>
+					Copyright 2013-2020 K Lange<br>
 					PonyOS is based on <a href="http://toaruos.org/">ToaruOS</a>, which is free software released under the terms of the NCSA/University of Illinois license.<br>
 					PonyOS contains software from third parties under several other licenses, which may be found in the Help Browser application within the OS.<br>
 					PonyOS is a work of parody, and its fair use of characters and other intellectual property of Hasbro, Inc. is protected by copyright laws of the United States as well as international treaties and conventions.<br>
 					PonyOS is not endorsed by or affiliated with Hasbro, Inc.<br>
-					Happy April Fools Day 2018!
+					Happy April Fools Day 2020!
 				</small>
 			</center>
 		</div>
