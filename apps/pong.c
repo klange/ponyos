@@ -232,12 +232,9 @@ int main (int argc, char ** argv) {
 	ball.vel_x = -10.0;
 
 	fprintf(stderr, "Loading sprites...\n");
-	load_sprite(&left.sprite, GAME_PATH "/paddle-red.bmp");
-	left.sprite.alpha = ALPHA_EMBEDDED;
-	load_sprite(&right.sprite,GAME_PATH "/paddle-blue.bmp");
-	right.sprite.alpha = ALPHA_EMBEDDED;
-	load_sprite(&ball.sprite, GAME_PATH "/ball.bmp");
-	ball.sprite.alpha = ALPHA_EMBEDDED;
+	load_sprite(&left.sprite, GAME_PATH "/paddle-red.png");
+	load_sprite(&right.sprite,GAME_PATH "/paddle-blue.png");
+	load_sprite(&ball.sprite, GAME_PATH "/ball.png");
 
 	redraw();
 	update_left();

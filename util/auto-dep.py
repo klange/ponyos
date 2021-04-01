@@ -19,10 +19,11 @@ class Classifier(object):
         '<toaru/pex.h>':         (None, '-ltoaru_pex',         []),
         '<toaru/auth.h>':        (None, '-ltoaru_auth',        []),
         '<toaru/graphics.h>':    (None, '-ltoaru_graphics',    []),
+        '<toaru/inflate.h>':     (None, '-ltoaru_inflate',     []),
         '<toaru/drawstring.h>':  (None, '-ltoaru_drawstring',  ['<toaru/graphics.h>']),
         '<toaru/jpeg.h>':        (None, '-ltoaru_jpeg',        ['<toaru/graphics.h>']),
+        '<toaru/png.h>':         (None, '-ltoaru_png',         ['<toaru/graphics.h>','<toaru/inflate.h>']),
         '<toaru/rline.h>':       (None, '-ltoaru_rline',       ['<toaru/kbd.h>']),
-        '<toaru/rline_exp.h>':   (None, '-ltoaru_rline_exp',   ['<toaru/rline.h>']),
         '<toaru/confreader.h>':  (None, '-ltoaru_confreader',  ['<toaru/hashmap.h>']),
         '<toaru/markup.h>':      (None, '-ltoaru_markup',      ['<toaru/hashmap.h>']),
         '<toaru/json.h>':        (None, '-ltoaru_json',        ['<toaru/hashmap.h>']),
@@ -34,6 +35,8 @@ class Classifier(object):
         '<toaru/menu.h>':        (None, '-ltoaru_menu',        ['<toaru/sdf.h>', '<toaru/yutani.h>', '<toaru/icon_cache.h>', '<toaru/graphics.h>', '<toaru/hashmap.h>']),
         '<toaru/textregion.h>':  (None, '-ltoaru_textregion',  ['<toaru/sdf.h>', '<toaru/yutani.h>','<toaru/graphics.h>', '<toaru/hashmap.h>']),
         '<toaru/button.h>':      (None, '-ltoaru_button',      ['<toaru/graphics.h>','<toaru/sdf.h>', '<toaru/icon_cache.h>']),
+        # Kuroko
+        '<kuroko/kuroko.h>':     (None, '-lkuroko', []),
         # OPTIONAL third-party libraries, for extensions / ports
         '<ft2build.h>':        ('freetype2', '-lfreetype', []),
         '<pixman.h>':          ('pixman-1', '-lpixman-1', []),
@@ -98,6 +101,8 @@ def todep(name):
     if name.startswith("-l"):
         name = name.replace("-l","",1)
         if name.startswith('toaru'):
+            return (True, "%s/lib%s.so" % ('base/lib', name))
+        elif name.startswith('kuroko'):
             return (True, "%s/lib%s.so" % ('base/lib', name))
         else:
             return (True, "%s/lib%s.so" % ('base/usr/lib', name))
@@ -164,6 +169,17 @@ if __name__ == "__main__":
         libname = os.path.basename(filename).replace(".c","")
         _libs = [x for x in c.libs if not x.startswith('-ltoaru_') or x.replace("-ltoaru_","") != libname]
         print("base/lib/libtoaru_{lib}.so: {source} {headers} util/auto-dep.py | {libraryfiles} $(LC)\n\t$(CC) $(CFLAGS) {includes} -shared -fPIC -o $@ $< {libraries}".format(
+            lib=libname,
+            source=filename,
+            headers=" ".join([toheader(x) for x in c.libs]),
+            libraryfiles=" ".join([todep(x)[1] for x in _libs]),
+            libraries=" ".join([x for x in _libs]),
+            includes=" ".join([x for x in c.includes if x is not None])
+            ))
+    elif command == "--makekurokomod":
+        libname = os.path.basename(filename).replace(".c","").replace("module_","")
+        _libs = [x for x in c.libs if not x.startswith('-ltoaru_') or x.replace("-ltoaru_","") != libname]
+        print("base/lib/kuroko/{lib}.so: {source} {headers} util/auto-dep.py | {libraryfiles} $(LC)\n\t$(CC) $(CFLAGS) -DDEBUG {includes} -shared -fPIC -o $@ $< {libraries}".format(
             lib=libname,
             source=filename,
             headers=" ".join([toheader(x) for x in c.libs]),

@@ -25,7 +25,6 @@
 #include <toaru/auth.h>
 #include <toaru/confreader.h>
 #include <toaru/sdf.h>
-#include <toaru/jpeg.h>
 
 #include <toaru/trace.h>
 #define TRACE_APP_NAME "glogin-provider"
@@ -57,7 +56,7 @@ static int BOX_COLOR_G=0;
 static int BOX_COLOR_B=0;
 static int BOX_COLOR_A=127;
 static char * WALLPAPER = "/usr/share/wallpaper.jpg";
-static char * LOGO = "/usr/share/logo_login.bmp";
+static char * LOGO = "/usr/share/logo_login.png";
 
 #define TEXTBOX_INTERIOR_LEFT 4
 #define EXTRA_TEXT_OFFSET 15
@@ -261,7 +260,6 @@ int main (int argc, char ** argv) {
 
 	TRACE("Loading logo...");
 	load_sprite(&logo, LOGO);
-	logo.alpha = ALPHA_EMBEDDED;
 	TRACE("... done.");
 
 	/* Generate surface for background */
@@ -295,7 +293,7 @@ redo_everything:
 	TRACE("Loading wallpaper...");
 	{
 		sprite_t * wallpaper = malloc(sizeof(sprite_t));
-		load_sprite_jpg(wallpaper, WALLPAPER);
+		load_sprite(wallpaper, WALLPAPER);
 
 		float x = (float)width  / (float)wallpaper->width;
 		float y = (float)height / (float)wallpaper->height;
@@ -379,7 +377,7 @@ redo_everything:
 		{
 			struct utsname u;
 			uname(&u);
-			char * os_name_ = "ToaruOS";
+			char * os_name_ = "PonyOS";
 			snprintf(kernel_v, 512, "%s %s", os_name_, u.release);
 		}
 

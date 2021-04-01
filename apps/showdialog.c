@@ -74,7 +74,7 @@ static void redraw(void) {
 
 static void init_default(void) {
 	title_str = "Dialog Prompt";
-	icon_path = "/usr/share/icons/48/folder.bmp";
+	icon_path = "/usr/share/icons/48/folder.png";
 
 	copyright_str[0] = "This is a demonstration of a dialog box.";
 	copyright_str[1] = "You can press \"Okay\" or \"Cancel\" or close the window.";
@@ -180,7 +180,6 @@ int main(int argc, char * argv[]) {
 	ctx = init_graphics_yutani_double_buffer(window);
 	setup_buttons();
 	load_sprite(&logo, icon_path);
-	logo.alpha = ALPHA_EMBEDDED;
 	redraw();
 
 	struct TTKButton * _down_button = NULL;

@@ -2179,7 +2179,7 @@ static void _menu_action_toggle_free_size(struct MenuEntry * self) {
 
 static void _menu_action_show_about(struct MenuEntry * self) {
 	char about_cmd[1024] = "\0";
-	strcat(about_cmd, "about \"About Terminal\" /usr/share/icons/48/utilities-terminal.bmp \"ToaruOS Terminal\" \"(C) 2013-2020 K. Lange\n-\nPart of ToaruOS, which is free software\nreleased under the NCSA/University of Illinois\nlicense.\n-\n%https://toaruos.org\n%https://github.com/klange/toaruos\" ");
+	strcat(about_cmd, "about \"About Terminal\" /usr/share/icons/48/utilities-terminal.png \"PonyOS Terminal\" \"(C) 2013-2020 K. Lange\n-\nPart of PonyOS, which is free software\nreleased under the NCSA/University of Illinois\nlicense.\n-\n%https://ponyos.org\n%https://github.com/klange/ponyos\" ");
 	char coords[100];
 	sprintf(coords, "%d %d &", (int)window->x + (int)window->width / 2, (int)window->y + (int)window->height / 2);
 	strcat(about_cmd, coords);
@@ -2210,6 +2210,11 @@ static void _menu_action_set_scale(struct MenuEntry * self) {
 		font_scaling = atof(_self->action);
 	}
 	reinit();
+}
+
+static void render_decors_callback(struct menu_bar * self) {
+	(void)self;
+	render_decors();
 }
 
 int main(int argc, char ** argv) {
@@ -2324,7 +2329,7 @@ int main(int argc, char ** argv) {
 
 	/* Set up menus */
 	terminal_menu_bar.entries = terminal_menu_entries;
-	terminal_menu_bar.redraw_callback = render_decors;
+	terminal_menu_bar.redraw_callback = render_decors_callback;
 
 	struct MenuEntry * _menu_exit = menu_create_normal("exit","exit","Exit", _menu_action_exit);
 	struct MenuEntry * _menu_copy = menu_create_normal(NULL, NULL, "Copy", _menu_action_copy);

@@ -310,7 +310,7 @@ static void update_weather_status(void) {
 		if (widgets_weather_enabled) {
 			widgets_weather_enabled = 0;
 			/* Unshow */
-			widgets_width -= WIDGET_WIDTH;
+			widgets_width -= 2*WIDGET_WIDTH;
 		}
 		return;
 	}
@@ -318,7 +318,7 @@ static void update_weather_status(void) {
 	weather_status_valid = 1;
 	if (!widgets_weather_enabled) {
 		widgets_weather_enabled = 1;
-		widgets_width += WIDGET_WIDTH;
+		widgets_width += 2*WIDGET_WIDTH;
 	}
 
 	if (weather_title_str) free(weather_title_str);
@@ -362,9 +362,8 @@ static void update_weather_status(void) {
 	if (!hashmap_has(weather_icons, icon)) {
 		sprite_t * tmp = malloc(sizeof(sprite_t));
 		char path[512];
-		sprintf(path,"/usr/share/icons/weather/%s.bmp", icon);
+		sprintf(path,"/usr/share/icons/weather/%s.png", icon);
 		load_sprite(tmp, path);
-		tmp->alpha = ALPHA_FORCE_SLOW_EMBEDDED;
 		hashmap_set(weather_icons, icon, tmp);
 	}
 
@@ -825,7 +824,7 @@ static void launch_application_menu(struct MenuEntry * self) {
 	struct MenuEntry_Normal * _self = (void *)self;
 
 	if (!strcmp((char *)_self->action,"log-out")) {
-		if (system("showdialog \"Log Out\" /usr/share/icons/48/exit.bmp \"Are you sure you want to log out?\"") == 0) {
+		if (system("showdialog \"Log Out\" /usr/share/icons/48/exit.png \"Are you sure you want to log out?\"") == 0) {
 			yutani_session_end(yctx);
 			_continue = 0;
 		}
@@ -1366,8 +1365,7 @@ struct MenuEntry * menu_create_clock(void) {
 
 	if (!watchface) {
 		watchface = malloc(sizeof(sprite_t));
-		load_sprite(watchface, "/usr/share/icons/watchface.bmp");
-		watchface->alpha = ALPHA_EMBEDDED;
+		load_sprite(watchface, "/usr/share/icons/watchface.png");
 	}
 
 	out->_type = -1; /* Special */
@@ -1524,10 +1522,8 @@ int main (int argc, char ** argv) {
 	sprite_panel  = malloc(sizeof(sprite_t));
 	sprite_logout = malloc(sizeof(sprite_t));
 
-	load_sprite(sprite_panel,  "/usr/share/panel.bmp");
-	sprite_panel->alpha = ALPHA_EMBEDDED;
-	load_sprite(sprite_logout, "/usr/share/icons/panel-shutdown.bmp");
-	sprite_logout->alpha = ALPHA_FORCE_SLOW_EMBEDDED;
+	load_sprite(sprite_panel,  "/usr/share/panel.png");
+	load_sprite(sprite_logout, "/usr/share/icons/panel-shutdown.png");
 
 	struct stat stat_tmp;
 	if (!stat("/dev/dsp",&stat_tmp)) {
@@ -1537,14 +1533,10 @@ int main (int argc, char ** argv) {
 		sprite_volume_low  = malloc(sizeof(sprite_t));
 		sprite_volume_med  = malloc(sizeof(sprite_t));
 		sprite_volume_high = malloc(sizeof(sprite_t));
-		load_sprite(sprite_volume_mute, "/usr/share/icons/24/volume-mute.bmp");
-		sprite_volume_mute->alpha = ALPHA_FORCE_SLOW_EMBEDDED;
-		load_sprite(sprite_volume_low,  "/usr/share/icons/24/volume-low.bmp");
-		sprite_volume_low->alpha = ALPHA_FORCE_SLOW_EMBEDDED;
-		load_sprite(sprite_volume_med,  "/usr/share/icons/24/volume-medium.bmp");
-		sprite_volume_med->alpha = ALPHA_FORCE_SLOW_EMBEDDED;
-		load_sprite(sprite_volume_high, "/usr/share/icons/24/volume-full.bmp");
-		sprite_volume_high->alpha = ALPHA_FORCE_SLOW_EMBEDDED;
+		load_sprite(sprite_volume_mute, "/usr/share/icons/24/volume-mute.png");
+		load_sprite(sprite_volume_low,  "/usr/share/icons/24/volume-low.png");
+		load_sprite(sprite_volume_med,  "/usr/share/icons/24/volume-medium.png");
+		load_sprite(sprite_volume_high, "/usr/share/icons/24/volume-full.png");
 		/* XXX store current volume */
 	}
 
@@ -1552,11 +1544,9 @@ int main (int argc, char ** argv) {
 		widgets_network_enabled = 1;
 		widgets_width += WIDGET_WIDTH;
 		sprite_net_active = malloc(sizeof(sprite_t));
-		load_sprite(sprite_net_active, "/usr/share/icons/24/net-active.bmp");
-		sprite_net_active->alpha = ALPHA_FORCE_SLOW_EMBEDDED;
+		load_sprite(sprite_net_active, "/usr/share/icons/24/net-active.png");
 		sprite_net_disabled = malloc(sizeof(sprite_t));
-		load_sprite(sprite_net_disabled, "/usr/share/icons/24/net-disconnected.bmp");
-		sprite_net_disabled->alpha = ALPHA_FORCE_SLOW_EMBEDDED;
+		load_sprite(sprite_net_disabled, "/usr/share/icons/24/net-disconnected.png");
 	}
 
 	/* TODO Probably should use the app launch shortcut */

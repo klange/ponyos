@@ -20,7 +20,7 @@ Or you can install Python with:
 
 The password for the default user (`local`) is `local`.
 
-ToaruOS's compositing window server includes many common keybindings:
+PonyOS's compositing window server includes many common keybindings:
 - Hold Alt to drag windows.
 - Super (Win) combined with the arrow keys will "grid" windows to the
   sides or top and bottom of the screen. Combine with Ctrl and Shift

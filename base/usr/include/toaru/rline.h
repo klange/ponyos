@@ -1,8 +1,5 @@
 #pragma once
 
-#include <_cheader.h>
-
-_Begin_C_Header
 struct rline_callback;
 
 typedef struct {
@@ -30,16 +27,31 @@ typedef struct rline_callback {
 	rline_callback_t rev_search;
 } rline_callbacks_t;
 
-extern void rline_redraw(rline_context_t * context);
-extern void rline_redraw_clean(rline_context_t * context);
-extern void rline_insert(rline_context_t * context, const char * what);
-extern int rline(char * buffer, int buf_size, rline_callbacks_t * callbacks);
-extern void rline_reverse_search(rline_context_t * context);
+typedef enum {
+	/* Base colors */
+	RLINE_STYLE_MAIN,
+	RLINE_STYLE_ALT,
+	/* Syntax flags */
+	RLINE_STYLE_KEYWORD,
+	RLINE_STYLE_STRING,
+	RLINE_STYLE_COMMENT,
+	RLINE_STYLE_TYPE,
+	RLINE_STYLE_PRAGMA,
+	RLINE_STYLE_NUMERAL,
+} rline_style_t;
 
+extern int rline(char * buffer, int buf_size);
+extern int rline_exp_set_prompts(char * left, char * right, int left_width, int right_width);
+extern int rline_exp_set_shell_commands(char ** cmds, int len);
+extern int rline_exp_set_tab_complete_func(rline_callback_t func);
+extern int rline_exp_set_syntax(char * name);
 extern void rline_history_insert(char * str);
 extern void rline_history_append_line(char * str);
 extern char * rline_history_get(int item);
 extern char * rline_history_prev(int item);
+extern void rline_place_cursor(void);
+extern void rline_set_colors(rline_style_t style);
+extern int rline_terminal_width;
 
 #define RLINE_HISTORY_ENTRIES 128
 extern char * rline_history[RLINE_HISTORY_ENTRIES];
@@ -47,6 +59,8 @@ extern int rline_history_count;
 extern int rline_history_offset;
 extern int rline_scroll;
 extern char * rline_exit_string;
+extern char * rline_preload;
 
-_End_C_Header
-
+/* Legacy stuff */
+extern void rline_redraw(rline_context_t * context);
+extern void rline_insert(rline_context_t * context, const char * what);

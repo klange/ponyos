@@ -38,7 +38,6 @@
 #include <toaru/hashmap.h>
 #include <toaru/kbd.h>
 #include <toaru/rline.h>
-#include <toaru/rline_exp.h>
 
 #ifndef environ
 extern char **environ;
@@ -58,6 +57,7 @@ int SHELL_COMMANDS = 64;
 char ** shell_commands;          /* Command names */
 shell_command_t * shell_pointers; /* Command functions */
 char ** shell_descript;          /* Command descriptions */
+FILE * shell_stderr; /* specifically for `time` */
 
 /* This is the number of actual commands installed */
 int shell_commands_len = 0;
@@ -66,7 +66,6 @@ int shell_interactive = 1;
 int last_ret = 0;
 char ** shell_argv = NULL;
 int shell_argc = 0;
-int experimental_rline = 1;
 
 static int current_line = 0;
 static char * current_file = NULL;
@@ -363,26 +362,6 @@ void sig_break_loop(int sig) {
 	}
 }
 
-void redraw_prompt_func(rline_context_t * context) {
-	draw_prompt();
-}
-
-void draw_prompt_c() {
-	char * ps2 = getenv("PS2");
-	if (ps2) {
-		char buf[1024];
-		int display_width;
-		print_extended_ps(ps2, buf, &display_width);
-		fprintf(stdout, "%s", buf);
-	} else {
-		printf("> ");
-	}
-	fflush(stdout);
-}
-void redraw_prompt_func_c(rline_context_t * context) {
-	draw_prompt_c();
-}
-
 void tab_complete_func(rline_context_t * c) {
 	char * dup = malloc(LINE_LEN);
 	
@@ -437,6 +416,11 @@ void tab_complete_func(rline_context_t * c) {
 	int cursor_adj = cursor;
 
 	while (command_adj < argc && strstr(argv[command_adj],"=")) {
+		cursor_adj -= 1;
+		command_adj += 1;
+	}
+
+	if (command_adj < argc && (!strcmp(argv[command_adj], "time"))) {
 		cursor_adj -= 1;
 		command_adj += 1;
 	}
@@ -693,48 +677,30 @@ void add_environment(list_t * env) {
 }
 
 int read_entry(char * buffer) {
-	if (experimental_rline) {
-		char lprompt[1024], rprompt[1024];
-		int lwidth, rwidth;
+	char lprompt[1024], rprompt[1024];
+	int lwidth, rwidth;
 
-		char * ps1 = getenv("PS1_LEFT");
-		print_extended_ps(ps1 ? ps1 : FALLBACK_PS1, lprompt, &lwidth);
+	char * ps1 = getenv("PS1_LEFT");
+	print_extended_ps(ps1 ? ps1 : FALLBACK_PS1, lprompt, &lwidth);
 
-		char * ps1r = getenv("PS1_RIGHT");
-		print_extended_ps(ps1r ? ps1r : "", rprompt, &rwidth);
+	char * ps1r = getenv("PS1_RIGHT");
+	print_extended_ps(ps1r ? ps1r : "", rprompt, &rwidth);
 
-		rline_exit_string="exit";
-		rline_exp_set_syntax("esh");
-		rline_exp_set_prompts(lprompt, rprompt, lwidth, rwidth);
-		rline_exp_set_shell_commands(shell_commands, shell_commands_len);
-		rline_exp_set_tab_complete_func(tab_complete_func);
-		return rline_experimental(buffer, LINE_LEN);
-	} else {
-		rline_callbacks_t callbacks = {
-			tab_complete_func, redraw_prompt_func, NULL,
-			NULL, NULL, NULL, NULL, NULL
-		};
-		draw_prompt();
-		return rline((char *)buffer, LINE_LEN, &callbacks);
-	}
+	rline_exit_string="exit";
+	rline_exp_set_syntax("esh");
+	rline_exp_set_prompts(lprompt, rprompt, lwidth, rwidth);
+	rline_exp_set_shell_commands(shell_commands, shell_commands_len);
+	rline_exp_set_tab_complete_func(tab_complete_func);
+	return rline(buffer, LINE_LEN);
 }
 
 int read_entry_continued(char * buffer) {
-	if (experimental_rline) {
-		rline_exit_string="exit";
-		rline_exp_set_syntax("esh");
-		rline_exp_set_prompts("> ", "", 2, 0);
-		rline_exp_set_shell_commands(shell_commands, shell_commands_len);
-		rline_exp_set_tab_complete_func(tab_complete_func);
-		return rline_experimental(buffer, LINE_LEN);
-	} else {
-		rline_callbacks_t callbacks = {
-			tab_complete_func, redraw_prompt_func_c, NULL,
-			NULL, NULL, NULL, NULL, NULL
-		};
-		draw_prompt_c();
-		return rline((char *)buffer, LINE_LEN, &callbacks);
-	}
+	rline_exit_string="exit";
+	rline_exp_set_syntax("esh");
+	rline_exp_set_prompts("> ", "", 2, 0);
+	rline_exp_set_shell_commands(shell_commands, shell_commands_len);
+	rline_exp_set_tab_complete_func(tab_complete_func);
+	return rline(buffer, LINE_LEN);
 }
 
 int variable_char(uint8_t c) {
@@ -1702,13 +1668,13 @@ int main(int argc, char ** argv) {
 
 	install_commands();
 
+	int err = dup(STDERR_FILENO);
+	shell_stderr = fdopen(err, "w");
+
 	if (argc > 1) {
 		int c;
-		while ((c = getopt(argc, argv, "Rc:v?")) != -1) {
+		while ((c = getopt(argc, argv, "c:v?")) != -1) {
 			switch (c) {
-				case 'R':
-					experimental_rline = 0;
-					break;
 				case 'c':
 					shell_interactive = 0;
 					{
@@ -2287,6 +2253,45 @@ uint32_t shell_cmd_rehash(int argc, char * argv[]) {
 	return 0;
 }
 
+uint32_t shell_cmd_time(int argc, char * argv[]) {
+	int pid, ret_code = 0;
+	struct timeval start, end;
+	gettimeofday(&start, NULL);
+
+	if (argc > 1) {
+		pid_t child_pid = fork();
+		if (!child_pid) {
+			set_pgid(0);
+			set_pgrp(getpid());
+			is_subshell = 1;
+			run_cmd(&argv[1]);
+		}
+
+		do {
+			pid = waitpid(child_pid, &ret_code, 0);
+		} while (pid != -1 || (pid == -1 && errno != ECHILD));
+
+		reset_pgrp();
+		handle_status(ret_code);
+	}
+
+	gettimeofday(&end, NULL);
+
+	time_t sec_diff = end.tv_sec - start.tv_sec;
+	suseconds_t usec_diff = end.tv_usec - start.tv_usec;
+	if (end.tv_usec < start.tv_usec) {
+		sec_diff -= 1;
+		usec_diff = (1000000 + end.tv_usec) - start.tv_usec;
+	}
+
+	int minutes = sec_diff / 60;
+	sec_diff = sec_diff % 60;
+
+	fprintf(shell_stderr, "\nreal\t%dm%d.%.03ds\n", minutes, (int)sec_diff, (int)(usec_diff / 1000));
+
+	return WEXITSTATUS(ret_code);
+}
+
 void install_commands() {
 	shell_commands = malloc(sizeof(char *) * SHELL_COMMANDS);
 	shell_pointers = malloc(sizeof(shell_command_t) * SHELL_COMMANDS);
@@ -2313,4 +2318,5 @@ void install_commands() {
 	shell_install_command("jobs",    shell_cmd_jobs, "list stopped jobs");
 	shell_install_command("bg",      shell_cmd_bg, "restart suspended job in the background");
 	shell_install_command("rehash",  shell_cmd_rehash, "reset shell command memory");
+	shell_install_command("time",    shell_cmd_time, "time a command");
 }

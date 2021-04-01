@@ -16,7 +16,7 @@ char * __kernel_name = "ponyos";
 char * __kernel_version_format = "%d.%d.%d-%s";
 
 /* Version numbers X.Y.Z */
-int    __kernel_version_major = 6;
+int    __kernel_version_major = 7;
 int    __kernel_version_minor = 0;
 int    __kernel_version_lower = 0;
 
@@ -27,7 +27,7 @@ int    __kernel_version_lower = 0;
 char * __kernel_version_suffix   = "mlp";
 
 /* The release codename. */
-char * __kernel_version_codename = "discord";
+char * __kernel_version_codename = "spitfire";
 
 /* Build architecture (should probably not be
  * here as a string, but rather some sort of

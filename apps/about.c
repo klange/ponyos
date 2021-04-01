@@ -76,7 +76,7 @@ static void redraw(void) {
 
 static void init_default(void) {
 	title_str = "About PonyOS";
-	icon_path = "/usr/share/logo_small.bmp";
+	icon_path = "/usr/share/logo_small.png";
 
 	{
 		version_str = malloc(100);
@@ -89,7 +89,7 @@ static void init_default(void) {
 		sprintf(version_str, "PonyOS %s", u.release);
 	}
 
-	copyright_str[0] = "(C) 2011-2020 K. Lange, et al.";
+	copyright_str[0] = "(C) 2011-2021 K. Lange, et al.";
 	copyright_str[1] = "-";
 	copyright_str[2] = "PonyOS is free software released under the";
 	copyright_str[3] = "NCSA/University of Illinois license.";
@@ -149,7 +149,6 @@ int main(int argc, char * argv[]) {
 
 	ctx = init_graphics_yutani_double_buffer(window);
 	load_sprite(&logo, icon_path);
-	logo.alpha = ALPHA_EMBEDDED;
 
 	redraw();
 

@@ -1,0 +1,77 @@
+#!/bin/kuroko
+from _yutani import (color, Yutani, Window, Decorator, Message,
+                     MenuBar, MenuList, MenuEntry, MenuEntrySeparator
+                    )
+
+let running = True
+let y = Yutani()
+let w = Window(640,480,title="Test Window",doublebuffer=True)
+
+w.move(200,200)
+
+let mb = MenuBar((("File",'file'),("Help",'help')))
+let _menu_File = MenuList()
+
+_menu_File.insert(MenuEntry("Test", lambda menu: print("hello, world")))
+_menu_File.insert(MenuEntrySeparator())
+_menu_File.insert(MenuEntry("Quit", lambda menu: (running = False)))
+
+mb.insert('file', _menu_File)
+let _menu_Help = MenuList()
+let _menu_Help_help = MenuEntry("Help",lambda menu: print("oh no!"))
+_menu_Help.insert(_menu_Help_help)
+mb.insert('help', _menu_Help)
+
+def drawWindow():
+    w.fill(color(255,255,255))
+    Decorator.render(w)
+    let bounds = Decorator.get_bounds(w)
+    mb.place(bounds['left_width'],bounds['top_height'],w.width-bounds['width'],w)
+    mb.render(w)
+    w.flip()
+
+drawWindow()
+
+mb.callback = lambda x: drawWindow()
+
+print(globals())
+
+def handleMouseEvent(msg):
+    let decResponse = Decorator.handle_event(msg)
+    if decResponse == Decorator.DECOR_CLOSE:
+        w.close()
+        return True
+    else if decResponse == Decorator.DECOR_RIGHT:
+        Decorator.show_default_menu(w,w.x+msg.new_x,w.y+msg.new_y)
+    mb.mouse_event(w,msg)
+
+def finishResize(msg):
+    w.resize_accept(msg.width, msg.height)
+    w.reinit()
+    drawWindow()
+    w.resize_done()
+    w.flip()
+
+while running:
+    let msg = y.poll()
+    if y.menu_process_event(msg):
+        drawWindow()
+    if msg.type == Message.MSG_SESSION_END:
+        w.close()
+        break
+    else if msg.type == Message.MSG_KEY_EVENT:
+        print(msg.keycode)
+    else if msg.type == Message.MSG_WINDOW_FOCUS_CHANGE:
+        if msg.wid == w.wid:
+            print("focus changed")
+            w.set_focused(msg.focused)
+            drawWindow()
+    else if msg.type == Message.MSG_RESIZE_OFFER:
+        finishResize(msg)
+    else if msg.type == Message.MSG_WINDOW_MOUSE_EVENT:
+        if msg.wid == w.wid:
+            if handleMouseEvent(msg): break
+    else if msg.type == Message.MSG_WINDOW_CLOSE:
+        w.close()
+        break
+

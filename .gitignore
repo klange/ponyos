@@ -8,6 +8,7 @@
 
 /.make/*
 /base/bin/*
+/base/lib/kuroko
 /base/src
 /_base
 /cdrom/extra
@@ -33,7 +34,6 @@
 /base/usr/bin/*
 /base/usr/lib/*
 /base/usr/share/python-demos
-/base/usr/share/help
 
 # Generic
 /base/usr/share/aclocal
@@ -72,3 +72,6 @@
 
 # SDL
 /base/usr/include/SDL
+
+# Kuroko build files
+/base/usr/share/kuroko

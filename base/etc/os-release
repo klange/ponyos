@@ -1,8 +1,8 @@
-PRETTY_NAME="ToaruOS 1.10"
-NAME="ToaruOS"
-VERSION_ID="1.10.9"
-VERSION="1.10.9"
-ID=toaru
-HOME_URL="https://toaruos.org/"
-SUPPORT_URL="https://github.com/klange/toaruos"
-BUG_REPORT_URL="https://github.com/klange/toaruos"
+PRETTY_NAME="PonyOS 7.0"
+NAME="PonyOS"
+VERSION_ID="7.0.0"
+VERSION="7.0.0"
+ID=ponyos
+HOME_URL="https://ponyos.org/"
+SUPPORT_URL="https://github.com/klange/ponyos"
+BUG_REPORT_URL="https://github.com/klange/ponyos"

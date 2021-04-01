@@ -19,7 +19,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
-#include <toaru/hashmap.h>
+#include <toaru/inflate.h>
 
 struct ustar {
 	char filename[100];
@@ -44,11 +44,11 @@ struct ustar {
 	char dev_minor[8];
 
 	char prefix[155];
+	char padding[12];
 };
 
-static struct ustar * file_from_offset(FILE * f, size_t offset) {
+static struct ustar * extract_file(FILE * f) {
 	static struct ustar _ustar;
-	fseek(f, offset, SEEK_SET);
 	if (fread(&_ustar, 1, sizeof(struct ustar), f) != sizeof(struct ustar)) {
 		fprintf(stderr, "failed to read file\n");
 		return NULL;
@@ -62,13 +62,6 @@ static struct ustar * file_from_offset(FILE * f, size_t offset) {
 		return NULL;
 	}
 	return &_ustar;
-}
-
-static unsigned int round_to_512(unsigned int i) {
-	unsigned int t = i % 512;
-
-	if (!t) return i;
-	return i + (512 - t);
 }
 
 static unsigned int interpret_mode(struct ustar * file) {
@@ -137,9 +130,8 @@ static void dump_file(struct ustar * file) {
 #endif
 
 #define CHUNK_SIZE 4096
-static void write_file(struct ustar * file, FILE * f, FILE * mf, size_t off, char * name) {
+static void write_file(struct ustar * file, FILE * f, FILE * mf, char * name) {
 	size_t length = interpret_size(file);
-	fseek(f, off + 512, SEEK_SET);
 	char buf[CHUNK_SIZE];
 	while (length > CHUNK_SIZE) {
 		fread( buf, 1, CHUNK_SIZE, f);
@@ -150,10 +142,36 @@ static void write_file(struct ustar * file, FILE * f, FILE * mf, size_t off, cha
 		fread( buf, 1, length, f);
 		fwrite(buf, 1, length, mf);
 	}
-	fclose(mf);
-	fseek(f, off, SEEK_SET);
-	/* TODO: fchmod? */
-	chmod(name, interpret_mode(file));
+	if (mf != stdout) {
+		fclose(mf);
+		chmod(name, interpret_mode(file));
+	}
+}
+
+static void _seek_forward(FILE * f, size_t amount) {
+	for (size_t i = 0; i < amount; ++i) {
+		fgetc(f);
+	}
+}
+
+static void usage(char * argv[]) {
+	fprintf(stderr,
+			"tar - extract ustar archives\n"
+			"\n"
+			"usage: %s [-ctxvaf] [name]\n"
+			"\n"
+			" -f     \033[3mfile archive to open\033[0m\n"
+			" -x     \033[3mextract\033[0m\n"
+			"\n", argv[0]);
+}
+
+static int matches_files(int argc, char * argv[], int optind, char * filename) {
+	while (optind < argc) {
+		if (!strcmp(argv[optind], filename)) return 1;
+		optind++;
+	}
+
+	return 0;
 }
 
 int main(int argc, char * argv[]) {
@@ -162,11 +180,14 @@ int main(int argc, char * argv[]) {
 	char * fname = NULL;
 	int verbose = 0;
 	int action = 0;
+	int compressed = 0;
+	int to_stdout = 0;
+	int only_matches = 0;
 #define TAR_ACTION_EXTRACT 1
 #define TAR_ACTION_CREATE  2
 #define TAR_ACTION_LIST    3
 
-	while ((opt = getopt(argc, argv, "ctxvaf:")) != -1) {
+	while ((opt = getopt(argc, argv, "?ctxzvaf:O")) != -1) {
 		switch (opt) {
 			case 'c':
 				if (action) {
@@ -195,6 +216,15 @@ int main(int argc, char * argv[]) {
 			case 'v':
 				verbose = 1;
 				break;
+			case 'z':
+				compressed = 1;
+				break;
+			case 'O':
+				to_stdout = 1;
+				break;
+			case '?':
+				usage(argv);
+				return 1;
 			default:
 				fprintf(stderr, "%s: unsupported option '%c'\n", argv[0], opt);
 				return 1;
@@ -202,40 +232,72 @@ int main(int argc, char * argv[]) {
 	}
 
 	if (!fname) {
-		fprintf(stderr, "%s: todo: stdin/stdout\n", argv[0]);
-		return 1;
+		fname = "-";
+	}
+
+	if (optind < argc) {
+		only_matches = 1;
 	}
 
 	if (action == TAR_ACTION_EXTRACT || action == TAR_ACTION_LIST) {
 
-		hashmap_t * files = hashmap_create(10);
-
-		FILE * f = fopen(fname,"r");
+		FILE * f;
+		if (!strcmp(fname,"-")) {
+			f = stdin;
+		} else {
+			f = fopen(fname,"r");
+		}
 		if (!f) {
 			fprintf(stderr, "%s: %s: %s\n", argv[0], fname, strerror(errno));
 			return 1;
 		}
 
-		fseek(f, 0, SEEK_END);
-		size_t length = ftell(f);
-		fseek(f, 0, SEEK_SET);
+		if (compressed) {
+			int fds[2];
+			pipe(fds);
+
+			int child = fork();
+			if (child == 0) {
+				/* Close the read end */
+				close(fds[0]);
+				/* Put f's fd into stdin */
+				dup2(fileno(f), STDIN_FILENO);
+				/* Make stdout the pipe */
+				dup2(fds[1], STDOUT_FILENO);
+				/* Execeute gzunzip */
+				char * args[] = {"gunzip","-c",NULL};
+				exit(execvp("gunzip",args));
+			} else if (child < 0) {
+				fprintf(stderr, "%s: failed to fork gunzip for compressed archive\n", argv[0]);
+				return 1;
+			}
+
+			/* Reattach f to pipe */
+			close(fds[1]);
+			f = fdopen(fds[0], "r");
+		}
 
 		char tmpname[1024] = {0};
 		int  last_was_long = 0;
 
-		size_t off = 0;
 		while (!feof(f)) {
-			struct ustar * file = file_from_offset(f, off);
+			struct ustar * file = extract_file(f);
 
 			if (!file) {
 				break;
 			}
 
-			if (action == TAR_ACTION_LIST || verbose) {
-				fprintf(stdout, "%.155s%.100s\n", file->prefix, file->filename);
-			}
-
-			if (action == TAR_ACTION_EXTRACT) {
+			if (action == TAR_ACTION_LIST) {
+				if (verbose) {
+					fprintf(stdout, "%10d %c %.155s%.100s\n", interpret_size(file), file->type[0], file->prefix, file->filename);
+				} else {
+					fprintf(stdout, "%.155s%.100s\n", file->prefix, file->filename);
+				}
+				_seek_forward(f, interpret_size(file));
+			} else if (action == TAR_ACTION_EXTRACT) {
+				if (verbose) {
+					fprintf(stdout, "%.155s%.100s\n", file->prefix, file->filename);
+				}
 				char name[1024] = {0};
 				if (last_was_long) {
 					strncat(name, tmpname, 1023);
@@ -246,61 +308,79 @@ int main(int argc, char * argv[]) {
 				}
 
 				if (file->type[0] == '0' || file->type[0] == 0) {
-					FILE * mf = fopen(name,"w");
+					FILE * mf = to_stdout ? stdout : fopen(name,"w");
 					if (!mf) {
 						fprintf(stderr, "%s: %s: %s: %s\n", argv[0], fname, name, strerror(errno));
+						_seek_forward(f, interpret_size(file));
 					} else {
-						write_file(file,f,mf,off,name);
+						if (!only_matches || matches_files(argc,argv,optind,name)) {
+							write_file(file,f,mf,name);
+						}
 					}
-					struct ustar * tmp = malloc(sizeof(struct ustar));
-					memcpy(tmp, file, sizeof(struct ustar));
-					hashmap_set(files, name, tmp);
 				} else if (file->type[0] == '5') {
-					if (name[strlen(name)-1] == '/') {
-						name[strlen(name)-1] = '\0';
-					}
-					if (strlen(name)) {
-						if (mkdir(name, 0777) < 0) {
-							if (errno != EEXIST) {
-								fprintf(stderr, "%s: %s: %s: %s\n", argv[0], fname, name, strerror(errno));
+					if (!to_stdout) {
+						if (name[strlen(name)-1] == '/') {
+							name[strlen(name)-1] = '\0';
+						}
+						if (strlen(name)) {
+							if (!only_matches || matches_files(argc,argv,optind,name)) {
+								if (mkdir(name, 0777) < 0) {
+									if (errno != EEXIST) {
+										fprintf(stderr, "%s: %s: %s: %s\n", argv[0], fname, name, strerror(errno));
+									}
+								}
 							}
 						}
 					}
 				} else if (file->type[0] == '1') {
-					char tmp[101] = {0};
-					strncat(tmp, file->link, 100);
-					if (!hashmap_has(files, tmp)) {
-						fprintf(stderr, "%s: %s: %s: %s: missing target\n", argv[0], fname, name, tmp);
-					} else {
+					if (!to_stdout && (!only_matches || matches_files(argc,argv,optind,name))) {
+						char tmp[101] = {0};
+						strncat(tmp, file->link, 100);
 						FILE * mf = fopen(name,"w");
 						if (!mf) {
 							fprintf(stderr, "%s: %s: %s: %s\n", argv[0], fname, name, strerror(errno));
 						} else {
-							write_file(hashmap_get(files,tmp),f,mf,off,name);
+							FILE * source = fopen(tmp, "r");
+							if (!source) {
+								fprintf(stderr, "%s: %s: %s: %s\n", argv[0], fname, tmp, strerror(errno));
+							} else {
+								while (!feof(source)) {
+									char buf[4096];
+									ssize_t r = fread(buf, 1, 4096, source);
+									fwrite(buf, 1, r, mf);
+								}
+								fclose(source);
+							}
+							fclose(mf);
+							chmod(name, interpret_mode(file));
 						}
 					}
+					_seek_forward(f, interpret_size(file));
 				} else if (file->type[0] == '2') {
-					char tmp[101] = {0};
-					strncat(tmp, file->link, 100);
-					if (symlink(tmp, name) < 0) {
-						fprintf(stderr, "%s: %s: %s: %s: %s\n", argv[0], fname, name, tmp, strerror(errno));
+					if (!to_stdout && (!only_matches || matches_files(argc,argv,optind,name))) {
+						char tmp[101] = {0};
+						strncat(tmp, file->link, 100);
+						if (symlink(tmp, name) < 0) {
+							fprintf(stderr, "%s: %s: %s: %s: %s\n", argv[0], fname, name, tmp, strerror(errno));
+						}
 					}
+					_seek_forward(f, interpret_size(file));
 				} else if (file->type[0] == 'L') {
 					/* This is a GNU Long Name block; store its contents as a file name */
 					size_t s = interpret_size(file);
-					fseek(f, off + 512, SEEK_SET);
 					fread(tmpname, 1, s, f);
 					tmpname[s] = '\0';
-					fseek(f, off, SEEK_SET);
 					last_was_long = 1;
 				} else {
 					fprintf(stderr, "%s: %s: %s: %s\n", argv[0], fname, name, type_to_string(file->type[0]));
+					_seek_forward(f, interpret_size(file));
 				}
 			}
 
-			off += 512;
-			off += round_to_512(interpret_size(file));
-			if (off >= length) break;
+			size_t file_size = interpret_size(file);
+			if (file_size % 512) {
+				_seek_forward(f, 512 - (file_size % 512));
+			}
 		}
 	} else {
 		fprintf(stderr, "%s: unsupported action\n", argv[0]);

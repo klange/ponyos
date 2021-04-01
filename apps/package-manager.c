@@ -341,7 +341,7 @@ static void install_package(struct Package * package) {
 static void _menu_action_about(struct MenuEntry * entry) {
 	/* Show About dialog */
 	char about_cmd[1024] = "\0";
-	strcat(about_cmd, "about \"About " APPLICATION_TITLE "\" /usr/share/icons/48/package.bmp \"ToaruOS " APPLICATION_TITLE "\" \"(C) 2018 K. Lange\n-\nPart of ToaruOS, which is free software\nreleased under the NCSA/University of Illinois\nlicense.\n-\n%https://toaruos.org\n%https://github.com/klange/toaruos\" ");
+	strcat(about_cmd, "about \"About " APPLICATION_TITLE "\" /usr/share/icons/48/package.png \"PonyOS " APPLICATION_TITLE "\" \"(C) 2018 K. Lange\n-\nPart of PonyOS, which is free software\nreleased under the NCSA/University of Illinois\nlicense.\n-\n%https://ponyos.org\n%https://github.com/klange/ponyos\" ");
 	char coords[100];
 	sprintf(coords, "%d %d &", (int)main_window->x + (int)main_window->width / 2, (int)main_window->y + (int)main_window->height / 2);
 	strcat(about_cmd, coords);
@@ -433,13 +433,18 @@ static void arrow_select(int y) {
 	redraw_window();
 }
 
+static void redraw_window_callback(struct menu_bar * self) {
+	(void)self;
+	redraw_window();
+}
+
 int main(int argc, char * argv[]) {
 
 	if (geteuid() != 0) {
 		char * args[] = {
 			"showdialog",
 			"Package Manager",
-			"/usr/share/icons/48/package.bmp",
+			"/usr/share/icons/48/package.png",
 			"Only root can manage packages.",
 			NULL,
 		};
@@ -455,7 +460,7 @@ int main(int argc, char * argv[]) {
 	yutani_window_advertise_icon(yctx, main_window, APPLICATION_TITLE, "package");
 
 	menu_bar.entries = menu_entries;
-	menu_bar.redraw_callback = redraw_window;
+	menu_bar.redraw_callback = redraw_window_callback;
 
 	menu_bar.set = menu_set_create();
 

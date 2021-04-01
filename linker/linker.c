@@ -75,6 +75,8 @@ typedef int (*entry_point_t)(int, char *[], char**);
 static hashmap_t * dumb_symbol_table;
 static hashmap_t * glob_dat;
 static hashmap_t * objects_map;
+static hashmap_t * tls_map;
+static size_t current_tls_offset = 0;
 
 /* Used for dlerror */
 static char * last_error = NULL;
@@ -388,6 +390,7 @@ static int need_symbol_for_type(unsigned char type) {
 		case 5:
 		case 6:
 		case 7:
+		case 14:
 			return 1;
 		default:
 			return 0;
@@ -470,6 +473,20 @@ static int object_relocate(elf_t * object) {
 						break;
 					case 5: /* COPY */
 						memcpy((void *)(table->r_offset + object->base), (void *)x, sym->st_size);
+						break;
+					case 14: /* TLS_TPOFF */
+						x = *((ssize_t *)(table->r_offset + object->base));
+						if (!hashmap_has(tls_map, symname)) {
+							if (!sym->st_size) {
+								fprintf(stderr, "Haven't placed %s in static TLS yet but don't know its size?\n", symname);
+							}
+							current_tls_offset += sym->st_size; /* TODO alignment restrictions */
+							hashmap_set(tls_map, symname, (void*)(current_tls_offset));
+							x -= current_tls_offset;
+						} else {
+							x -= (size_t)hashmap_get(tls_map, symname);
+						}
+						memcpy((void *)(table->r_offset + object->base), &x, sizeof(uintptr_t));
 						break;
 					default:
 						TRACE_LD("Unknown relocation type: %d", type);
@@ -607,6 +624,58 @@ static void * do_actual_load(const char * filename, elf_t * lib, int flags) {
 	return (void *)lib;
 }
 
+static uintptr_t end_addr = 0;
+/**
+ * Half loads an object using the dumb allocator and performs dependency
+ * resolution. This is a separate process from do_actual_load and dlopen_ld
+ * to avoid problems with malloc and library functions while loading.
+ * Preloaded objects will be fully loaded everything is relocated.
+ */
+static elf_t * preload(hashmap_t * libs, list_t * load_libs, char * lib_name) {
+	/* Find and open the library */
+	elf_t * lib = open_object(lib_name);
+
+	if (!lib) {
+		fprintf(stderr, "Failed to load dependency '%s'.\n", lib_name);
+		return NULL;
+	}
+
+	/* Skip already loaded libraries */
+	if (lib->loaded) return lib;
+
+	/* Mark this library available */
+	hashmap_set(libs, lib_name, lib);
+
+	TRACE_LD("Loading %s at 0x%x", lib_name, end_addr);
+
+	/* Adjust dumb allocator */
+	while (end_addr & 0xFFF) {
+		end_addr++;
+	}
+
+	/* Load PHDRs */
+	end_addr = object_load(lib, end_addr);
+
+	/* Extract information */
+	object_postload(lib);
+
+	/* Mark loaded */
+	lib->loaded = 1;
+
+	/* Verify dependencies are loaded before we relocate */
+	foreach(node, lib->dependencies) {
+		if (!hashmap_has(libs, node->value)) {
+			TRACE_LD("Need unloaded dependency %s", node->value);
+			preload(libs, load_libs, node->value);
+		}
+	}
+
+	/* Add this to the (forward scan) list of libraries to finish loading */
+	list_insert(load_libs, lib);
+
+	return lib;
+}
+
 /* exposed dlopen() method */
 static void * dlopen_ld(const char * filename, int flags) {
 	TRACE_LD("dlopen(%s,0x%x)", filename, flags);
@@ -699,6 +768,7 @@ int main(int argc, char * argv[]) {
 	dumb_symbol_table = hashmap_create(10);
 	glob_dat = hashmap_create(10);
 	objects_map = hashmap_create(10);
+	tls_map = hashmap_create(10);
 
 	/* Setup symbols for built-in exports */
 	ld_exports_t * ex = ld_builtin_exports;
@@ -731,7 +801,7 @@ int main(int argc, char * argv[]) {
 	}
 
 	/* Load the main object */
-	uintptr_t end_addr = object_load(main_obj, 0x0);
+	end_addr = object_load(main_obj, 0x0);
 	object_postload(main_obj);
 	object_find_copy_relocations(main_obj);
 
@@ -742,33 +812,36 @@ int main(int argc, char * argv[]) {
 		end_addr++;
 	}
 
-	list_t * ctor_libs = list_create();
-	list_t * init_libs = list_create();
-
+	/* Load dependent libraries, recursively. */
 	TRACE_LD("Loading dependencies.");
+	list_t * load_libs = list_create();
 	node_t * item;
 	while ((item = list_pop(main_obj->dependencies))) {
-		while (end_addr & 0xFFF) {
-			end_addr++;
-		}
-
 		char * lib_name = item->value;
-		/* Reject libg.so */
+
+		/* Skip libg.so which is a fake library that doesn't really exist.
+		 * XXX: Only binaries should depend on this I think? */
 		if (!strcmp(lib_name, "libg.so")) goto nope;
 
-		elf_t * lib = open_object(lib_name);
-		if (!lib) {
-			fprintf(stderr, "Failed to load dependency '%s'.\n", lib_name);
-			return 1;
-		}
-		hashmap_set(libs, lib_name, lib);
+		/* Preload library */
+		elf_t * lib = preload(libs, load_libs, lib_name);
 
-		TRACE_LD("Loading %s at 0x%x", lib_name, end_addr);
-		end_addr = object_load(lib, end_addr);
-		object_postload(lib);
-		TRACE_LD("Relocating %s", lib_name);
+		/* Failed to load */
+		if (!lib) return 1;
+
+nope:
+		free(item);
+	}
+
+	list_t * ctor_libs = list_create();
+	list_t * init_libs = list_create();
+	while ((item = list_dequeue(load_libs))) {
+		elf_t * lib = item->value;
+
+		/* Complete relocation */
 		object_relocate(lib);
 
+		/* Close the underlying file */
 		fclose(lib->file);
 
 		/* Store constructors for later execution */
@@ -779,9 +852,6 @@ int main(int argc, char * argv[]) {
 			list_insert(init_libs, lib);
 		}
 
-		lib->loaded = 1;
-
-nope:
 		free(item);
 	}
 

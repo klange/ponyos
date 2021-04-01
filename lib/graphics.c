@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <math.h>
 #include <fcntl.h>
+#include <dlfcn.h>
 
 #include <sys/ioctl.h>
 
@@ -395,7 +396,38 @@ void blur_context_box(gfx_context_t * _src, int radius) {
 	_box_blur_vertical(_src,radius);
 }
 
+static int (*load_sprite_jpg)(sprite_t *, char *) = NULL;
+static int (*load_sprite_png)(sprite_t *, char *) = NULL;
+
+static void _load_format_libraries() {
+	void * _lib_jpeg = dlopen("libtoaru_jpeg.so", 0);
+	if (_lib_jpeg) load_sprite_jpg = dlsym(_lib_jpeg, "load_sprite_jpg");
+	void * _lib_png = dlopen("libtoaru_png.so", 0);
+	if (_lib_png) load_sprite_png = dlsym(_lib_png, "load_sprite_png");
+}
+
+static char * extension_from_filename(char * filename) {
+	char * ext = strrchr(filename, '.');
+	if (ext && *ext == '.') return ext + 1;
+	return "";
+}
+
 int load_sprite(sprite_t * sprite, char * filename) {
+	static int librariesLoaded = 0;
+	if (!librariesLoaded) {
+		_load_format_libraries();
+	}
+
+	char * ext = extension_from_filename(filename);
+
+	if (!strcmp(ext,"png") || !strcmp(ext,"sdf")) return load_sprite_png(sprite, filename);
+	if (!strcmp(ext,"jpg") || !strcmp(ext,"jpeg")) return load_sprite_jpg(sprite, filename);
+
+	/* Fall back to bitmap */
+	return load_sprite_bmp(sprite, filename);
+}
+
+int load_sprite_bmp(sprite_t * sprite, char * filename) {
 	/* Open the requested binary */
 	FILE * image = fopen(filename, "r");
 
@@ -435,6 +467,10 @@ int load_sprite(sprite_t * sprite, char * filename) {
 		#define _BMP_R 0x1
 		#define _BMP_G 0x100
 		#define _BMP_B 0x10000
+
+		if (bpp == 32) {
+			sprite->alpha = ALPHA_EMBEDDED;
+		}
 
 		for (y = 0; y < height; ++y) {
 			for (x = 0; x < width; ++x) {

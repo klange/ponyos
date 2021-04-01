@@ -4,7 +4,7 @@
 &settings,folder,Settings
 -
 exec help-browser,help,Help Browser
-exec about,star,About ToaruOS
+exec about,star,About PonyOS
 log-out,exit,Log Out
 :accessories
 exec file-browser,folder,File Browser
