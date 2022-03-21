@@ -294,7 +294,7 @@ static void draw_square(int x, int y, int stage) {
 			color_blue  /= 2;
 		}
 
-		unsigned int color = 0xFF000000 | (color_green << 8) | color_blue;
+		unsigned int color = 0xFF000000 | (color_blue << 16) | color_green;
 
 		for (int _x = 0; _x < 7; ++_x) {
 			set_point(center_x - 32 - offset_x + x * 8 + _x, center_y - 32 - offset_y + y * 8 + _y, color);
@@ -304,7 +304,7 @@ static void draw_square(int x, int y, int stage) {
 
 void draw_logo(int stage) {
 	if (!in_graphics_mode) return;
-	uint64_t logo_squares = 0x981818181818FFFFUL;
+	uint64_t logo_squares = 0x00183c7effff6600UL;
 	for (int y = 0; y < 8; ++y) {
 		for (int x = 0; x < 8; ++x) {
 			if (logo_squares & (1 << x)) {
