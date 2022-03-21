@@ -169,7 +169,7 @@ static void load_page(int page) {
 			body_text[i++] = "";
 			body_text[i++] = "When you're ready to continue, press \"Next\".";
 			body_text[i++] = "";
-			body_text[i++] = "^Happy April Fools 2021!";
+			body_text[i++] = "^Happy April Fools 2022!";
 			body_text[i++] = NULL;
 			break;
 		case 1:
