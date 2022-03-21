@@ -1,43 +1,61 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
+/**
+ * @file modules/dospart.c
+ * @brief DOS MBR partition table mapper
+ * @package x86_64
+ *
+ * Provides partition entries for disks.
+ *
+ * @copyright
  * This file is part of ToaruOS and is released under the terms
  * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2014-2018 K. Lange
+ * Copyright (C) 2014-2021 K. Lange
  */
-#include <kernel/system.h>
-#include <kernel/logging.h>
+#include <kernel/types.h>
 #include <kernel/module.h>
+#include <kernel/vfs.h>
 #include <kernel/printf.h>
-#include <kernel/ata.h>
+#include <kernel/tokenize.h>
 
 #define SECTORSIZE      512
 
-static mbr_t mbr;
+typedef struct {
+	uint8_t  status;
+	uint8_t  chs_first_sector[3];
+	uint8_t  type;
+	uint8_t  chs_last_sector[3];
+	uint32_t lba_first_sector;
+	uint32_t sector_count;
+} partition_t;
+
+typedef struct {
+	uint8_t     boostrap[446];
+	partition_t partitions[4];
+	uint8_t     signature[2];
+} __attribute__((packed)) mbr_t;
 
 struct dos_partition_entry {
 	fs_node_t * device;
 	partition_t partition;
 };
 
-static uint32_t read_part(fs_node_t *node, uint64_t offset, uint32_t size, uint8_t *buffer) {
+static ssize_t read_part(fs_node_t *node, off_t offset, size_t size, uint8_t *buffer) {
 	struct dos_partition_entry * device = (struct dos_partition_entry *)node->device;
 
-	if (offset > device->partition.sector_count * SECTORSIZE) {
-		debug_print(WARNING, "Read beyond partition!");
+	if ((size_t)offset > device->partition.sector_count * SECTORSIZE) {
 		return 0;
 	}
 
 	if (offset + size > device->partition.sector_count * SECTORSIZE) {
 		size = device->partition.sector_count * SECTORSIZE - offset;
-		debug_print(WARNING, "Tried to read past end of partition, clamped to %d", size);
 	}
 
 	return read_fs(device->device, offset + device->partition.lba_first_sector * SECTORSIZE, size, buffer);
 }
 
-static uint32_t write_part(fs_node_t *node, uint64_t offset, uint32_t size, uint8_t *buffer) {
+static ssize_t write_part(fs_node_t *node, off_t offset, size_t size, uint8_t *buffer) {
 	struct dos_partition_entry * device = (struct dos_partition_entry *)node->device;
 
-	if (offset > device->partition.sector_count * SECTORSIZE) {
+	if ((size_t)offset > device->partition.sector_count * SECTORSIZE) {
 		return 0;
 	}
 
@@ -56,18 +74,18 @@ static void close_part(fs_node_t * node) {
 	return;
 }
 
-static fs_node_t * dospart_device_create(int i, fs_node_t * dev, partition_t * part) {
+static fs_node_t * dospart_device_create(int i, fs_node_t * dev, mbr_t * mbr, int id) {
 
 	vfs_lock(dev);
 
 	struct dos_partition_entry * device = malloc(sizeof(struct dos_partition_entry));
-	memcpy(&device->partition, part, sizeof(partition_t));
+	memcpy(&device->partition, &mbr->partitions[id], sizeof(partition_t));
 	device->device = dev;
 
 	fs_node_t * fnode = malloc(sizeof(fs_node_t));
 	memset(fnode, 0x00, sizeof(fs_node_t));
 	fnode->inode = 0;
-	sprintf(fnode->name, "dospart%d", i);
+	snprintf(fnode->name, 20, "dospart%d", i);
 	fnode->device  = device;
 	fnode->uid = 0;
 	fnode->gid = 0;
@@ -84,42 +102,36 @@ static fs_node_t * dospart_device_create(int i, fs_node_t * dev, partition_t * p
 	return fnode;
 }
 
-static int read_partition_map(char * name) {
-	fs_node_t * device = kopen(name, 0);
-	if (!device) return 1;
+static fs_node_t * dospart_map(const char * device, const char * mount_path) {
+	char * arg = strdup(device);
+	char * argv[10];
+	tokenize(arg, ",", argv);
 
-	read_fs(device, 0, SECTORSIZE, (uint8_t *)&mbr);
+	fs_node_t * dev = kopen(argv[0], 0);
+	if (!dev) {
+		return NULL;
+	}
+
+	mbr_t mbr;
+	read_fs(dev, 0, SECTORSIZE, (uint8_t *)&mbr);
 
 	if (mbr.signature[0] == 0x55 && mbr.signature[1] == 0xAA) {
-		debug_print(INFO, "Partition table found.");
-
 		for (int i = 0; i < 4; ++i) {
 			if (mbr.partitions[i].status & 0x80) {
-				debug_print(NOTICE, "Partition #%d: @%d+%d", i+1, mbr.partitions[i].lba_first_sector, mbr.partitions[i].sector_count);
-				fs_node_t * node = dospart_device_create(i, device, &mbr.partitions[i]);
-
+				fs_node_t * node = dospart_device_create(i, dev, &mbr, i);
 				char tmp[64];
-				sprintf(tmp, "%s%d", name, i);
+				snprintf(tmp, 20, "%s%d", device, i);
 				vfs_mount(tmp, node);
-			} else {
-				debug_print(NOTICE, "Partition #%d: inactive", i+1);
 			}
 		}
-	} else {
-		debug_print(NOTICE, "No partition table on %s", name);
 	}
 
-	return 0;
+	/* VFS_MOUNT_PARTITION_MAPPER_SUCCESS? */
+	return (fs_node_t*)1;
 }
 
-static int dospart_initialize(void) {
-	for (char l = 'a'; l < 'z'; ++l) {
-		char name[64];
-		sprintf(name, "/dev/hd%c", l);
-		if (read_partition_map(name)) {
-			break;
-		}
-	}
+static int dospart_initialize(int argc, char * argv[]) {
+	vfs_register("mbr", dospart_map);
 	return 0;
 }
 
@@ -127,4 +139,9 @@ static int dospart_finalize(void) {
 	return 0;
 }
 
-MODULE_DEF(dospart, dospart_initialize, dospart_finalize);
+struct Module metadata = {
+	.name = "dospart",
+	.init = dospart_initialize,
+	.fini = dospart_finalize,
+};
+

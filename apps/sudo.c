@@ -1,10 +1,16 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
+/**
+ * @brief sudo - Run processes as the root user, after authenticating.
+ *
+ * Our sudo supports cached authentication, so you don't need to keep
+ * entering your password.
+ *
+ * Probably terribly insecure, but our main password auth function is
+ * a plain text comparison, so *shrug*.
+ *
+ * @copyright
  * This file is part of ToaruOS and is released under the terms
  * of the NCSA / University of Illinois License - see LICENSE.md
  * Copyright (C) 2014 K. Lange
- *
- * sudo
- *
  */
 
 #include <stdio.h>
@@ -25,6 +31,8 @@
 #define MINUTES * 60
 
 #define SUDO_TIME 5 MINUTES
+
+extern int setgroups(int size, const gid_t list[]);
 
 static int sudo_loop(int (*prompt_callback)(char * username, char * password, int failures, char * argv[]), char * argv[]) {
 
@@ -128,7 +136,9 @@ static int sudo_loop(int (*prompt_callback)(char * username, char * password, in
 		putenv("USER=root");
 
 		/* Actually become root, so real user id = 0 */
+		setgid(0);
 		setuid(0);
+		setgroups(0,NULL);
 
 		if (!strcmp(argv[1], "-s")) {
 			argv[1] = getenv("SHELL");

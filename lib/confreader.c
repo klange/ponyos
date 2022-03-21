@@ -1,15 +1,16 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
- * This file is part of ToaruOS and is released under the terms
- * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2018 K. Lange
- *
- * Configuration File Reader
+/**
+ * @brief Configuration File Reader
  *
  * Reads an implementation of the INI "standard". Note that INI
  * isn't actually a standard. We support the following:
  * - ; comments
  * - foo=bar keyword assignment
  * - [sections]
+ *
+ * @copyright
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2018 K. Lange
  */
 #include <stdio.h>
 #include <toaru/hashmap.h>
@@ -88,7 +89,7 @@ confreader_t * confreader_load(const char * file) {
 	char tmp2[1024];
 
 	while (!feof(f)) {
-		char c = fgetc(f);
+		int c = fgetc(f);
 		tmp[0] = '\0';
 		tmp2[0] = '\0';
 		if (c == ';') {

@@ -6,12 +6,15 @@
 
 _Begin_C_Header
 
-#define AF_INET 1
 #define AF_UNSPEC 0
+#define AF_INET 1
+#define AF_RAW 2
 
 #define SOCK_STREAM 1
 #define SOCK_DGRAM  2
+#define SOCK_RAW    3
 
+#define IPPROTO_ICMP 1
 #define IPPROTO_TCP 6
 #define IPPROTO_UDP 17
 
@@ -19,33 +22,13 @@ _Begin_C_Header
 
 #define SO_KEEPALIVE 1
 #define SO_REUSEADDR 2
-
-struct hostent {
-	char  *h_name;            /* official name of host */
-	char **h_aliases;         /* alias list */
-	int    h_addrtype;        /* host address type */
-	int    h_length;          /* length of address */
-	char **h_addr_list;       /* list of addresses */
-};
-
-extern struct hostent * gethostbyname(const char * name);
+#define SO_BINDTODEVICE 3
 
 typedef size_t socklen_t;
 
 struct sockaddr {
 	unsigned short    sa_family;    // address family, AF_xxx
 	char              sa_data[14];  // 14 bytes of protocol address
-};
-
-struct in_addr {
-	unsigned long s_addr;          // load with inet_pton()
-};
-
-struct sockaddr_in {
-	short            sin_family;   // e.g. AF_INET, AF_INET6
-	unsigned short   sin_port;     // e.g. htons(3490)
-	struct in_addr   sin_addr;     // see struct in_addr, below
-	char             sin_zero[8];  // zero this if you want to
 };
 
 struct addrinfo {
@@ -79,9 +62,7 @@ struct sockaddr_storage {
 	char _ss_pad[128];
 };
 
-typedef uint32_t in_addr_t;
-typedef uint16_t in_port_t;
-
+#ifndef _KERNEL_
 extern ssize_t recv(int sockfd, void *buf, size_t len, int flags);
 extern ssize_t recvfrom(int sockfd, void *buf, size_t len, int flags, struct sockaddr *src_addr, socklen_t *addrlen);
 extern ssize_t recvmsg(int sockfd, struct msghdr *msg, int flags);
@@ -92,13 +73,9 @@ ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags);
 
 extern int socket(int domain, int type, int protocol);
 
-extern uint32_t htonl(uint32_t hostlong);
-extern uint16_t htons(uint16_t hostshort);
-extern uint32_t ntohl(uint32_t netlong);
-extern uint16_t ntohs(uint16_t netshort);
-
 extern int bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
 extern int accept(int sockfd, struct sockaddr * addr, socklen_t * addrlen);
+extern int accept4(int sockfd, struct sockaddr * addr, socklen_t * addrlen, int flags);
 extern int listen(int sockfd, int backlog);
 extern int getsockname(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
 extern int getpeername(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
@@ -107,6 +84,7 @@ extern int setsockopt(int sockfd, int level, int optname, const void *optval, so
 
 extern int connect(int sockfd, const struct sockaddr * addr, socklen_t addrlen);
 extern int shutdown(int sockfd, int how);
+#endif
 
 _End_C_Header
 

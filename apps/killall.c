@@ -1,11 +1,12 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
+/**
+ * @brief killall - Send signals to processes matching name
+ *
+ * Find processes by name and send them signals.
+ *
+ * @copyright
  * This file is part of ToaruOS and is released under the terms
  * of the NCSA / University of Illinois License - see LICENSE.md
  * Copyright (C) 2018 K. Lange
- *
- * killall - Send signals to processes matching name
- *
- * Find processes by name and send them signals.
  */
 #include <fcntl.h>
 #include <stdint.h>
@@ -31,7 +32,7 @@ typedef struct process {
 #define LINE_LEN 4096
 
 p_t * build_entry(struct dirent * dent) {
-	char tmp[256];
+	char tmp[300];
 	FILE * f;
 	char line[LINE_LEN];
 
@@ -147,7 +148,7 @@ int main (int argc, char * argv[]) {
 
 	int signum = SIGTERM;
 
-	char c;
+	int c;
 	while ((c = getopt(argc, argv, "s:?")) != -1) {
 		switch (c) {
 			case 's':

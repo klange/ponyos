@@ -1,19 +1,20 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
+/**
+ * @brief A recreation of the original wizard.py, explaining
+ *        the functionality of ToaruOS and how to use the WM.
+ *
+ * @copyright
  * This file is part of ToaruOS and is released under the terms
  * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2019 K. Lange
- *
- * tutorial - A recreation of the original wizard.py, explaining
- *            the functionality of ToaruOS and how to use the WM.
+ * Copyright (C) 2019-2021 K. Lange
  */
 #include <time.h>
 
 #include <toaru/yutani.h>
 #include <toaru/graphics.h>
 #include <toaru/decorations.h>
-#include <toaru/sdf.h>
 #include <toaru/menu.h>
 #include <toaru/button.h>
+#include <toaru/text.h>
 
 #include <sys/utsname.h>
 
@@ -41,6 +42,10 @@ static sprite_t folder;
 static sprite_t package;
 static sprite_t logo;
 static sprite_t mouse_drag;
+static sprite_t cdicon;
+
+static struct TT_Font * _tt_font_thin = NULL;
+static struct TT_Font * _tt_font_bold = NULL;
 
 static int page = 0;
 
@@ -48,14 +53,13 @@ static int center(int x, int width) {
 	return (width - x) / 2;
 }
 
-static void draw_string(int y, const char * string, int font, uint32_t color, int size) {
+static void draw_string(int y, const char * string, struct TT_Font * font, uint32_t color, int size) {
 
 	struct decor_bounds bounds;
 	decor_get_bounds(window, &bounds);
 
-	int text_width = draw_sdf_string_width(string, size, font);
-
-	draw_sdf_string(ctx, center(text_width, width), bounds.top_height + 30 + y, string, size, color, font);
+	tt_set_size(font, size);
+	tt_draw_string(ctx, font, bounds.left_width + center(tt_string_width(font, string), width), bounds.top_height + 30 + y + size, string, color);
 }
 
 struct TTKButton _next_button = {0};
@@ -72,24 +76,24 @@ static void redraw(void) {
 	int offset = 0;
 
 	if (icon) {
-		offset = icon->height + 20;
-		draw_sprite(ctx, icon, center(icon->width, width), bounds.top_height + 15);
+		offset = icon->height;
+		draw_sprite(ctx, icon, bounds.left_width + center(icon->width, width), bounds.top_height + 15);
 	}
 
 	for (char ** copy_str = body_text; *copy_str; ++copy_str) {
 		if (**copy_str == '-') {
 			offset += 10;
 		} else if (**copy_str == '%') {
-			draw_string(offset, *copy_str+1, SDF_FONT_THIN, rgb(0,0,255), 16);
+			draw_string(offset, *copy_str+1, _tt_font_thin, rgb(0,0,255), 13);
 			offset += 20;
 		} else if (**copy_str == '^') {
-			draw_string(offset, *copy_str+1, SDF_FONT_THIN, rgb(120,120,120), 16);
+			draw_string(offset, *copy_str+1, _tt_font_thin, rgb(120,120,120), 16);
 			offset += 20;
 		} else if (**copy_str == '#') {
-			draw_string(offset, *copy_str+1, SDF_FONT_BOLD, rgb(0,0,0), 23);
+			draw_string(offset, *copy_str+1, _tt_font_bold, rgb(0,0,0), 20);
 			offset += 20;
 		} else {
-			draw_string(offset, *copy_str, SDF_FONT_THIN, rgb(0,0,0), 16);
+			draw_string(offset, *copy_str, _tt_font_thin, rgb(0,0,0), 13);
 			offset += 20;
 		}
 	}
@@ -174,13 +178,24 @@ static void load_page(int page) {
 			body_text[i++] = "were written by the PonyOS development team over the course of";
 			body_text[i++] = "many years, but that development team is very small. Some features";
 			body_text[i++] = "may be missing, incomplete, or unstable. Contributions in the form";
-			body_text[i++] = "of bug-fixes and new software are welcome.";
+			body_text[i++] = "of bug reports and new ports are welcome.";
 			body_text[i++] = "";
 			body_text[i++] = randomly_select_begging();
 			body_text[i++] = "%https://github.com/sponsors/klange";
 			body_text[i++] = NULL;
 			break;
 		case 2:
+			icon = &cdicon;
+			body_text[i++] = "This is a \"live CD\". You can make changes to the file system, including";
+			body_text[i++] = "installing applications, but those changes will not persist between reboots.";
+			body_text[i++] = "";
+			body_text[i++] = "If you need to enter a password, such as for the \"sudo\" utility or when";
+			body_text[i++] = "using the package manager, the default user account is \"local\" with the";
+			body_text[i++] = "password \"local\". There is also a \"guest\" account available with limited";
+			body_text[i++] = "privileges (password \"guest\"), and a \"root\" account (password \"toor\").";
+			body_text[i++] = NULL;
+			break;
+		case 3:
 			icon = &folder;
 			circle(70, 90, 60);
 			body_text[i++] = "You can explore the file system using the File Browser.";
@@ -189,7 +204,7 @@ static void load_page(int page) {
 			body_text[i++] = "the Applications menu in the upper left.";
 			body_text[i++] = NULL;
 			break;
-		case 3:
+		case 4:
 			icon = &terminal;
 			circle(70, 170, 60);
 			body_text[i++] = "PonyOS aims to provide a Unix-like environment. You can find";
@@ -199,19 +214,15 @@ static void load_page(int page) {
 			body_text[i++] = "and a featureful text editor (bim).";
 			body_text[i++] = NULL;
 			break;
-		case 4:
+		case 5:
 			icon = &package;
 			circle(70, 250, 60);
 			body_text[i++] = "Many third-party software packages have been ported to PonyOS";
 			body_text[i++] = "and are available from our package repositories. You can use the";
-			body_text[i++] = "Package Manager to install GCC, Python, Bochs, Quake, and more.";
-			body_text[i++] = "";
-			body_text[i++] = "The Package Manager will prompt you to authenticate. The default";
-			body_text[i++] = "user is 'local' with the password 'local'. There is also a 'root'";
-			body_text[i++] = "user with the password 'toor'.";
+			body_text[i++] = "Package Manager to install GCC, Doom, Quake, and more.";
 			body_text[i++] = NULL;
 			break;
-		case 5:
+		case 6:
 			icon = &mouse_drag;
 			body_text[i++] = "With PonyOS's window manager, you can drag most windows by";
 			body_text[i++] = "holding Alt, or by using the title bar. You can also resize";
@@ -221,7 +232,7 @@ static void load_page(int page) {
 			body_text[i++] = "key configuration that does not conflict with these key bindings.";
 			body_text[i++] = NULL;
 			break;
-		case 6:
+		case 7:
 			icon = NULL;
 			_next_button.title = "Exit";
 			body_text[i++] = "#That's it!";
@@ -266,11 +277,17 @@ void setup_buttons(void) {
 	_prev_button.y = ctx->height - bounds.bottom_height - BUTTON_HEIGHT - BUTTON_PADDING;
 }
 
+static void update_size(int w, int h) {
+	struct decor_bounds bounds;
+	decor_get_bounds(NULL, &bounds);
+	width  = w - bounds.width;
+	height = h - bounds.height;
+}
+
 void resize_finish(int w, int h) {
 	yutani_window_resize_accept(yctx, window, w, h);
 	reinit_graphics_yutani(ctx, window);
-	width  = w;
-	height = h;
+	update_size(w, h);
 	setup_buttons();
 	redraw();
 	yutani_window_resize_done(yctx, window);
@@ -307,6 +324,9 @@ int main(int argc, char * argv[]) {
 	}
 	init_decorations();
 
+	_tt_font_thin = tt_font_from_shm("sans-serif");
+	_tt_font_bold = tt_font_from_shm("sans-serif.bold");
+
 	background = yutani_window_create_flags(yctx, yctx->display_width, yctx->display_height,
 			YUTANI_WINDOW_FLAG_DISALLOW_RESIZE | YUTANI_WINDOW_FLAG_DISALLOW_DRAG |
 			YUTANI_WINDOW_FLAG_ALT_ANIMATION | YUTANI_WINDOW_FLAG_NO_STEAL_FOCUS);
@@ -317,10 +337,15 @@ int main(int argc, char * argv[]) {
 	flip(background_ctx);
 	yutani_flip(yctx, background);
 
+	update_size(width, height);
+
 	struct decor_bounds bounds;
 	decor_get_bounds(NULL, &bounds);
 
 	window = yutani_window_create(yctx, width + bounds.width, height + bounds.height);
+	req_center_x = yctx->display_width / 2;
+	req_center_y = yctx->display_height / 2;
+	yutani_window_move(yctx, window, req_center_x - window->width / 2, req_center_y - window->height / 2);
 
 	/* Load icons */
 	load_sprite(&logo, "/usr/share/logo_login.png");
@@ -328,12 +353,10 @@ int main(int argc, char * argv[]) {
 	load_sprite(&folder, "/usr/share/icons/48/folder.png");
 	load_sprite(&package, "/usr/share/icons/48/package.png");
 	load_sprite(&mouse_drag, "/usr/share/cursor/drag.png");
+	load_sprite(&cdicon, "/usr/share/icons/48/cd.png");
 
 	load_page(0);
 
-	req_center_x = yctx->display_width / 2;
-	req_center_y = yctx->display_height / 2;
-	yutani_window_move(yctx, window, req_center_x - window->width / 2, req_center_y - window->height / 2);
 	yutani_window_advertise_icon(yctx, window, title_str, "star");
 
 	ctx = init_graphics_yutani_double_buffer(window);
@@ -367,7 +390,7 @@ int main(int argc, char * argv[]) {
 				case YUTANI_MSG_WINDOW_FOCUS_CHANGE:
 					{
 						struct yutani_msg_window_focus_change * wf = (void*)m->data;
-						yutani_window_t * win = hashmap_get(yctx->windows, (void*)wf->wid);
+						yutani_window_t * win = hashmap_get(yctx->windows, (void*)(uintptr_t)wf->wid);
 						if (wf->wid == background->wid) {
 							yutani_focus_window(yctx, window->wid);
 						} else if (win) {

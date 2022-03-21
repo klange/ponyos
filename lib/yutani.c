@@ -1,11 +1,12 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
+/**
+ * @brief Yutani Client Library
+ *
+ * Client library for the compositing window system.
+ *
+ * @copyright
  * This file is part of ToaruOS and is released under the terms
  * of the NCSA / University of Illinois License - see LICENSE.md
  * Copyright (C) 2014-2018 K. Lange
- *
- * Yutani Client Library
- *
- * Client library for the compositing window system.
  */
 #include <string.h>
 #include <stdlib.h>
@@ -81,7 +82,7 @@ static void _handle_internal(yutani_t * y, yutani_msg_t * out) {
 		case YUTANI_MSG_WINDOW_MOVE:
 			{
 				struct yutani_msg_window_move * wm = (void *)out->data;
-				yutani_window_t * win = hashmap_get(y->windows, (void *)wm->wid);
+				yutani_window_t * win = hashmap_get(y->windows, (void *)(uintptr_t)wm->wid);
 				if (win) {
 					win->x = wm->x;
 					win->y = wm->y;
@@ -91,7 +92,7 @@ static void _handle_internal(yutani_t * y, yutani_msg_t * out) {
 		case YUTANI_MSG_RESIZE_OFFER:
 			{
 				struct yutani_msg_window_resize * wr = (void *)out->data;
-				yutani_window_t * win = hashmap_get(y->windows, (void *)wr->wid);
+				yutani_window_t * win = hashmap_get(y->windows, (void *)(uintptr_t)wr->wid);
 				if (win) {
 					win->decorator_flags &= ~(DECOR_FLAG_TILED);
 					win->decorator_flags |= (wr->flags & YUTANI_RESIZE_TILED) << 2;
@@ -265,6 +266,18 @@ void yutani_msg_buildx_window_move(yutani_msg_t * msg, yutani_wid_t wid, int32_t
 	mw->y = y;
 }
 
+void yutani_msg_buildx_window_move_relative(yutani_msg_t * msg, yutani_wid_t wid, yutani_wid_t wid2, int32_t x, int32_t y) {
+	msg->magic = YUTANI_MSG__MAGIC;
+	msg->type  = YUTANI_MSG_WINDOW_MOVE_RELATIVE;
+	msg->size  = sizeof(struct yutani_message) + sizeof(struct yutani_msg_window_move_relative);
+
+	struct yutani_msg_window_move_relative * mw = (void *)msg->data;
+
+	mw->wid_to_move = wid;
+	mw->wid_base = wid2;
+	mw->x = x;
+	mw->y = y;
+}
 
 void yutani_msg_buildx_window_stack(yutani_msg_t * msg, yutani_wid_t wid, int z) {
 	msg->magic = YUTANI_MSG__MAGIC;
@@ -338,7 +351,7 @@ void yutani_msg_buildx_window_resize(yutani_msg_t * msg, uint32_t type, yutani_w
 }
 
 
-void yutani_msg_buildx_window_advertise(yutani_msg_t * msg, yutani_wid_t wid, uint32_t flags, uint16_t * offsets, size_t length, char * data) {
+void yutani_msg_buildx_window_advertise(yutani_msg_t * msg, yutani_wid_t wid, uint32_t flags, uint32_t icon, uint32_t bufid, uint32_t width, uint32_t height, size_t length, char * data) {
 	msg->magic = YUTANI_MSG__MAGIC;
 	msg->type  = YUTANI_MSG_WINDOW_ADVERTISE;
 	msg->size  = sizeof(struct yutani_message) + sizeof(struct yutani_msg_window_advertise) + length;
@@ -348,11 +361,10 @@ void yutani_msg_buildx_window_advertise(yutani_msg_t * msg, yutani_wid_t wid, ui
 	mw->wid = wid;
 	mw->flags = flags;
 	mw->size = length;
-	if (offsets) {
-		memcpy(mw->offsets, offsets, sizeof(uint16_t)*5);
-	} else {
-		memset(mw->offsets, 0, sizeof(uint16_t)*5);
-	}
+	mw->icon = icon;
+	mw->bufid = bufid;
+	mw->width = width;
+	mw->height = height;
 	if (data) {
 		memcpy(mw->strings, data, mw->size);
 	}
@@ -573,9 +585,10 @@ yutani_window_t * yutani_window_create_flags(yutani_t * y, int width, int height
 	win->y = 0;
 	win->user_data = NULL;
 	win->ctx = y;
+	win->mouse_state = -1;
 	free(mm);
 
-	hashmap_set(y->windows, (void*)win->wid, win);
+	hashmap_set(y->windows, (void*)(uintptr_t)win->wid, win);
 
 	char key[1024];
 	YUTANI_SHMKEY(y->server_ident, key, 1024, win);
@@ -635,7 +648,7 @@ void yutani_close(yutani_t * y, yutani_window_t * win) {
 		shm_release(key);
 	}
 
-	hashmap_remove(y->windows, (void*)win->wid);
+	hashmap_remove(y->windows, (void*)(uintptr_t)win->wid);
 	free(win);
 }
 
@@ -647,6 +660,17 @@ void yutani_close(yutani_t * y, yutani_window_t * win) {
 void yutani_window_move(yutani_t * yctx, yutani_window_t * window, int x, int y) {
 	yutani_msg_buildx_window_move_alloc(m);
 	yutani_msg_buildx_window_move(m, window->wid, x, y);
+	yutani_msg_send(yctx, m);
+}
+
+/**
+ * yutani_window_move_relative
+ *
+ * Move a window to a location based on the local coordinate space of a base window.
+ */
+void yutani_window_move_relative(yutani_t * yctx, yutani_window_t * window, yutani_window_t * base, int x, int y) {
+	yutani_msg_buildx_window_move_relative_alloc(m);
+	yutani_msg_buildx_window_move_relative(m, window->wid, base->wid, x, y);
 	yutani_msg_send(yctx, m);
 }
 
@@ -751,8 +775,8 @@ void yutani_window_resize_done(yutani_t * yctx, yutani_window_t * window) {
 void yutani_window_advertise(yutani_t * yctx, yutani_window_t * window, char * name) {
 
 	uint32_t flags = 0; /* currently, no client flags */
-	uint16_t offsets[5] = {0,0,0,0,0};
 	uint32_t length = 0;
+	uint32_t icon = 0;
 	char * strings;
 
 	if (!name) {
@@ -761,15 +785,11 @@ void yutani_window_advertise(yutani_t * yctx, yutani_window_t * window, char * n
 	} else {
 		length = strlen(name) + 1;
 		strings = name;
-		/* All the other offsets will point to null characters */
-		offsets[1] = strlen(name);
-		offsets[2] = strlen(name);
-		offsets[3] = strlen(name);
-		offsets[4] = strlen(name);
+		icon = strlen(name);
 	}
 
 	yutani_msg_buildx_window_advertise_alloc(m, length);
-	yutani_msg_buildx_window_advertise(m, window->wid, flags, offsets, length, strings);
+	yutani_msg_buildx_window_advertise(m, window->wid, flags, icon, 0, 0, 0, length, strings);
 	yutani_msg_send(yctx, m);
 }
 
@@ -784,28 +804,21 @@ void yutani_window_advertise(yutani_t * yctx, yutani_window_t * window, char * n
 void yutani_window_advertise_icon(yutani_t * yctx, yutani_window_t * window, char * name, char * icon) {
 
 	uint32_t flags = 0; /* currently no client flags */
-	uint16_t offsets[5] = {0,0,0,0,0};
+	uint32_t iconx = 0;
 	uint32_t length = strlen(name) + strlen(icon) + 2;
 	char * strings = malloc(length);
 
 	if (name) {
 		memcpy(&strings[0], name, strlen(name)+1);
-		offsets[0] = 0;
-		offsets[1] = strlen(name);
-		offsets[2] = strlen(name);
-		offsets[3] = strlen(name);
-		offsets[4] = strlen(name);
+		iconx = strlen(name);
 	}
 	if (icon) {
-		memcpy(&strings[offsets[1]+1], icon, strlen(icon)+1);
-		offsets[1] = strlen(name)+1;
-		offsets[2] = strlen(name)+1+strlen(icon);
-		offsets[3] = strlen(name)+1+strlen(icon);
-		offsets[4] = strlen(name)+1+strlen(icon);
+		memcpy(&strings[strlen(name)+1], icon, strlen(icon)+1);
+		iconx = strlen(name)+1;
 	}
 
 	yutani_msg_buildx_window_advertise_alloc(m, length);
-	yutani_msg_buildx_window_advertise(m, window->wid, flags, offsets, length, strings);
+	yutani_msg_buildx_window_advertise(m, window->wid, flags, iconx, 0, 0, 0, length, strings);
 	yutani_msg_send(yctx, m);
 	free(strings);
 }
@@ -956,9 +969,12 @@ void yutani_window_warp_mouse(yutani_t * yctx, yutani_window_t * window, int32_t
  * TODO: We should add a way to use client-provided cursor textures.
  */
 void yutani_window_show_mouse(yutani_t * yctx, yutani_window_t * window, int32_t show_mouse) {
-	yutani_msg_buildx_window_show_mouse_alloc(m);
-	yutani_msg_buildx_window_show_mouse(m, window->wid, show_mouse);
-	yutani_msg_send(yctx, m);
+	if (window->mouse_state != show_mouse) {
+		window->mouse_state = show_mouse;
+		yutani_msg_buildx_window_show_mouse_alloc(m);
+		yutani_msg_buildx_window_show_mouse(m, window->wid, show_mouse);
+		yutani_msg_send(yctx, m);
+	}
 }
 
 /**

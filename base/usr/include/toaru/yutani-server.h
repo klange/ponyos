@@ -1,10 +1,10 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
+/**
+ * @brief Internal definitions used by the Yutani compositor.
+ *
+ * @copyright
  * This file is part of ToaruOS and is released under the terms
  * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2013-2018 K. Lange
- *
- * Internal definitions used by the Yutani compositor
- * and extension plugins.
+ * Copyright (C) 2013-2021 K. Lange
  */
 #pragma once
 
@@ -52,6 +52,8 @@ typedef enum {
 	/* Dialog animations, faster than the fades */
 	YUTANI_EFFECT_SQUEEZE_IN,
 	YUTANI_EFFECT_SQUEEZE_OUT,
+
+	YUTANI_EFFECT_DISAPPEAR,
 } yutani_effect;
 
 /* Animation lengths */
@@ -63,6 +65,7 @@ static int yutani_animation_lengths[] = {
 	0,   /* Unminimized */
 	100, /* Squeeze in */
 	100, /* Squeeze out */
+	10,  /* Disappear */
 };
 
 static int yutani_is_closing_animation[] = {
@@ -72,6 +75,7 @@ static int yutani_is_closing_animation[] = {
 	0,
 	0,
 	0,
+	1,
 	1,
 };
 
@@ -115,20 +119,20 @@ typedef struct YutaniServerWindow {
 	uint8_t * newbuffer;
 
 	/* Connection that owns this window */
-	uint32_t owner;
+	uintptr_t owner;
 
 	/* Rotation of windows XXX */
 	int16_t  rotation;
 
 	/* Client advertisements */
 	uint32_t client_flags;
-	uint16_t client_offsets[5];
+	uint32_t client_icon;
 	uint32_t client_length;
 	char *   client_strings;
 
 	/* Window animations */
-	int anim_mode;
-	uint32_t anim_start;
+	uint64_t anim_mode;
+	uint64_t anim_start;
 
 	/* Alpha shaping threshold */
 	int alpha_threshold;
@@ -154,6 +158,9 @@ typedef struct YutaniServerWindow {
 
 	/* Window opacity */
 	int opacity;
+
+	/* Window is hidden? */
+	int hidden;
 } yutani_server_window_t;
 
 typedef struct YutaniGlobals {
@@ -196,11 +203,12 @@ typedef struct YutaniGlobals {
 	 */
 	yutani_server_window_t * bottom_z;
 	list_t * mid_zs;
+	list_t * menu_zs;
+	list_t * overlay_zs;
 	yutani_server_window_t * top_z;
 
 	/* Damage region list */
 	list_t * update_list;
-	volatile int update_list_lock;
 
 	/* Mouse cursors */
 	sprite_t mouse_sprite;
@@ -209,6 +217,8 @@ typedef struct YutaniGlobals {
 	sprite_t mouse_sprite_resize_h;
 	sprite_t mouse_sprite_resize_da;
 	sprite_t mouse_sprite_resize_db;
+	sprite_t mouse_sprite_point;
+	sprite_t mouse_sprite_ibeam;
 	int current_cursor;
 
 	/* Server backend communication identifier */
@@ -256,13 +266,10 @@ typedef struct YutaniGlobals {
 	time_t start_time;
 	suseconds_t start_subtime;
 
-	/* Basic lock to prevent redraw thread and communication thread interference */
-	volatile int redraw_lock;
-
 	/* Pointer to last hovered window to allow exit events */
 	yutani_server_window_t * old_hover_window;
 
-	/* Key bindigns */
+	/* Key bindings */
 	hashmap_t * key_binds;
 
 	/* Windows to remove after the end of the rendering pass */
@@ -301,17 +308,21 @@ typedef struct YutaniGlobals {
 
 	int reload_renderer;
 	uint8_t active_modifiers;
+
+	uint64_t resize_release_time;
+	int32_t resizing_init_w;
+	int32_t resizing_init_h;
 } yutani_globals_t;
 
 struct key_bind {
-	unsigned int owner;
+	uintptr_t owner;
 	int response;
 };
 
 /* Exported functions for plugins */
 extern int yutani_window_is_top(yutani_globals_t * yg, yutani_server_window_t * window);
 extern int yutani_window_is_bottom(yutani_globals_t * yg, yutani_server_window_t * window);
-extern uint32_t yutani_time_since(yutani_globals_t * yg, uint32_t start_time);
+extern uint64_t yutani_time_since(yutani_globals_t * yg, uint64_t start_time);
 extern void yutani_window_to_device(yutani_server_window_t * window, int32_t x, int32_t y, int32_t * out_x, int32_t * out_y);
 extern void yutani_device_to_window(yutani_server_window_t * window, int32_t x, int32_t y, int32_t * out_x, int32_t * out_y);
 extern uint32_t yutani_color_for_wid(yutani_wid_t wid);

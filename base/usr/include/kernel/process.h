@@ -1,162 +1,277 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
- */
-
 #pragma once
 
-#include <kernel/signal.h>
-#include <kernel/task.h>
+#include <stdint.h>
+#include <kernel/types.h>
+#include <kernel/vfs.h>
+#include <kernel/tree.h>
+#include <kernel/list.h>
+#include <kernel/spinlock.h>
+#include <sys/types.h>
+#include <sys/time.h>
+#include <sys/signal_defs.h>
 
-#include <toaru/tree.h>
+#ifdef __x86_64__
+#include <kernel/arch/x86_64/pml.h>
+#endif
 
-#define KERNEL_STACK_SIZE 0x8000
+#ifdef __aarch64__
+#include <kernel/arch/aarch64/pml.h>
+#endif
 
-typedef signed int    pid_t;
-typedef unsigned int  user_t;
-typedef unsigned int  status_t;
 
-#define USER_ROOT_UID (user_t)0
+#define PROC_REUSE_FDS 0x0001
+#define KERNEL_STACK_SIZE 0x9000
+#define USER_ROOT_UID 0
 
-/* Unix waitpid() options */
-enum wait_option{
-	WCONTINUED,
-	WNOHANG,
-	WUNTRACED
-};
+typedef struct {
+	intptr_t refcount;
+	union PML * directory;
+	spin_lock_t lock;
+} page_directory_t;
 
-/* x86 task */
+typedef struct {
+	uintptr_t sp;        /* 0 */
+	uintptr_t bp;        /* 8 */
+	uintptr_t ip;        /* 16 */
+	uintptr_t tls_base;  /* 24 */
+#ifdef __x86_64__
+	uintptr_t saved[5]; /* XXX Arch dependent */
+#elif defined(__aarch64__)
+	uintptr_t saved[32];
+#endif
+	/**
+	 * 32: rbx
+	 * 40: r12
+	 * 48: r13
+	 * 56: r14
+	 * 64: r15
+	 */
+} kthread_context_t;
+
 typedef struct thread {
-	uintptr_t  esp; /* Stack Pointer */
-	uintptr_t  ebp; /* Base Pointer */
-	uintptr_t  eip; /* Instruction Pointer */
-
-	uint8_t    fpu_enabled;
-	uint8_t    fp_regs[512];
-
-	uint8_t    padding[32]; /* I don't know */
-
-	page_directory_t * page_directory; /* Page Directory */
-	uintptr_t  gsbase;
-
+	kthread_context_t context;
+	uint8_t fp_regs[512] __attribute__((aligned(16)));
+	page_directory_t * page_directory;
 } thread_t;
 
-/* Portable image struct */
 typedef struct image {
-	size_t    size;        /* Image size */
-	uintptr_t entry;       /* Binary entry point */
-	uintptr_t heap;        /* Heap pointer */
-	uintptr_t heap_actual; /* Actual heap location */
-	uintptr_t stack;       /* Process kernel stack */
-	uintptr_t user_stack;  /* User stack */
-	uintptr_t start;
+	uintptr_t entry;
+	uintptr_t heap;
+	uintptr_t stack;
 	uintptr_t shm_heap;
-	volatile int lock[2];
+	uintptr_t userstack;
+	spin_lock_t lock;
 } image_t;
 
-/* Resizable descriptor table */
-typedef struct descriptor_table {
+typedef struct file_descriptors {
 	fs_node_t ** entries;
-	uint64_t  *  offsets;
-	int       *  modes;
-	size_t       length;
-	size_t       capacity;
-	size_t       refs;
+	uint64_t * offsets;
+	int * modes;
+	size_t length;
+	size_t capacity;
+	size_t refs;
+	spin_lock_t lock;
 } fd_table_t;
 
-/* XXX */
-#define SIG_COUNT 10
+#define PROC_FLAG_IS_TASKLET 0x01
+#define PROC_FLAG_FINISHED   0x02
+#define PROC_FLAG_STARTED    0x04
+#define PROC_FLAG_RUNNING    0x08
+#define PROC_FLAG_SLEEP_INT  0x10
+#define PROC_FLAG_SUSPENDED  0x20
 
-/* Signal Table */
-typedef struct signal_table {
-	uintptr_t functions[NUMSIGNALS+1];
-} sig_table_t;
+#define PROC_FLAG_TRACE_SYSCALLS     0x40
+#define PROC_FLAG_TRACE_SIGNALS      0x80
 
-/* Portable process struct */
 typedef struct process {
-	pid_t         id;                /* Process ID (pid) */
-	char *        name;              /* Process Name */
-	char *        description;       /* Process description */
-	user_t        user;              /* Effective user */
-	user_t        real_user;         /* Real user ID */
-	int           mask;              /* Umask */
+	pid_t id;    /* PID */
+	pid_t group; /* thread group */
+	pid_t job;   /* tty job */
+	pid_t session; /* tty session */
+	int status; /* status code */
+	unsigned int flags; /* finished, started, running, isTasklet */
+	int owner;
 
-	char **       cmdline;
+	uid_t user;
+	uid_t real_user;
 
-	pid_t         group;             /* Process thread group */
-	pid_t         job;               /* Process job group */
-	pid_t         session;           /* Session group */
+	gid_t user_group;
+	gid_t real_user_group;
 
-	thread_t      thread;            /* Associated task information */
-	tree_node_t * tree_entry;        /* Process Tree Entry */
-	image_t       image;             /* Binary image information */
-	fs_node_t *   wd_node;           /* Working directory VFS node */
-	char *        wd_name;           /* Working directory path name */
+	unsigned int mask;
+
+	char * name;
+	char * description;
+	char ** cmdline;
+
+	char * wd_name;
+	fs_node_t * wd_node;
 	fd_table_t *  fds;               /* File descriptor table */
-	status_t      status;            /* Process status */
-	sig_table_t   signals;           /* Signal table */
-	uint8_t       finished;          /* Status indicator */
-	uint8_t       started;
-	uint8_t       running;
-	struct regs * syscall_registers; /* Registers at interrupt */
-	list_t *      wait_queue;
-	list_t *      shm_mappings;      /* Shared memory chunk mappings */
-	list_t *      signal_queue;      /* Queued signals */
-	thread_t      signal_state;
-	char *        signal_kstack;
-	node_t        sched_node;
-	node_t        sleep_node;
-	node_t *      timed_sleep_node;
-	uint8_t       is_tasklet;
-	volatile uint8_t sleep_interrupted;
-	list_t *      node_waits;
-	int           awoken_index;
-	node_t *      timeout_node;
+
+	tree_node_t * tree_entry;
+	struct regs * syscall_registers;
+	struct regs * interrupt_registers;
+	list_t * wait_queue;
+	list_t * shm_mappings;
+	list_t * node_waits;
+	list_t * signal_queue;
+
+	node_t sched_node;
+	node_t sleep_node;
+	node_t * timed_sleep_node;
+	node_t * timeout_node;
+
 	struct timeval start;
-	uint8_t       suspended;
+	int awoken_index;
+
+	thread_t thread;
+	thread_t signal_state;
+	image_t image;
+
+	spin_lock_t sched_lock;
+
+	uintptr_t signals[NUMSIGNALS+1];
+
+	int supplementary_group_count;
+	gid_t * supplementary_group_list;
+
+	/* Process times */
+	uint64_t time_prev;         /* user time from previous update of usage[] */
+	uint64_t time_total;        /* user time */
+	uint64_t time_sys;          /* system time */
+	uint64_t time_in;           /* tsc stamp of when this process last entered the running state */
+	uint64_t time_switch;       /* tsc stamp of when this process last started doing system things */
+	uint64_t time_children;     /* sum of user times from waited-for children */
+	uint64_t time_sys_children; /* sum of sys times from waited-for children */
+	uint16_t usage[4];          /* four permille samples over some period (currently 4Hz) */
+
+	/* Tracing */
+	pid_t tracer;
+	spin_lock_t wait_lock;
+	list_t * tracees;
+
+	/* Syscall restarting */
+	long interrupted_system_call;
 } process_t;
 
 typedef struct {
-	unsigned long end_tick;
-	unsigned long end_subtick;
+	uint64_t end_tick;
+	uint64_t end_subtick;
 	process_t * process;
 	int is_fswait;
 } sleeper_t;
 
+struct ProcessorLocal {
+	/**
+	 * @brief The running process on this core.
+	 *
+	 * The current_process is a pointer to the process struct for
+	 * the process, userspace-thread, or kernel tasklet currently
+	 * executing. Once the scheduler is active, this should always
+	 * be set. If a core is not currently doing, its current_process
+	 * should be the core's idle task.
+	 *
+	 * Because a process's data can be modified by nested interrupt
+	 * contexts, we mark them as volatile to avoid making assumptions
+	 * based on register-stored cached values.
+	 */
+	volatile process_t * current_process;
+	/**
+	 * @brief Idle loop.
+	 *
+	 * This is a special kernel tasklet that sits in a loop
+	 * waiting for an interrupt from a preemption source or hardware
+	 * device. Its context should never be saved, it should never
+	 * be added to a sleep queue, and it should be scheduled whenever
+	 * there is nothing else to do.
+	 */
+	process_t * kernel_idle_task;
+	/**
+	 * @brief Process this core was last scheduled to run.
+	 */
+	volatile process_t * previous_process;
+
+	int cpu_id;
+	union PML * current_pml;
+
+	struct regs * interrupt_registers;
+
+#ifdef __x86_64__
+	int lapic_id;
+	/* Processor information loaded at startup. */
+	int  cpu_model;
+	int  cpu_family;
+	char cpu_model_name[48];
+	const char * cpu_manufacturer;
+#endif
+
+#ifdef __aarch64__
+	uintptr_t sp_el1;
+	uint64_t  midr;
+#endif
+};
+
+extern struct ProcessorLocal processor_local_data[];
+extern int processor_count;
+
+/**
+ * @brief Core-local kernel data.
+ *
+ * x86-64: Marking this as __seg_gs makes it %gs-base-relative.
+ * aarch64: We shove this in x18 and ref off of that; -ffixed-x18 and don't forget to reload it from TPIDR_EL1
+ */
+#ifdef __x86_64__
+static struct ProcessorLocal __seg_gs * const this_core = 0;
+#else
+register struct ProcessorLocal * this_core asm("x18");
+#endif
+
+extern unsigned long process_append_fd(process_t * proc, fs_node_t * node);
+extern long process_move_fd(process_t * proc, long src, long dest);
 extern void initialize_process_tree(void);
-extern process_t * spawn_process(volatile process_t * parent, int reuse_fds);
-extern void debug_print_process_tree(void);
-extern process_t * spawn_init(void);
-extern process_t * spawn_kidle(void);
-extern void set_process_environment(process_t * proc, page_directory_t * directory);
-extern void make_process_ready(process_t * proc);
-extern uint8_t process_available(void);
-extern process_t * next_ready_process(void);
-extern uint32_t process_append_fd(process_t * proc, fs_node_t * node);
 extern process_t * process_from_pid(pid_t pid);
-extern void delete_process(process_t * proc);
-process_t * process_get_parent(process_t * process);
-extern uint32_t process_move_fd(process_t * proc, int src, int dest);
-extern int process_is_ready(process_t * proc);
 
-extern void wakeup_sleepers(unsigned long seconds, unsigned long subseconds);
-extern void sleep_until(process_t * process, unsigned long seconds, unsigned long subseconds);
-
-extern volatile process_t * current_process;
-extern process_t * kernel_idle_task;
-extern list_t * process_list;
-
-extern int process_wait_nodes(process_t * process,fs_node_t * nodes[], int timeout);
+extern void process_delete(process_t * proc);
+extern void make_process_ready(volatile process_t * proc);
+extern volatile process_t * next_ready_process(void);
+extern int wakeup_queue(list_t * queue);
+extern int wakeup_queue_interrupted(list_t * queue);
+extern int sleep_on(list_t * queue);
+extern int sleep_on_unlocking(list_t * queue, spin_lock_t * release);
 extern int process_alert_node(process_t * process, void * value);
+extern void sleep_until(process_t * process, unsigned long seconds, unsigned long subseconds);
+extern void switch_task(uint8_t reschedule);
+extern int process_wait_nodes(process_t * process,fs_node_t * nodes[], int timeout);
+extern process_t * process_get_parent(process_t * process);
+extern int process_is_ready(process_t * proc);
+extern void wakeup_sleepers(unsigned long seconds, unsigned long subseconds);
+extern void task_exit(int retval);
+extern __attribute__((noreturn)) void switch_next(void);
 extern int process_awaken_from_fswait(process_t * process, int index);
-
-typedef void (*tasklet_t) (void *, char *);
-extern int create_kernel_tasklet(tasklet_t tasklet, char * name, void * argp);
-
-extern void release_directory(page_directory_t * dir);
-extern void release_directory_for_exec(page_directory_t * dir);
-
-extern void cleanup_process(process_t * proc, int retval);
-extern void reap_process(process_t * proc);
+extern void process_awaken_signal(process_t * process);
+extern void process_release_directory(page_directory_t * dir);
+extern process_t * spawn_worker_thread(void (*entrypoint)(void * argp), const char * name, void * argp);
+extern pid_t fork(void);
+extern pid_t clone(uintptr_t new_stack, uintptr_t thread_func, uintptr_t arg);
 extern int waitpid(int pid, int * status, int options);
+extern int exec(const char * path, int argc, char *const argv[], char *const env[], int interp_depth);
+extern void update_process_usage(uint64_t clock_ticks, uint64_t perf_scale);
 
-extern int is_valid_process(process_t * process);
+extern tree_t * process_tree;  /* Parent->Children tree */
+extern list_t * process_list;  /* Flat storage */
+extern list_t * process_queue; /* Ready queue */
+extern list_t * sleep_queue;
+
+extern void arch_enter_tasklet(void);
+extern __attribute__((noreturn)) void arch_resume_user(void);
+extern __attribute__((noreturn)) void arch_restore_context(volatile thread_t * buf);
+extern __attribute__((returns_twice)) int arch_save_context(volatile thread_t * buf);
+extern void arch_restore_floating(process_t * proc);
+extern void arch_save_floating(process_t * proc);
+extern void arch_set_kernel_stack(uintptr_t);
+extern void arch_enter_user(uintptr_t entrypoint, int argc, char * argv[], char * envp[], uintptr_t stack);
+__attribute__((noreturn))
+extern void arch_enter_signal_handler(uintptr_t,int,struct regs*);
+extern void arch_wakeup_others(void);
+extern void arch_return_from_signal_handler(struct regs *r);
 

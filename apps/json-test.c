@@ -1,3 +1,11 @@
+/**
+ * @brief Test suite for the JSON library.
+ *
+ * @copyright
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2019-2020 K. Lange
+ */
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -24,19 +32,19 @@ int main(int argc, char * argv[]) {
 	{
 		Value * result = json_parse("-123");
 		assert(result && result->type == JSON_TYPE_NUMBER);
-		assert(fabs(result->number - (-123.0) < 0.0001));
+		assert(fabs(result->number - (-123.0)) < 0.0001);
 	}
 
 	{
 		Value * result = json_parse("2e3");
 		assert(result && result->type == JSON_TYPE_NUMBER);
-		assert(fabs(result->number - (2000.0) < 0.0001));
+		assert(fabs(result->number - (2000.0)) < 0.0001);
 	}
 
 	{
 		Value * result = json_parse("0.124");
 		assert(result && result->type == JSON_TYPE_NUMBER);
-		assert(fabs(result->number - (0.124) < 0.0001));
+		assert(fabs(result->number - (0.124)) < 0.0001);
 	}
 
 	{

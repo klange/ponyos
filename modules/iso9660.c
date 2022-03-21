@@ -1,21 +1,22 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
+/**
+ * @file modules/iso9660.c
+ * @brief ISO9660 "High Sierra" CD file system driver.
+ * @package x86_64
+ *
+ * @copyright
  * This file is part of ToaruOS and is released under the terms
  * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2016-2018 K. Lange
- *
- * ISO 9660 filesystem driver (for CDs)
+ * Copyright (C) 2016-2021 K. Lange
  */
-#include <kernel/system.h>
 #include <kernel/types.h>
-#include <kernel/fs.h>
-#include <kernel/logging.h>
+#include <kernel/vfs.h>
+#include <kernel/printf.h>
 #include <kernel/module.h>
 #include <kernel/args.h>
-#include <kernel/printf.h>
 #include <kernel/tokenize.h>
-
-#include <toaru/list.h>
-#include <toaru/hashmap.h>
+#include <kernel/time.h>
+#include <kernel/list.h>
+#include <kernel/hashmap.h>
 
 #define ISO_SECTOR_SIZE 2048
 
@@ -139,16 +140,15 @@ static void file_from_dir_entry(iso_9660_fs_t * this, size_t sector, iso_9660_di
 
 #define CACHE_SIZE 64
 
-static void read_sector(iso_9660_fs_t * this, uint32_t sector_id, char * buffer) {
+static int read_sector(iso_9660_fs_t * this, uint32_t sector_id, char * buffer) {
 	if (this->cache) {
-		void * sector_id_v = (void *)sector_id;
+		void * sector_id_v = (void *)(uintptr_t)sector_id;
 		if (hashmap_has(this->cache, sector_id_v)) {
 			memcpy(buffer,hashmap_get(this->cache, sector_id_v), this->block_size);
-
 			node_t * me = list_find(this->lru, sector_id_v);
 			list_delete(this->lru, me);
 			list_append(this->lru, me);
-
+			return 0;
 		} else {
 			if (this->lru->length > CACHE_SIZE) {
 				node_t * l = list_dequeue(this->lru);
@@ -156,14 +156,20 @@ static void read_sector(iso_9660_fs_t * this, uint32_t sector_id, char * buffer)
 				hashmap_remove(this->cache, l->value);
 				free(l);
 			}
-			read_fs(this->block_device, sector_id * this->block_size, this->block_size, (uint8_t *)buffer);
+			int result = read_fs(this->block_device, sector_id * this->block_size, this->block_size, (uint8_t *)buffer);
+			if (result < 0) return result;
+			if (result == 0) return 1;
 			char * buf = malloc(this->block_size);
 			memcpy(buf, buffer, this->block_size);
 			hashmap_set(this->cache, sector_id_v, buf);
 			list_insert(this->lru, sector_id_v);
+			return 0;
 		}
 	} else {
-		read_fs(this->block_device, sector_id * this->block_size, this->block_size, (uint8_t *)buffer);
+		int result = read_fs(this->block_device, sector_id * this->block_size, this->block_size, (uint8_t *)buffer);
+		if (result < 0) return result;
+		if (result == 0) return 1;
+		return 0;
 	}
 }
 
@@ -184,20 +190,20 @@ static void close_iso(fs_node_t *node) {
 	/* Nothing to do here */
 }
 
-static struct dirent * readdir_iso(fs_node_t *node, uint32_t index) {
+static struct dirent * readdir_iso(fs_node_t *node, unsigned long index) {
 	if (index == 0) {
 		struct dirent * out = malloc(sizeof(struct dirent));
 		memset(out, 0x00, sizeof(struct dirent));
-		out->ino = 0;
-		strcpy(out->name, ".");
+		out->d_ino = 0;
+		strcpy(out->d_name, ".");
 		return out;
 	}
 
 	if (index == 1) {
 		struct dirent * out = malloc(sizeof(struct dirent));
 		memset(out, 0x00, sizeof(struct dirent));
-		out->ino = 0;
-		strcpy(out->name, "..");
+		out->d_ino = 0;
+		strcpy(out->d_name, "..");
 		return out;
 	}
 
@@ -205,8 +211,6 @@ static struct dirent * readdir_iso(fs_node_t *node, uint32_t index) {
 	char * buffer = malloc(this->block_size);
 	read_sector(this, node->inode, buffer);
 	iso_9660_directory_entry_t * root_entry = (iso_9660_directory_entry_t *)(buffer + node->impl);
-
-	debug_print(INFO, "[iso] Reading directory for readdir; sector = %d, offset = %d", node->inode, node->impl);
 
 	uint8_t * root_data = malloc(root_entry->extent_length_LSB);
 	uint8_t * offset = root_data;
@@ -223,8 +227,6 @@ static struct dirent * readdir_iso(fs_node_t *node, uint32_t index) {
 		}
 	}
 
-	debug_print(INFO, "[iso] Done, want index = %d", index);
-
 	/* Examine directory */
 	offset = root_data;
 
@@ -235,7 +237,6 @@ static struct dirent * readdir_iso(fs_node_t *node, uint32_t index) {
 	while (1) {
 		iso_9660_directory_entry_t * dir = (iso_9660_directory_entry_t *)offset;
 		if (dir->length == 0) {
-			debug_print(INFO, "dir->length = %d", dir->length);
 			if ((size_t)(offset - root_data) < root_entry->extent_length_LSB) {
 				offset += 1; // this->block_size - ((uintptr_t)offset % this->block_size);
 				goto try_again;
@@ -243,21 +244,18 @@ static struct dirent * readdir_iso(fs_node_t *node, uint32_t index) {
 			break;
 		}
 		if (!(dir->flags & FLAG_HIDDEN)) {
-			debug_print(INFO, "[iso] Found file %d", i);
 			if (i == index) {
 				file_from_dir_entry(this, (root_entry->extent_start_LSB)+(offset - root_data)/this->block_size, dir, (offset - root_data) % this->block_size, out);
-				memcpy(&dirent->name, out->name, strlen(out->name)+1);
-				dirent->ino = out->inode;
+				memcpy(&dirent->d_name, out->name, strlen(out->name)+1);
+				dirent->d_ino = out->inode;
 				goto cleanup;
 			}
 			i += 1;
 		}
 		offset += dir->length;
 try_again:
-		if ((size_t)(offset - root_data) > root_entry->extent_length_LSB) break;
+		if ((size_t)(offset - root_data) >= root_entry->extent_length_LSB) break;
 	}
-
-	debug_print(INFO, "offset = %x; root_data = %x; extent = %x", offset, root_data, root_entry->extent_length_LSB);
 
 	free(dirent);
 	dirent = NULL;
@@ -269,7 +267,7 @@ cleanup:
 	return dirent;
 }
 
-static uint32_t read_iso(fs_node_t * node, uint64_t offset, uint32_t size, uint8_t * buffer) {
+static ssize_t read_iso(fs_node_t * node, off_t offset, size_t size, uint8_t * buffer) {
 	iso_9660_fs_t * this = node->device;
 	char * tmp = malloc(this->block_size);
 	read_sector(this, node->inode, tmp);
@@ -401,14 +399,13 @@ static void file_from_dir_entry(iso_9660_fs_t * this, size_t sector, iso_9660_di
 	fs->close = close_iso;
 }
 
-static fs_node_t * iso_fs_mount(char * device, char * mount_path) {
+static fs_node_t * iso_fs_mount(const char * device, const char * mount_path) {
 	char * arg = strdup(device);
 	char * argv[10];
 	int argc = tokenize(arg, ",", argv);
 
 	fs_node_t * dev = kopen(argv[0], 0);
 	if (!dev) {
-		debug_print(ERROR, "failed to open %s", device);
 		return NULL;
 	}
 
@@ -417,13 +414,10 @@ static fs_node_t * iso_fs_mount(char * device, char * mount_path) {
 	for (int i = 1; i < argc; ++i) {
 		if (!strcmp(argv[i],"nocache")) {
 			cache = 0;
-		} else {
-			debug_print(WARNING, "Unrecognized option to iso driver: %s", argv[i]);
 		}
 	}
 
 	if (!dev) {
-		debug_print(ERROR, "failed to open %s", argv[0]);
 		free(arg);
 		return NULL;
 	}
@@ -433,61 +427,42 @@ static fs_node_t * iso_fs_mount(char * device, char * mount_path) {
 	this->block_size = ISO_SECTOR_SIZE;
 	if (cache) {
 		this->cache = hashmap_create_int(10);
-		this->lru = list_create();
+		this->lru = list_create("iso9660 lru cache", this);
 	} else {
 		this->cache = NULL;
 	}
 
 	/* Probably want to put a block cache on this like EXT2 driver does; or do that in the ATAPI layer... */
 
-	debug_print(WARNING, "ISO 9660 file system driver mounting %s to %s", device, mount_path);
-
 	/* Read the volume descriptors */
 	uint8_t * tmp = malloc(ISO_SECTOR_SIZE);
 	int i = 0x10;
 	int found = 0;
 	while (1) {
-		read_sector(this,i,(char*)tmp);
+		if (read_sector(this,i,(char*)tmp)) break;
 		if (tmp[0] == 0x00) {
-			debug_print(WARNING, " Boot Record");
+			//debug_print(WARNING, " Boot Record");
 		} else if (tmp[0] == 0x01) {
-			debug_print(WARNING, " Primary Volume Descriptor");
+			//debug_print(WARNING, " Primary Volume Descriptor");
 			found = 1;
 			break;
 		} else if (tmp[0] == 0x02) {
-			debug_print(WARNING, " Secondary Volume Descriptor");
+			//debug_print(WARNING, " Secondary Volume Descriptor");
 		} else if (tmp[0] == 0x03) {
-			debug_print(WARNING, " Volume Partition Descriptor");
+			//debug_print(WARNING, " Volume Partition Descriptor");
 		}
 		if (tmp[0] == 0xFF) break;
 		i++;
 	}
 
 	if (!found) {
-		debug_print(WARNING, "No primary volume descriptor?");
+		//debug_print(WARNING, "No primary volume descriptor?");
 		free(arg);
 		return NULL;
 	}
 
 	iso_9660_volume_descriptor_t * root = (iso_9660_volume_descriptor_t *)tmp;
-
-	debug_print(WARNING, " Volume space:    %d", root->volume_space_LSB);
-	debug_print(WARNING, " Volume set:      %d", root->volume_set_LSB);
-	debug_print(WARNING, " Volume seq:      %d", root->volume_seq_LSB);
-	debug_print(WARNING, " Block size:      %d", root->logical_block_size_LSB);
-	debug_print(WARNING, " Path table size: %d", root->path_table_size_LSB);
-	debug_print(WARNING, " Path table loc:  %d", root->path_table_LSB);
-
 	iso_9660_directory_entry_t * root_entry = (iso_9660_directory_entry_t *)&root->root;
-
-	debug_print(WARNING, "ISO root info:");
-	debug_print(WARNING, " Entry len:  %d", root_entry->length);
-	debug_print(WARNING, " File start: %d", root_entry->extent_start_LSB);
-	debug_print(WARNING, " File len:   %d", root_entry->extent_length_LSB);
-	debug_print(WARNING, " Is a directory: %s", (root_entry->flags & FLAG_DIRECTORY) ? "yes" : "no?");
-	debug_print(WARNING, " Interleave units: %d", root_entry->interleave_units);
-	debug_print(WARNING, " Interleave gap:   %d", root_entry->interleave_gap);
-	debug_print(WARNING, " Volume Seq:       %d", root_entry->volume_seq_LSB);
 
 	fs_node_t * fs = malloc(sizeof(fs_node_t));
 	memset(fs, 0, sizeof(fs_node_t));
@@ -497,7 +472,7 @@ static fs_node_t * iso_fs_mount(char * device, char * mount_path) {
 	return fs;
 }
 
-static int init(void) {
+static int init(int argc, char * argv[]) {
 	vfs_register("iso", iso_fs_mount);
 	return 0;
 }
@@ -506,4 +481,9 @@ static int fini(void) {
 	return 0;
 }
 
-MODULE_DEF(iso9660, init, fini);
+struct Module metadata = {
+	.name = "iso9660",
+	.init = init,
+	.fini = fini,
+};
+

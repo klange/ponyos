@@ -1,11 +1,11 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
+/**
+ * @brief Client-side Window Decoration library
+ *
+ * @copyright
  * This file is part of ToaruOS and is released under the terms
  * of the NCSA / University of Illinois License - see LICENSE.md
  * Copyright (C) 2012-2018 K. Lange
- *
- * Client-side Window Decoration library
  */
-
 #include <stdint.h>
 #include <math.h>
 #include <dlfcn.h>
@@ -13,8 +13,8 @@
 #include <toaru/graphics.h>
 #include <toaru/yutani.h>
 #include <toaru/decorations.h>
-#include <toaru/sdf.h>
 #include <toaru/menu.h>
+#include <toaru/text.h>
 
 #define TEXT_OFFSET_X 10
 #define TEXT_OFFSET_Y 3
@@ -37,6 +37,8 @@ static int close_enough(struct yutani_msg_window_mouse_event * me) {
 			sqrt(pow(me->new_x - me->old_x, 2.0) + pow(me->new_y - me->old_y, 2.0)) < 10.0);
 }
 
+static struct TT_Font * tt_font = NULL;
+
 static void render_decorations_simple(yutani_window_t * window, gfx_context_t * ctx, char * title, int decors_active) {
 
 	uint32_t color = BORDERCOLOR;
@@ -56,13 +58,10 @@ static void render_decorations_simple(yutani_window_t * window, gfx_context_t * 
 		}
 	}
 
-	if (decors_active == DECOR_INACTIVE) {
-		draw_sdf_string(ctx, TEXT_OFFSET_X, TEXT_OFFSET_Y, title, 14, TEXTCOLOR_INACTIVE, SDF_FONT_THIN);
-		draw_sdf_string(ctx, window->width - 20, TEXT_OFFSET_Y, "x", 14, TEXTCOLOR_INACTIVE, SDF_FONT_THIN);
-	} else {
-		draw_sdf_string(ctx, TEXT_OFFSET_X, TEXT_OFFSET_Y, title, 14, TEXTCOLOR, SDF_FONT_THIN);
-		draw_sdf_string(ctx, window->width - 20, TEXT_OFFSET_Y, "x", 14, TEXTCOLOR, SDF_FONT_THIN);
-	}
+	tt_set_size(tt_font, 12);
+	uint32_t textcolor = (decors_active == DECOR_INACTIVE) ? TEXTCOLOR_INACTIVE : TEXTCOLOR;
+	tt_draw_string(ctx, tt_font, TEXT_OFFSET_X, TEXT_OFFSET_Y + 12, title, textcolor);
+	tt_draw_string(ctx, tt_font, window->width - 20, TEXT_OFFSET_Y + 12, "x", textcolor);
 
 	for (uint32_t i = 0; i < window->width; ++i) {
 		GFX(ctx, i, 0) = color;
@@ -96,6 +95,7 @@ static void initialize_simple() {
 	decor_render_decorations = render_decorations_simple;
 	decor_check_button_press = check_button_press_simple;
 	decor_get_bounds         = get_bounds_simple;
+	tt_font = tt_font_from_shm("sans-serif");
 }
 
 void render_decorations(yutani_window_t * window, gfx_context_t * ctx, char * title) {
@@ -149,12 +149,7 @@ static void _decor_close(struct MenuEntry * self) {
 yutani_window_t * decor_show_default_menu(yutani_window_t * window, int x, int y) {
 	if (_decor_menu->window) return NULL;
 	_decor_menu_owner_window = window;
-	menu_show(_decor_menu, window->ctx);
-	if (x + _decor_menu->window->width > window->ctx->display_width) {
-		yutani_window_move(window->ctx, _decor_menu->window, x - _decor_menu->window->width, y);
-	} else {
-		yutani_window_move(window->ctx, _decor_menu->window, x, y);
-	}
+	menu_show_at(_decor_menu, window, x - window->x, y - window->y);
 	return _decor_menu->window;
 }
 
@@ -254,7 +249,7 @@ int decor_handle_event(yutani_t * yctx, yutani_msg_t * m) {
 			case YUTANI_MSG_WINDOW_MOUSE_EVENT:
 				{
 					struct yutani_msg_window_mouse_event * me = (void*)m->data;
-					yutani_window_t * window = hashmap_get(yctx->windows, (void*)me->wid);
+					yutani_window_t * window = hashmap_get(yctx->windows, (void*)(uintptr_t)me->wid);
 					struct decor_bounds bounds;
 					decor_get_bounds(window, &bounds);
 					if (!window) return 0;
@@ -333,7 +328,7 @@ int decor_handle_event(yutani_t * yctx, yutani_msg_t * m) {
 					} else {
 						if (old_resize_direction != SCALE_NONE) {
 							yutani_window_show_mouse(yctx, window, YUTANI_CURSOR_TYPE_RESET);
-							old_resize_direction = 0;
+							old_resize_direction = SCALE_NONE;
 						}
 					}
 				}

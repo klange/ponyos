@@ -1,9 +1,5 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
- * This file is part of ToaruOS and is released under the terms
- * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2015 K. Lange
- *
- * pong - Window Manager Pong
+/**
+ * @brief pong - Window Manager Pong
  *
  * Play pong where the paddles and ball are all windows.
  * Use the WM bindings to drag the left paddle to play.
@@ -16,6 +12,10 @@
  * position, and window moves for the ball and other paddle keep
  * things in the right place visually.
  *
+ * @copyright
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2015 K. Lange
  */
 #include <stdlib.h>
 #include <stdio.h>
@@ -30,7 +30,7 @@
 #include <toaru/yutani.h>
 #include <toaru/graphics.h>
 
-#define GAME_PATH "/usr/share/pong"
+#define GAME_PATH "/usr/share/games/pong"
 
 #define PADDLE_WIDTH  50
 #define PADDLE_HEIGHT 300
@@ -177,7 +177,7 @@ void update_stuff(void) {
 
 	if (colliding(&ball, &left)) {
 		ball.x = left.x + left.width + 2;
-		ball.vel_x   = (abs(ball.vel_x) < 8.0) ? -ball.vel_x * 1.05 : -ball.vel_x;
+		ball.vel_x   = (fabs(ball.vel_x) < 8.0) ? -ball.vel_x * 1.05 : -ball.vel_x;
 
 		double intersect = ((ball.y + ball.height/2) - (left.y)) / ((double)left.height) - 0.5;
 		ball.vel_y = intersect * 8.0;
@@ -186,7 +186,7 @@ void update_stuff(void) {
 
 	if (colliding(&ball, &right)) {
 		ball.x = right.x - ball.width - 2;
-		ball.vel_x   = (abs(ball.vel_x) < 8.0) ? -ball.vel_x * 1.05 : -ball.vel_x;
+		ball.vel_x   = (fabs(ball.vel_x) < 8.0) ? -ball.vel_x * 1.05 : -ball.vel_x;
 
 		double intersect = ((ball.y + ball.height/2) - (right.y)) / ((double)right.height/2.0);
 		ball.vel_y = intersect * 3.0;

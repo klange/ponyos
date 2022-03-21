@@ -6,6 +6,7 @@ export-cmd START kcmdline -g start
 export USER=root
 export HOME=/home/root
 
+export-cmd TZ_OFFSET find-timezone
 export-cmd GETTY_ARGS qemu-fwcfg opt/org.toaruos.gettyargs
 
 echo -n "Launching startup application..." > /dev/pex/splash

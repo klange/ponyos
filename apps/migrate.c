@@ -1,9 +1,5 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
- * This file is part of ToaruOS and is released under the terms
- * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2018 K. Lange
- *
- * migrate - Relocate root filesystem to tmpfs
+/**
+ * @brief migrate - Relocate root filesystem to tmpfs
  *
  * Run as part of system startup to move the ext2 root ramdisk
  * into a flexible in-memory temporary filesystem, which allows
@@ -11,6 +7,11 @@
  * the ext2 driver against the static in-memory ramdisk.
  *
  * Based on the original Python implementation.
+ *
+ * @copyright
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2018 K. Lange
  */
 #include <string.h>
 #include <stdio.h>
@@ -62,7 +63,7 @@ void copy_link(char * source, char * dest, int mode, int uid, int gid) {
 
 void copy_file(char * source, char * dest, int mode,int uid, int gid) {
 	//fprintf(stderr, "need to copy file %s to %s %x\n", source, dest, mode);
-	TRACE_("Copying %s...", dest);
+	//TRACE_("Copying %s...", dest);
 
 	int d_fd = open(dest, O_WRONLY | O_CREAT, mode);
 	int s_fd = open(source, O_RDONLY);
@@ -88,6 +89,7 @@ void copy_file(char * source, char * dest, int mode,int uid, int gid) {
 	close(d_fd);
 
 	chown(dest, uid, gid);
+	chmod(dest, mode);
 }
 
 void copy_directory(char * source, char * dest, int mode, int uid, int gid) {
@@ -97,7 +99,7 @@ void copy_directory(char * source, char * dest, int mode, int uid, int gid) {
 		return;
 	}
 
-	TRACE_("Creating %s/...", dest);
+	TRACE_("Copying %s/...", dest);
 	//fprintf(stderr, "Creating %s\n", dest);
 	if (!strcmp(dest, "/")) {
 		dest = "";
@@ -217,7 +219,7 @@ int main(int argc, char * argv[]) {
 	}
 	char * root_type = hashmap_get(cmdline,"root_type");
 	if (!root_type) {
-		root_type = "ext2";
+		root_type = "tar";
 	}
 
 	char tmp[1024];

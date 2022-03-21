@@ -1,12 +1,12 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
+/**
+ * @brief hexify - Convert binary to hex.
+ *
+ * This is based on the output of xxd.
+ *
+ * @copyright
  * This file is part of ToaruOS and is released under the terms
  * of the NCSA / University of Illinois License - see LICENSE.md
  * Copyright (C) 2018 K. Lange
- *
- * hexify - Convert binary to hex.
- *
- * This is based on the output of xxd.
- * Does NOT a hex-to-bin option - something to consider.
  */
 #include <stdio.h>
 #include <ctype.h>
@@ -93,6 +93,7 @@ int main(int argc, char * argv[]) {
 		name = argv[optind];
 		if (!f) {
 			fprintf(stderr, "%s: %s: %s\n", argv[0], argv[optind], strerror(errno));
+			return 1;
 		}
 	} else {
 		name = "[stdin]";

@@ -1,20 +1,17 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
+/**
+ * @brief Virtual terminal emulator.
+ *
+ * Provides a graphical character cell terminal with support for
+ * antialiased text, basic Unicode, bitmap fallbacks, nearly
+ * complete ANSI escape sequence support, 256- and 24-bit color,
+ * scrollback, selection, alternate screens, and various scroll
+ * methods.
+ *
+ * @copyright
  * This file is part of ToaruOS and is released under the terms
  * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2013-2020 K. Lange
- *
- * Terminal Emulator
- *
- * Graphical terminal emulator.
- *
- * Provides a number of features:
- *  - Windowed and full screen modes
- *  - Antialiased fonts
- *  - Built-in fallback bitmap font
- *  - ANSI escape support
- *  - 256 colors
+ * Copyright (C) 2013-2021 K. Lange
  */
-
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
@@ -47,7 +44,7 @@
 #include <toaru/spinlock.h>
 #include <toaru/list.h>
 #include <toaru/menu.h>
-#include <toaru/sdf.h>
+#include <toaru/text.h>
 
 /* 16- and 256-color palette */
 #include "terminal-palette.h"
@@ -68,7 +65,6 @@ static void usage(char * argv[]) {
 			" -x --grid       \033[3mMake resizes round to nearest match for character cell size.\033[0m\n"
 			" -n --no-frame   \033[3mDisable decorations.\033[0m\n"
 			" -g --geometry   \033[3mSet requested terminal size WIDTHxHEIGHT\033[0m\n"
-			" -f --no-ft      \033[3mForce disable the freetype backend.\033[0m\n"
 			"\n"
 			" This terminal emulator provides basic support for VT220 escapes and\n"
 			" XTerm extensions, including 256 color support and font effects.\n",
@@ -82,11 +78,10 @@ static pid_t child_pid = 0;
 
 static int      scale_fonts    = 0;    /* Whether fonts should be scaled */
 static float    font_scaling   = 1.0;  /* How much they should be scaled by */
-static float    font_gamma     = 1.7;  /* Gamma to use for SDF library */
 static uint16_t term_width     = 0;    /* Width of the terminal (in cells) */
 static uint16_t term_height    = 0;    /* Height of the terminal (in cells) */
-static uint16_t font_size      = 16;   /* Font size according to SDF library */
-static uint16_t char_width     = 9;    /* Width of a cell in pixels */
+static uint16_t font_size      = 16;   /* Font size according to tt library */
+static uint16_t char_width     = 8;    /* Width of a cell in pixels */
 static uint16_t char_height    = 17;   /* Height of a cell in pixels */
 static uint16_t char_offset    = 0;    /* Offset of the font within the cell */
 static int      csr_x          = 0;    /* Cursor X */
@@ -94,9 +89,13 @@ static int      csr_y          = 0;    /* Cursor Y */
 static uint32_t current_fg     = 7;    /* Current foreground color */
 static uint32_t current_bg     = 0;    /* Current background color */
 
-static term_cell_t * term_buffer = NULL; /* The terminal cell buffer */
-static term_cell_t * term_buffer_a = NULL;
-static term_cell_t * term_buffer_b = NULL;
+static term_cell_t * term_buffer = NULL; /* The active terminal cell buffer */
+static term_cell_t * term_buffer_a = NULL; /* The main buffer */
+static term_cell_t * term_buffer_b = NULL; /* The secondary buffer */
+
+static term_cell_t * term_mirror = NULL;  /* What we want to draw */
+static term_cell_t * term_display = NULL; /* What we think we've drawn already */
+
 static term_state_t * ansi_state = NULL; /* ANSI parser library state */
 static int active_buffer  = 0;
 static int _orig_x = 0;
@@ -108,14 +107,15 @@ static bool cursor_on      = 1;    /* Whether or not the cursor should be render
 static bool _fullscreen    = 0;    /* Whether or not we are running in fullscreen mode (GUI only) */
 static bool _no_frame      = 0;    /* Whether to disable decorations or not */
 static bool _use_aa        = 1;    /* Whether or not to use best-available anti-aliased renderer */
-static bool _have_freetype = 0;    /* Whether freetype is available */
-static bool _force_no_ft   = 0;    /* Whether to force disable the freetype backend */
 static bool _free_size     = 1;    /* Disable rounding when resized */
 
-/** Freetype extension renderer functions */
-static void (*freetype_set_font_face)(int face) = NULL;
-static void (*freetype_set_font_size)(int size) = NULL;
-static void (*freetype_draw_char)(gfx_context_t * ctx, int x, int y, uint32_t fg, uint32_t codepoint) = NULL;
+static struct TT_Font * _tt_font_normal = NULL;
+static struct TT_Font * _tt_font_bold = NULL;
+static struct TT_Font * _tt_font_oblique = NULL;
+static struct TT_Font * _tt_font_bold_oblique = NULL;
+
+static struct TT_Font * _tt_font_fallback = NULL;
+static struct TT_Font * _tt_font_japanese = NULL;
 
 static list_t * images_list = NULL;
 
@@ -148,6 +148,9 @@ static int32_t r_y = -1;
 
 static uint32_t window_width  = 640;
 static uint32_t window_height = 480;
+static bool     window_position_set = 0;
+static int32_t  window_left   = 0;
+static int32_t  window_top    = 0;
 #define TERMINAL_TITLE_SIZE 512
 static char   terminal_title[TERMINAL_TITLE_SIZE];
 static size_t terminal_title_length = 0;
@@ -171,7 +174,7 @@ struct scrollback_row {
 	term_cell_t cells[];
 };
 
-#define MAX_SCROLLBACK 10240
+#define MAX_SCROLLBACK 1000
 static list_t * scrollback_list = NULL;
 static int scrollback_offset = 0;
 
@@ -193,6 +196,7 @@ static void cell_redraw(uint16_t x, uint16_t y);
 static void cell_redraw_inverted(uint16_t x, uint16_t y);
 static void cell_redraw_offset(uint16_t x, uint16_t y);
 static void cell_redraw_offset_inverted(uint16_t x, uint16_t y);
+static void update_bounds(void);
 
 static uint64_t get_ticks(void) {
 	struct timeval now;
@@ -273,6 +277,7 @@ static void set_title(char * c) {
 
 /* Call a function for each selected cell */
 static void iterate_selection(void (*func)(uint16_t x, uint16_t y)) {
+	if (!selection) return;
 	if (selection_end_y < selection_start_y) {
 		for (int x = selection_end_x; x < term_width; ++x) {
 			func(x, selection_end_y);
@@ -316,94 +321,60 @@ static void redraw_selection(void) {
 	iterate_selection(cell_redraw_offset_inverted);
 }
 
-static void redraw_new_selection(int old_x, int old_y) {
-	if (selection_end_y == selection_start_y && old_y != selection_start_y) {
-		int a, b;
-		a = selection_end_x;
-		b = selection_end_y;
-		selection_end_x = old_x;
-		selection_end_y = old_y;
-		iterate_selection(cell_redraw_offset);
-		selection_end_x = a;
-		selection_end_y = b;
-		iterate_selection(cell_redraw_offset_inverted);
+static term_cell_t * cell_at(uint16_t x, uint16_t _y) {
+	int y = _y;
+	y -= scrollback_offset;
+	if (y >= 0) {
+		return &term_buffer[y * term_width + x];
 	} else {
-		int a, b;
-		a = selection_start_x;
-		b = selection_start_y;
-
-		selection_start_x = old_x;
-		selection_start_y = old_y;
-
-		/* Figure out direction */
-		if (old_y < b) {
-			/* Backwards */
-			if (selection_end_y < old_y || (selection_end_y == old_y && selection_end_x < old_x)) {
-				/* Selection extended */
-				iterate_selection(cell_redraw_offset_inverted);
-			} else {
-				/* Selection got smaller */
-				iterate_selection(cell_redraw_offset);
-			}
-		} else if (old_y == b) {
-			/* Was a single line */
-			if (selection_end_y == b) {
-				/* And still is */
-				if (old_x < a) {
-					/* Backwards */
-					if (selection_end_x < old_x) {
-						iterate_selection(cell_redraw_offset_inverted);
-					} else {
-						iterate_selection(cell_redraw_offset);
-					}
-				} else {
-					if (selection_end_x < old_x) {
-						iterate_selection(cell_redraw_offset);
-					} else {
-						iterate_selection(cell_redraw_offset_inverted);
-					}
-				}
-			} else if (selection_end_y < b) {
-				/* Moved up */
-				if (old_x <= a) {
-					/* Should be fine with just append */
-					iterate_selection(cell_redraw_offset_inverted);
-				} else {
-					/* Need to erase first */
-					iterate_selection(cell_redraw_offset);
-					selection_start_x = a;
-					selection_start_y = b;
-					iterate_selection(cell_redraw_offset_inverted);
-				}
-			} else if (selection_end_y > b) {
-				if (old_x >= a) {
-					/* Should be fine with just append */
-					iterate_selection(cell_redraw_offset_inverted);
-				} else {
-					/* Need to erase first */
-					iterate_selection(cell_redraw_offset);
-					selection_start_x = a;
-					selection_start_y = b;
-					iterate_selection(cell_redraw_offset_inverted);
-				}
-			}
-		} else {
-			/* Forward */
-			if (selection_end_y < old_y || (selection_end_y == old_y && selection_end_x < old_x)) {
-				/* Selection got smaller */
-				iterate_selection(cell_redraw_offset);
-			} else {
-				/* Selection extended */
-				iterate_selection(cell_redraw_offset_inverted);
+		node_t * node = scrollback_list->tail;
+		for (; y < -1; y++) {
+			if (!node) break;
+			node = node->prev;
+		}
+		if (node) {
+			struct scrollback_row * row = (struct scrollback_row *)node->value;
+			if (row && x < row->width) {
+				return &row->cells[x];
 			}
 		}
+	}
+	return NULL;
+}
 
-		cell_redraw_offset_inverted(a,b);
-		cell_redraw_offset_inverted(selection_end_x, selection_end_y);
+static void mark_cell(uint16_t x, uint16_t y) {
+	term_cell_t * c = cell_at(x,y);
+	if (c) {
+		c->flags |= 0x200;
+	}
+}
 
-		/* Restore */
-		selection_start_x = a;
-		selection_start_y = b;
+static void mark_selection(void) {
+	iterate_selection(mark_cell);
+}
+
+static void red_cell(uint16_t x, uint16_t y) {
+	term_cell_t * c = cell_at(x,y);
+	if (c) {
+		if (c->flags & 0x200) {
+			c->flags &= ~(0x200);
+		} else {
+			c->flags |= 0x400;
+		}
+	}
+}
+
+static void flip_selection(void) {
+	iterate_selection(red_cell);
+	for (int y = 0; y < term_height; ++y) {
+		for (int x = 0; x < term_width; ++x) {
+			term_cell_t * c = cell_at(x,y);
+			if (c) {
+				if (c->flags & 0x200) cell_redraw_offset(x,y);
+				if (c->flags & 0x400) cell_redraw_offset_inverted(x,y);
+				c->flags &= ~(0x600);
+			}
+		}
 	}
 }
 
@@ -412,7 +383,7 @@ static void count_selection(uint16_t x, uint16_t _y) {
 	int y = _y;
 	y -= scrollback_offset;
 	if (y >= 0) {
-		term_cell_t * cell = (term_cell_t *)((uintptr_t)term_buffer + (y * term_width + x) * sizeof(term_cell_t));
+		term_cell_t * cell = &term_buffer[y * term_width + x];
 		if (!(cell->flags & ANSI_EXT_IMG)) {
 			if (((uint32_t *)cell)[0] != 0x00000000) {
 				char tmp[7];
@@ -446,9 +417,9 @@ void write_selection(uint16_t x, uint16_t _y) {
 	int y = _y;
 	y -= scrollback_offset;
 	if (y >= 0) {
-		term_cell_t * cell = (term_cell_t *)((uintptr_t)term_buffer + (y * term_width + x) * sizeof(term_cell_t));
+		term_cell_t * cell = &term_buffer[y * term_width + x];
 		if (!(cell->flags & ANSI_EXT_IMG)) {
-			if (((uint32_t *)cell)[0] != 0x00000000) {
+			if (((uint32_t *)cell)[0] != 0x00000000 && cell->c != 0xFFFF) {
 				char tmp[7];
 				int count = to_eight(cell->c, tmp);
 				for (int i = 0; i < count; ++i) {
@@ -467,7 +438,7 @@ void write_selection(uint16_t x, uint16_t _y) {
 			struct scrollback_row * row = (struct scrollback_row *)node->value;
 			if (row && x < row->width) {
 				term_cell_t * cell = &row->cells[x];
-				if (cell && ((uint32_t *)cell)[0] != 0x00000000) {
+				if (cell && ((uint32_t *)cell)[0] != 0x00000000 && cell->c != 0xFFFF) {
 					char tmp[7];
 					int count = to_eight(cell->c, tmp);
 					for (int i = 0; i < count; ++i) {
@@ -488,8 +459,6 @@ void write_selection(uint16_t x, uint16_t _y) {
 static char * copy_selection(void) {
 	_selection_count = 0;
 	iterate_selection(count_selection);
-
-	fprintf(stderr, "Selection length is %d\n", _selection_count);
 
 	if (selection_text) {
 		free(selection_text);
@@ -605,15 +574,7 @@ static void render_decors(void) {
 
 /* Set a pixel in the terminal cell area */
 static inline void term_set_point(uint16_t x, uint16_t y, uint32_t color ) {
-	if (_fullscreen) {
-		/* In full screen mode, pre-blend the color over black. */
-		color = alpha_blend_rgba(premultiply(rgba(0,0,0,0xFF)), color);
-	}
-	if (!_no_frame) {
-		GFX(ctx, (x+decor_left_width),(y+decor_top_height+menu_bar_height)) = color;
-	} else {
-		GFX(ctx, x,y) = color;
-	}
+	GFX(ctx, (x+decor_left_width),(y+decor_top_height+menu_bar_height)) = color;
 }
 
 /* Draw a partial block character. */
@@ -671,11 +632,16 @@ static void term_write_char(uint32_t val, uint16_t x, uint16_t y, uint32_t fg, u
 		_bg = bg;
 	}
 
+	if (_fullscreen) {
+		_bg |= 0xFF << 24;
+	}
+
 	/* Draw block characters */
 	if (val >= 0x2580 && val <= 0x258F) {
+		uint32_t pbg = premultiply(_bg);
 		for (uint8_t i = 0; i < char_height; ++i) {
 			for (uint8_t j = 0; j < char_width; ++j) {
-				term_set_point(x+j,y+i,premultiply(_bg));
+				term_set_point(x+j,y+i,pbg);
 			}
 		}
 		draw_semi_block(val, x, y, _fg, _bg);
@@ -683,33 +649,8 @@ static void term_write_char(uint32_t val, uint16_t x, uint16_t y, uint32_t fg, u
 	}
 
 	/* Draw glyphs */
-	if (_use_aa && !_have_freetype) {
-		/* Draw using the Toaru SDF rendering library */
-		char tmp[7];
-		to_eight(val, tmp);
-		for (uint8_t i = 0; i < char_height; ++i) {
-			for (uint8_t j = 0; j < char_width; ++j) {
-				term_set_point(x+j,y+i,_bg);
-			}
-		}
-		if (val != 0 && val != ' ' && _fg != _bg) {
-			int _font = SDF_FONT_MONO;
-			if (flags & ANSI_BOLD && flags & ANSI_ITALIC) {
-				_font = SDF_FONT_MONO_BOLD_OBLIQUE;
-			} else if (flags & ANSI_BOLD) {
-				_font = SDF_FONT_MONO_BOLD;
-			} else if (flags & ANSI_ITALIC) {
-				_font = SDF_FONT_MONO_OBLIQUE;
-			}
-			if (_no_frame) {
-				draw_sdf_string_gamma(ctx, x-1, y, tmp, font_size, _fg, _font, font_gamma);
-			} else {
-				draw_sdf_string_gamma(ctx, x+decor_left_width-1, y+decor_top_height+menu_bar_height, tmp, font_size, _fg, _font, font_gamma);
-			}
-		}
-	} else if (_use_aa && _have_freetype) {
-		/* Draw using freetype extension */
-		if (val == 0xFFFF) { return; } /* Unicode, do not redraw here */
+	if (_use_aa) {
+		if (val == 0xFFFF) return;
 		for (uint8_t i = 0; i < char_height; ++i) {
 			for (uint8_t j = 0; j < char_width; ++j) {
 				term_set_point(x+j,y+i,_bg);
@@ -725,26 +666,38 @@ static void term_write_char(uint32_t val, uint16_t x, uint16_t y, uint32_t fg, u
 		if (val < 32 || val == ' ') {
 			goto _extra_stuff;
 		}
-
-#define FONT_MONOSPACE              4
-#define FONT_MONOSPACE_BOLD         5
-#define FONT_MONOSPACE_ITALIC       6
-#define FONT_MONOSPACE_BOLD_ITALIC  7
-		int _font = FONT_MONOSPACE;
+		struct TT_Font * _font = _tt_font_normal;
 		if (flags & ANSI_BOLD && flags & ANSI_ITALIC) {
-			_font = FONT_MONOSPACE_BOLD_ITALIC;
-		} else if (flags & ANSI_ITALIC) {
-			_font = FONT_MONOSPACE_ITALIC;
+			_font = _tt_font_bold_oblique;
 		} else if (flags & ANSI_BOLD) {
-			_font = FONT_MONOSPACE_BOLD;
+			_font = _tt_font_bold;
+		} else if (flags & ANSI_ITALIC) {
+			_font = _tt_font_oblique;
 		}
-		freetype_set_font_face(_font);
-		freetype_set_font_size(font_size);
-		if (_no_frame) {
-			freetype_draw_char(ctx, x, y + char_offset, _fg, val);
-		} else {
-			freetype_draw_char(ctx, x + decor_left_width, y + char_offset + decor_top_height + menu_bar_height, _fg, val);
+		unsigned int glyph = tt_glyph_for_codepoint(_font, val);
+
+		/* Try the regular sans serif font as a fallback */
+		if (!glyph) {
+			int nglyph = tt_glyph_for_codepoint(_tt_font_fallback, val);
+			if (nglyph) {
+				_font = _tt_font_fallback;
+				glyph = nglyph;
+			}
 		}
+
+		/* Try the VL Gothic, if it's installed and this is a reasonably high codepoint */
+		if (!glyph && _tt_font_japanese && val >= 0x2E80) {
+			int nglyph = tt_glyph_for_codepoint(_tt_font_japanese, val);
+			if (nglyph) {
+				_font = _tt_font_japanese;
+				glyph = nglyph;
+			}
+		}
+
+		tt_set_size(_font, font_size);
+		int _x = x + decor_left_width;
+		int _y = y + char_offset + decor_top_height + menu_bar_height;
+		tt_draw_glyph(ctx, _font, _x, _y, glyph, _fg);
 	} else {
 		/* Convert other unicode characters. */
 		if (val > 128) {
@@ -754,7 +707,7 @@ static void term_write_char(uint32_t val, uint16_t x, uint16_t y, uint32_t fg, u
 		uint16_t * c = large_font[val];
 		for (uint8_t i = 0; i < char_height; ++i) {
 			for (uint8_t j = 0; j < char_width; ++j) {
-				if (c[i] & (1 << (15-j))) {
+				if (c[i] & (1 << (LARGE_FONT_MASK-j))) {
 					term_set_point(x+j,y+i,_fg);
 				} else {
 					term_set_point(x+j,y+i,_bg);
@@ -787,28 +740,58 @@ _extra_stuff:
 	}
 
 	/* Calculate the bounds of the updated region of the window */
-	if (!_no_frame) {
-		l_x = min(l_x, decor_left_width + x);
-		l_y = min(l_y, decor_top_height+menu_bar_height + y);
+	l_x = min(l_x, decor_left_width + x);
+	l_y = min(l_y, decor_top_height+menu_bar_height + y);
 
-		if (flags & ANSI_WIDE) {
-			r_x = max(r_x, decor_left_width + x + char_width * 2);
-			r_y = max(r_y, decor_top_height+menu_bar_height + y + char_height * 2);
-		} else {
-			r_x = max(r_x, decor_left_width + x + char_width);
-			r_y = max(r_y, decor_top_height+menu_bar_height + y + char_height);
-		}
+	if (flags & ANSI_WIDE) {
+		r_x = max(r_x, decor_left_width + x + char_width * 2);
+		r_y = max(r_y, decor_top_height+menu_bar_height + y + char_height * 2);
 	} else {
-		l_x = min(l_x, x);
-		l_y = min(l_y, y);
+		r_x = max(r_x, decor_left_width + x + char_width);
+		r_y = max(r_y, decor_top_height+menu_bar_height + y + char_height);
+	}
+}
 
-		if (flags & ANSI_WIDE) {
-			r_x = max(r_x, x + char_width * 2);
-			r_y = max(r_y, y + char_height * 2);
-		} else {
-			r_x = max(r_x, x + char_width);
-			r_y = max(r_y, y + char_height);
-		}
+static void term_mirror_set(uint16_t x, uint16_t y, uint32_t val, uint32_t fg, uint32_t bg, uint8_t flags) {
+	if (x >= term_width || y >= term_height) return;
+	term_cell_t * cell = &term_mirror[y * term_width + x];
+	cell->c = val;
+	cell->fg = fg;
+	cell->bg = bg;
+	cell->flags = flags;
+}
+
+static void term_mirror_copy(uint16_t x, uint16_t y, term_cell_t * from) {
+	if (x >= term_width || y >= term_height) return;
+	term_cell_t * cell = &term_mirror[y * term_width + x];
+	if (!from->c && !from->fg && !from->bg) {
+		cell->c = ' ';
+		cell->fg = TERM_DEFAULT_FG;
+		cell->bg = TERM_DEFAULT_BG;
+		cell->flags = from->flags;
+	} else {
+		*cell = *from;
+	}
+}
+
+static void term_mirror_copy_inverted(uint16_t x, uint16_t y, term_cell_t * from) {
+	if (x >= term_width || y >= term_height) return;
+	term_cell_t * cell = &term_mirror[y * term_width + x];
+	if (!from->c && !from->fg && !from->bg) {
+		cell->c = ' ';
+		cell->fg = TERM_DEFAULT_BG;
+		cell->bg = TERM_DEFAULT_FG;
+		cell->flags = from->flags;
+	} else if (from->flags & ANSI_EXT_IMG) {
+		cell->c = ' ';
+		cell->fg = from->fg;
+		cell->bg = from->bg;
+		cell->flags = from->flags | ANSI_SPECBG;
+	} else {
+		cell->c = from->c;
+		cell->fg = from->bg;
+		cell->bg = from->fg;
+		cell->flags = from->flags | ANSI_SPECBG;
 	}
 }
 
@@ -818,7 +801,7 @@ static void cell_set(uint16_t x, uint16_t y, uint32_t c, uint32_t fg, uint32_t b
 	if (x >= term_width || y >= term_height) return;
 
 	/* Calculate the cell position in the terminal buffer */
-	term_cell_t * cell = (term_cell_t *)((uintptr_t)term_buffer + (y * term_width + x) * sizeof(term_cell_t));
+	term_cell_t * cell = &term_buffer[y * term_width + x];
 
 	/* Set cell attributes */
 	cell->c     = c;
@@ -828,31 +811,63 @@ static void cell_set(uint16_t x, uint16_t y, uint32_t c, uint32_t fg, uint32_t b
 }
 
 /* Redraw an embedded image cell */
-static void redraw_cell_image(uint16_t x, uint16_t y, term_cell_t * cell) {
+static void redraw_cell_image(uint16_t x, uint16_t y, term_cell_t * cell, int inverted) {
 	/* Avoid setting cells out of range. */
 	if (x >= term_width || y >= term_height) return;
 
 	/* Draw the image data */
-	uint32_t * data = (uint32_t *)cell->fg;
-	for (uint32_t yy = 0; yy < char_height; ++yy) {
-		for (uint32_t xx = 0; xx < char_width; ++xx) {
-			term_set_point(x * char_width + xx, y * char_height + yy, *data);
-			data++;
+	uint32_t * data = (uint32_t *)((uintptr_t)cell->bg << 32 | cell->fg);
+	if (inverted) {
+		for (uint32_t yy = 0; yy < char_height; ++yy) {
+			for (uint32_t xx = 0; xx < char_width; ++xx) {
+				uint32_t alpha = 0xFF000000 & *data;
+				uint32_t color = 0xFFFFFF - (*data & 0xFFFFFF);
+				term_set_point(x * char_width + xx, y * char_height + yy, color | alpha);
+				data++;
+			}
+		}
+	} else {
+		for (uint32_t yy = 0; yy < char_height; ++yy) {
+			for (uint32_t xx = 0; xx < char_width; ++xx) {
+				term_set_point(x * char_width + xx, y * char_height + yy, *data);
+				data++;
+			}
 		}
 	}
 
 	/* Update bounds */
-	if (!_no_frame) {
-		l_x = min(l_x, decor_left_width + x * char_width);
-		l_y = min(l_y, decor_top_height+menu_bar_height + y * char_height);
-		r_x = max(r_x, decor_left_width + x * char_width + char_width);
-		r_y = max(r_y, decor_top_height+menu_bar_height + y * char_height + char_height);
-	} else {
-		l_x = min(l_x, x * char_width);
-		l_y = min(l_y, y * char_height);
-		r_x = max(r_x, x * char_width + char_width);
-		r_y = max(r_y, y * char_height + char_height);
+	l_x = min(l_x, decor_left_width + x * char_width);
+	l_y = min(l_y, decor_top_height+menu_bar_height + y * char_height);
+	r_x = max(r_x, decor_left_width + x * char_width + char_width);
+	r_y = max(r_y, decor_top_height+menu_bar_height + y * char_height + char_height);
+}
+
+static void maybe_flip_display(int force) {
+	static uint64_t last_refresh;
+	uint64_t ticks = get_ticks();
+	if (!force) {
+		if (ticks < last_refresh + 33330L) {
+			return;
+		}
 	}
+
+	last_refresh = ticks;
+
+	for (unsigned int y = 0; y < term_height; ++y) {
+		for (unsigned int x = 0; x < term_width; ++x) {
+			term_cell_t * cell_m = &term_mirror[y * term_width + x];
+			term_cell_t * cell_d = &term_display[y * term_width + x];
+			if (memcmp(cell_m, cell_d, sizeof(term_cell_t))) {
+				*cell_d = *cell_m;
+				if (cell_m->flags & ANSI_EXT_IMG) {
+					redraw_cell_image(x,y,cell_m,cell_m->flags & ANSI_SPECBG);
+				} else {
+					term_write_char(cell_m->c, x * char_width, y * char_height, cell_m->fg, cell_m->bg, cell_m->flags);
+				}
+			}
+		}
+	}
+	display_flip();
 }
 
 static void cell_redraw_offset(uint16_t x, uint16_t _y) {
@@ -862,13 +877,7 @@ static void cell_redraw_offset(uint16_t x, uint16_t _y) {
 	y -= scrollback_offset;
 
 	if (y >= 0) {
-		term_cell_t * cell = (term_cell_t *)((uintptr_t)term_buffer + (y * term_width + x) * sizeof(term_cell_t));
-		if (cell->flags & ANSI_EXT_IMG) { redraw_cell_image(x,i,cell); return; }
-		if (((uint32_t *)cell)[0] == 0x00000000) {
-			term_write_char(' ', x * char_width, i * char_height, TERM_DEFAULT_FG, TERM_DEFAULT_BG, TERM_DEFAULT_FLAGS);
-		} else {
-			term_write_char(cell->c, x * char_width, i * char_height, cell->fg, cell->bg, cell->flags);
-		}
+		term_mirror_copy(x,i,&term_buffer[y * term_width + x]);
 	} else {
 		node_t * node = scrollback_list->tail;
 		for (; y < -1; y++) {
@@ -878,14 +887,9 @@ static void cell_redraw_offset(uint16_t x, uint16_t _y) {
 		if (node) {
 			struct scrollback_row * row = (struct scrollback_row *)node->value;
 			if (row && x < row->width) {
-				term_cell_t * cell = &row->cells[x];
-				if (!cell || ((uint32_t *)cell)[0] == 0x00000000) {
-					term_write_char(' ', x * char_width, i * char_height, TERM_DEFAULT_FG, TERM_DEFAULT_BG, TERM_DEFAULT_FLAGS);
-				} else {
-					term_write_char(cell->c, x * char_width, i * char_height, cell->fg, cell->bg, cell->flags);
-				}
+				term_mirror_copy(x,i,&row->cells[x]);
 			} else {
-				term_write_char(' ', x * char_width, i * char_height, TERM_DEFAULT_FG, TERM_DEFAULT_BG, TERM_DEFAULT_FLAGS);
+				term_mirror_set(x,i,' ',TERM_DEFAULT_FG, TERM_DEFAULT_BG, TERM_DEFAULT_FLAGS);
 			}
 		}
 	}
@@ -898,13 +902,7 @@ static void cell_redraw_offset_inverted(uint16_t x, uint16_t _y) {
 	y -= scrollback_offset;
 
 	if (y >= 0) {
-		term_cell_t * cell = (term_cell_t *)((uintptr_t)term_buffer + (y * term_width + x) * sizeof(term_cell_t));
-		if (cell->flags & ANSI_EXT_IMG) { redraw_cell_image(x,i,cell); return; }
-		if (((uint32_t *)cell)[0] == 0x00000000) {
-			term_write_char(' ', x * char_width, i * char_height, TERM_DEFAULT_BG, TERM_DEFAULT_FG, TERM_DEFAULT_FLAGS|ANSI_SPECBG);
-		} else {
-			term_write_char(cell->c, x * char_width, i * char_height, cell->bg, cell->fg, cell->flags);
-		}
+		term_mirror_copy_inverted(x,i,&term_buffer[y * term_width + x]);
 	} else {
 		node_t * node = scrollback_list->tail;
 		for (; y < -1; y++) {
@@ -914,84 +912,33 @@ static void cell_redraw_offset_inverted(uint16_t x, uint16_t _y) {
 		if (node) {
 			struct scrollback_row * row = (struct scrollback_row *)node->value;
 			if (row && x < row->width) {
-				term_cell_t * cell = &row->cells[x];
-				if (!cell || ((uint32_t *)cell)[0] == 0x00000000) {
-					term_write_char(' ', x * char_width, i * char_height, TERM_DEFAULT_BG, TERM_DEFAULT_FG, TERM_DEFAULT_FLAGS);
-				} else {
-					term_write_char(cell->c, x * char_width, i * char_height, cell->bg, cell->fg, cell->flags);
-				}
+				term_mirror_copy_inverted(x,i,&row->cells[x]);
 			} else {
-				term_write_char(' ', x * char_width, i * char_height, TERM_DEFAULT_BG, TERM_DEFAULT_FG, TERM_DEFAULT_FLAGS);
+				term_mirror_set(x, i, ' ', TERM_DEFAULT_BG, TERM_DEFAULT_FG, TERM_DEFAULT_FLAGS|ANSI_SPECBG);
 			}
 		}
 	}
 }
 
-
 /* Redraw a text cell normally. */
 static void cell_redraw(uint16_t x, uint16_t y) {
-	/* Avoid cells out of range. */
 	if (x >= term_width || y >= term_height) return;
-
-	/* Calculate the cell position in the terminal buffer */
-	term_cell_t * cell = (term_cell_t *)((uintptr_t)term_buffer + (y * term_width + x) * sizeof(term_cell_t));
-
-	/* If it's an image cell, redraw the image data. */
-	if (cell->flags & ANSI_EXT_IMG) {
-		redraw_cell_image(x,y,cell);
-		return;
-	}
-
-	/* Special case empty cells. */
-	if (((uint32_t *)cell)[0] == 0x00000000) {
-		term_write_char(' ', x * char_width, y * char_height, TERM_DEFAULT_FG, TERM_DEFAULT_BG, TERM_DEFAULT_FLAGS);
-	} else {
-		term_write_char(cell->c, x * char_width, y * char_height, cell->fg, cell->bg, cell->flags);
-	}
+	term_mirror_copy(x,y,&term_buffer[y * term_width + x]);
 }
 
 /* Redraw text cell inverted. */
 static void cell_redraw_inverted(uint16_t x, uint16_t y) {
 	/* Avoid cells out of range. */
 	if (x >= term_width || y >= term_height) return;
-
-	/* Calculate the cell position in the terminal buffer */
-	term_cell_t * cell = (term_cell_t *)((uintptr_t)term_buffer + (y * term_width + x) * sizeof(term_cell_t));
-
-	/* If it's an image cell, redraw the image data. */
-	if (cell->flags & ANSI_EXT_IMG) {
-		redraw_cell_image(x,y,cell);
-		return;
-	}
-
-	/* Special case empty cells. */
-	if (((uint32_t *)cell)[0] == 0x00000000) {
-		term_write_char(' ', x * char_width, y * char_height, TERM_DEFAULT_BG, TERM_DEFAULT_FG, TERM_DEFAULT_FLAGS | ANSI_SPECBG);
-	} else {
-		term_write_char(cell->c, x * char_width, y * char_height, cell->bg, cell->fg, cell->flags | ANSI_SPECBG);
-	}
+	term_mirror_copy_inverted(x,y,&term_buffer[y * term_width + x]);
 }
 
 /* Redraw text cell with a surrounding box (used by cursor) */
 static void cell_redraw_box(uint16_t x, uint16_t y) {
-	/* Avoid cells out of range. */
 	if (x >= term_width || y >= term_height) return;
-
-	/* Calculate the cell position in the terminal buffer */
-	term_cell_t * cell = (term_cell_t *)((uintptr_t)term_buffer + (y * term_width + x) * sizeof(term_cell_t));
-
-	/* If it's an image cell, redraw the image data. */
-	if (cell->flags & ANSI_EXT_IMG) {
-		redraw_cell_image(x,y,cell);
-		return;
-	}
-
-	/* Special case empty cells. */
-	if (((uint32_t *)cell)[0] == 0x00000000) {
-		term_write_char(' ', x * char_width, y * char_height, TERM_DEFAULT_FG, TERM_DEFAULT_BG, TERM_DEFAULT_FLAGS | ANSI_BORDER);
-	} else {
-		term_write_char(cell->c, x * char_width, y * char_height, cell->fg, cell->bg, cell->flags | ANSI_BORDER);
-	}
+	term_cell_t cell = term_buffer[y * term_width + x];
+	cell.flags |= ANSI_BORDER;
+	term_mirror_copy(x,y,&cell);
 }
 
 /* Draw the cursor cell */
@@ -1028,7 +975,6 @@ static void maybe_flip_cursor(void) {
 		} else {
 			render_cursor();
 		}
-		display_flip();
 		cursor_flipped = 1 - cursor_flipped;
 	}
 }
@@ -1037,20 +983,7 @@ static void maybe_flip_cursor(void) {
 static void term_redraw_all() {
 	for (int i = 0; i < term_height; i++) {
 		for (int x = 0; x < term_width; ++x) {
-			/* Calculate the cell position in the terminal buffer */
-			term_cell_t * cell = (term_cell_t *)((uintptr_t)term_buffer + (i * term_width + x) * sizeof(term_cell_t));
-			/* If it's an image cell, redraw the image data. */
-			if (cell->flags & ANSI_EXT_IMG) {
-				redraw_cell_image(x,i,cell);
-				continue;
-			}
-
-			/* Special case empty cells. */
-			if (((uint32_t *)cell)[0] == 0x00000000) {
-				term_write_char(' ', x * char_width, i * char_height, TERM_DEFAULT_FG, TERM_DEFAULT_BG, TERM_DEFAULT_FLAGS);
-			} else {
-				term_write_char(cell->c, x * char_width, i * char_height, cell->fg, cell->bg, cell->flags);
-			}
+			term_mirror_copy(x,i,&term_buffer[i * term_width + x]);
 		}
 	}
 }
@@ -1061,15 +994,44 @@ static void _menu_action_redraw(struct MenuEntry * self) {
 
 /* Remove no-longer-visible image cell data. */
 static void flush_unused_images(void) {
+	if (!images_list->length) return;
+
 	list_t * tmp = list_create();
-	for (int y = 0; y < term_height; ++y) {
-		for (int x = 0; x < term_width; ++x) {
-			term_cell_t * cell = (term_cell_t *)((uintptr_t)term_buffer + (y * term_width + x) * sizeof(term_cell_t));
-			if (cell->flags & ANSI_EXT_IMG) {
-				list_insert(tmp, (void *)cell->fg);
+
+	/* Go through scrollback, too */
+	if (scrollback_list) {
+		foreach(node, scrollback_list) {
+			struct scrollback_row * row = (struct scrollback_row *)node->value;
+			for (unsigned int x = 0; x < row->width; ++x) {
+				term_cell_t * cell = &row->cells[x];
+				if (cell->flags & ANSI_EXT_IMG) {
+					uint32_t * data = (uint32_t *)((uintptr_t)cell->bg << 32 | cell->fg);
+					list_insert(tmp, data);
+				}
 			}
 		}
 	}
+
+	for (int y = 0; y < term_height; ++y) {
+		for (int x = 0; x < term_width; ++x) {
+			term_cell_t * cell = &term_buffer_a[y * term_width + x];
+			if (cell->flags & ANSI_EXT_IMG) {
+				uint32_t * data = (uint32_t *)((uintptr_t)cell->bg << 32 | cell->fg);
+				list_insert(tmp, data);
+			}
+		}
+	}
+
+	for (int y = 0; y < term_height; ++y) {
+		for (int x = 0; x < term_width; ++x) {
+			term_cell_t * cell = &term_buffer_b[y * term_width + x];
+			if (cell->flags & ANSI_EXT_IMG) {
+				uint32_t * data = (uint32_t *)((uintptr_t)cell->bg << 32 | cell->fg);
+				list_insert(tmp, data);
+			}
+		}
+	}
+
 	foreach(node, images_list) {
 		if (!list_find(tmp, node->value)) {
 			free(node->value);
@@ -1106,27 +1068,12 @@ static void term_shift_region(int top, int height, int how_much) {
 	/* Move from top+how_much to top */
 	if (count) {
 		memmove(term_buffer + destination, term_buffer + source, count * term_width * sizeof(term_cell_t));
-		/* Move displayed as well */
-		cell_redraw(csr_x, csr_y); /* Otherwise we may copy the inverted cursor */
-		uintptr_t dst = (uintptr_t)ctx->backbuffer + GFX_W(ctx) * (destination / term_width * char_height) * GFX_B(ctx);
-		uintptr_t src = (uintptr_t)ctx->backbuffer + GFX_W(ctx) * (source / term_width * char_height) * GFX_B(ctx);
-		if (!_no_frame) {
-			dst += (GFX_W(ctx) * (decor_top_height + menu_bar_height) + decor_left_width) * GFX_B(ctx);
-			src += (GFX_W(ctx) * (decor_top_height + menu_bar_height) + decor_left_width) * GFX_B(ctx);
-			if (dst < src) {
-				for (int i = 0; i < count * char_height; ++i) {
-					memmove((void*)(dst + i * GFX_W(ctx) * GFX_B(ctx)), (void*)(src + i * GFX_W(ctx) * GFX_B(ctx)), term_width * char_width * GFX_B(ctx));
-				}
-			} else {
-				for (int i = (count - 1) * char_height; i >= 0; --i) {
-					memmove((void*)(dst + i * GFX_W(ctx) * GFX_B(ctx)), (void*)(src + i * GFX_W(ctx) * GFX_B(ctx)), term_width * char_width * GFX_B(ctx));
-				}
-			}
-		} else {
-			size_t siz = count * char_height * GFX_W(ctx) * GFX_B(ctx);
-			memmove((void*)dst, (void*)src, siz);
-		}
+		memmove(term_mirror + destination, term_mirror + source, count * term_width * sizeof(term_cell_t));
 	}
+
+	l_x = 0; l_y = 0;
+	r_x = window->width;
+	r_y = window->height;
 
 	/* Clear new lines at bottom */
 	for (int i = new_top; i < new_bottom; ++i) {
@@ -1170,40 +1117,47 @@ static int is_wide(uint32_t codepoint) {
 static void save_scrollback(void) {
 
 	/* If the scrollback is already full, remove the oldest element. */
+	struct scrollback_row * row = NULL;
+	node_t * n = NULL;
+
 	if (scrollback_list->length == MAX_SCROLLBACK) {
-		node_t * n = list_dequeue(scrollback_list);
-		free(n->value);
-		free(n);
+		n = list_dequeue(scrollback_list);
+		row = n->value;
+		if (row->width < term_width) {
+			free(row);
+			row = NULL;
+		}
 	}
 
-	struct scrollback_row * row = malloc(sizeof(struct scrollback_row) + sizeof(term_cell_t) * term_width + 20);
-	row->width = term_width;
+	if (!row) {
+		row = malloc(sizeof(struct scrollback_row) + sizeof(term_cell_t) * term_width);
+		row->width = term_width;
+	}
+
+	if (!n) {
+		list_insert(scrollback_list, row);
+	} else {
+		n->value = row;
+		list_append(scrollback_list, n);
+	}
+
 	for (int i = 0; i < term_width; ++i) {
-		term_cell_t * cell = (term_cell_t *)((uintptr_t)term_buffer + (i) * sizeof(term_cell_t));
+		term_cell_t * cell = &term_buffer[i];
 		memcpy(&row->cells[i], cell, sizeof(term_cell_t));
 	}
-
-	list_insert(scrollback_list, row);
 }
 
 /* Draw the scrollback. */
 static void redraw_scrollback(void) {
 	if (!scrollback_offset) {
 		term_redraw_all();
-		display_flip();
 		return;
 	}
 	if (scrollback_offset < term_height) {
 		for (int i = scrollback_offset; i < term_height; i++) {
 			int y = i - scrollback_offset;
 			for (int x = 0; x < term_width; ++x) {
-				term_cell_t * cell = (term_cell_t *)((uintptr_t)term_buffer + (y * term_width + x) * sizeof(term_cell_t));
-				if (cell->flags & ANSI_EXT_IMG) { redraw_cell_image(x,i,cell); continue; }
-				if (((uint32_t *)cell)[0] == 0x00000000) {
-					term_write_char(' ', x * char_width, i * char_height, TERM_DEFAULT_FG, TERM_DEFAULT_BG, TERM_DEFAULT_FLAGS);
-				} else {
-					term_write_char(cell->c, x * char_width, i * char_height, cell->fg, cell->bg, cell->flags);
-				}
+				term_mirror_copy(x,i,&term_buffer[y * term_width + x]);
 			}
 		}
 
@@ -1217,16 +1171,11 @@ static void redraw_scrollback(void) {
 				width = term_width;
 			} else {
 				for (int x = row->width; x < term_width; ++x) {
-					term_write_char(' ', x * char_width, y * char_height, TERM_DEFAULT_FG, TERM_DEFAULT_BG, TERM_DEFAULT_FLAGS);
+					term_mirror_set(x, y, ' ', TERM_DEFAULT_FG, TERM_DEFAULT_BG, TERM_DEFAULT_FLAGS);
 				}
 			}
 			for (int x = 0; x < width; ++x) {
-				term_cell_t * cell = &row->cells[x];
-				if (((uint32_t *)cell)[0] == 0x00000000) {
-					term_write_char(' ', x * char_width, y * char_height, TERM_DEFAULT_FG, TERM_DEFAULT_BG, TERM_DEFAULT_FLAGS);
-				} else {
-					term_write_char(cell->c, x * char_width, y * char_height, cell->fg, cell->bg, cell->flags);
-				}
+				term_mirror_copy(x,y,&row->cells[x]);
 			}
 
 			node = node->prev;
@@ -1245,22 +1194,16 @@ static void redraw_scrollback(void) {
 				width = term_width;
 			} else {
 				for (int x = row->width; x < term_width; ++x) {
-					term_write_char(' ', x * char_width, y * char_height, TERM_DEFAULT_FG, TERM_DEFAULT_BG, TERM_DEFAULT_FLAGS);
+					term_mirror_set(x, y, ' ', TERM_DEFAULT_FG, TERM_DEFAULT_BG, TERM_DEFAULT_FLAGS);
 				}
 			}
 			for (int x = 0; x < width; ++x) {
-				term_cell_t * cell = &row->cells[x];
-				if (((uint32_t *)cell)[0] == 0x00000000) {
-					term_write_char(' ', x * char_width, y * char_height, TERM_DEFAULT_FG, TERM_DEFAULT_BG, TERM_DEFAULT_FLAGS);
-				} else {
-					term_write_char(cell->c, x * char_width, y * char_height, cell->fg, cell->bg, cell->flags);
-				}
+				term_mirror_copy(x,y,&row->cells[x]);
 			}
 
 			node = node->prev;
 		}
 	}
-	display_flip();
 }
 
 /*
@@ -1364,7 +1307,10 @@ static void term_set_cell_contents(int x, int y, char * data) {
 	char * cell_data = malloc(char_width * char_height * sizeof(uint32_t));
 	memcpy(cell_data, data, char_width * char_height * sizeof(uint32_t));
 	list_insert(images_list, cell_data);
-	cell_set(x, y, ' ', (uint32_t)cell_data, 0, ANSI_EXT_IMG);
+	cell_set(x, y, ' ',
+		(uintptr_t)(cell_data) & 0xFFFFFFFF,
+		(uintptr_t)(cell_data) >> 32,
+		ANSI_EXT_IMG);
 }
 
 /* ANSI callback to get character cell width */
@@ -1435,6 +1381,17 @@ static void term_clear(int i) {
 		for (int x = 0; x < csr_x; ++x) {
 			term_set_cell(x, csr_y, ' ');
 		}
+	} else if (i == 3) {
+		/* Clear scrollback */
+		if (scrollback_list) {
+			while (scrollback_list->length) {
+				node_t * n = list_dequeue(scrollback_list);
+				free(n->value);
+				free(n);
+			}
+			scrollback_offset = 0;
+		}
+
 	}
 	flush_unused_images();
 }
@@ -1454,9 +1411,7 @@ static void term_switch_buffer(int buffer) {
 		SWAP(uint32_t, current_bg, _orig_bg);
 
 		term_redraw_all();
-		display_flip();
 	}
-
 }
 
 /* ANSI callbacks */
@@ -1482,7 +1437,6 @@ term_callbacks_t term_callbacks = {
 
 static void handle_input(char c) {
 	write_input_buffer(&c, 1);
-	display_flip();
 	if (scrollback_offset != 0) {
 		scrollback_offset = 0;
 		term_redraw_all();
@@ -1492,7 +1446,6 @@ static void handle_input(char c) {
 static void handle_input_s(char * c) {
 	size_t len = strlen(c);
 	write_input_buffer(c, len);
-	display_flip();
 	if (scrollback_offset != 0) {
 		scrollback_offset = 0;
 		term_redraw_all();
@@ -1540,6 +1493,31 @@ static void key_event(int ret, key_event_t * event) {
 			(event->keycode == 'v')) {
 			/* Paste selection */
 			yutani_special_request(yctx, NULL, YUTANI_SPECIAL_REQUEST_CLIPBOARD);
+			return;
+		}
+
+		if ((event->modifiers & KEY_MOD_LEFT_CTRL || event->modifiers & KEY_MOD_RIGHT_CTRL) &&
+			(event->keycode == '0')) {
+			scale_fonts  = 0;
+			font_scaling = 1.0;
+			reinit();
+			return;
+		}
+
+		if ((event->modifiers & KEY_MOD_LEFT_SHIFT || event->modifiers & KEY_MOD_RIGHT_SHIFT) &&
+			(event->modifiers & KEY_MOD_LEFT_CTRL || event->modifiers & KEY_MOD_RIGHT_CTRL) &&
+			(event->keycode == '=')) {
+			scale_fonts  = 1;
+			font_scaling = font_scaling * 1.2;
+			reinit();
+			return;
+		}
+
+		if ((event->modifiers & KEY_MOD_LEFT_CTRL || event->modifiers & KEY_MOD_RIGHT_CTRL) &&
+			(event->keycode == '-')) {
+			scale_fonts  = 1;
+			font_scaling = font_scaling * 0.8333333;
+			reinit();
 			return;
 		}
 
@@ -1613,8 +1591,9 @@ static void key_event(int ret, key_event_t * event) {
 				/* Toggle decorations */
 				if (!_fullscreen) {
 					_no_frame = !_no_frame;
-					window_width = window->width - decor_width * (!_no_frame);
-					window_height = window->height - (decor_height + menu_bar_height) * (!_no_frame);
+					update_bounds();
+					window_width = window->width - decor_width;
+					window_height = window->height - (decor_height + menu_bar_height);
 					reinit();
 				}
 				break;
@@ -1755,8 +1734,8 @@ static term_cell_t * copy_terminal(int old_width, int old_height, term_cell_t * 
 	}
 	for (int row = 0; row < min(old_height, term_height); ++row) {
 		for (int col = 0; col < min(old_width, term_width); ++col) {
-			term_cell_t * old_cell = (term_cell_t *)((uintptr_t)term_buffer + ((row + offset) * old_width + col) * sizeof(term_cell_t));
-			term_cell_t * new_cell = (term_cell_t *)((uintptr_t)new_term_buffer + (row * term_width + col) * sizeof(term_cell_t));
+			term_cell_t * old_cell = &term_buffer[(row+offset) * old_width + col];
+			term_cell_t * new_cell = &new_term_buffer[row * term_width + col];
 			*new_cell = *old_cell;
 		}
 	}
@@ -1771,31 +1750,20 @@ static term_cell_t * copy_terminal(int old_width, int old_height, term_cell_t * 
 static void reinit(void) {
 
 	/* Figure out character sizes if fonts have changed. */
-	if (_use_aa && !_have_freetype) {
-		char_width = 9;
+	if (_use_aa) {
+		char_width = 8;
 		char_height = 17;
-		font_size = 16;
-		if (scale_fonts) {
-			font_size   *= font_scaling;
-			char_height *= font_scaling;
-			char_width  *= font_scaling;
-		}
-	} else if (_use_aa && _have_freetype) {
-		font_size   = 13;
-		char_height = 17;
-		char_width  = 8;
+		font_size = 13;
 		char_offset = 13;
-
 		if (scale_fonts) {
-			/* Recalculate scaling */
 			font_size   *= font_scaling;
 			char_height *= font_scaling;
 			char_width  *= font_scaling;
 			char_offset *= font_scaling;
 		}
 	} else {
-		char_width = 9;
-		char_height = 20;
+		char_width = LARGE_FONT_CELL_WIDTH;
+		char_height = LARGE_FONT_CELL_HEIGHT;
 	}
 
 	int old_width  = term_width;
@@ -1804,6 +1772,15 @@ static void reinit(void) {
 	/* Resize the terminal buffer */
 	term_width  = window_width  / char_width;
 	term_height = window_height / char_height;
+
+	if (term_width == old_width && term_height == old_height) {
+		memset(term_display, 0xFF, sizeof(term_cell_t) * term_width * term_height);
+		draw_fill(ctx, rgba(0,0,0, TERM_DEFAULT_OPAC));
+		render_decors();
+		maybe_flip_display(1);
+		return;
+	}
+
 	if (term_buffer) {
 		term_cell_t * new_a = copy_terminal(old_width, old_height, term_buffer_a);
 		term_cell_t * new_b = copy_terminal(old_width, old_height, term_buffer_b);
@@ -1826,17 +1803,17 @@ static void reinit(void) {
 		term_buffer = term_buffer_a;
 	}
 
+	term_mirror = realloc(term_mirror, sizeof(term_cell_t) * term_width * term_height);
+	memcpy(term_mirror, term_buffer, sizeof(term_cell_t) * term_width * term_height);
+
+	term_display = realloc(term_display, sizeof(term_cell_t) * term_width * term_height);
+	memset(term_display, 0xFF, sizeof(term_cell_t) * term_width * term_height);
+
 	/* Reset the ANSI library, ensuring we keep certain values */
 	int old_mouse_state = 0;
 	if (ansi_state) old_mouse_state = ansi_state->mouse_on;
 	ansi_state = ansi_init(ansi_state, term_width, term_height, &term_callbacks);
 	ansi_state->mouse_on = old_mouse_state;
-
-	/* Redraw the window */
-	draw_fill(ctx, rgba(0,0,0, TERM_DEFAULT_OPAC));
-	render_decors();
-	term_redraw_all();
-	display_flip();
 
 	/* Send window size change ioctl */
 	struct winsize w;
@@ -1845,34 +1822,44 @@ static void reinit(void) {
 	w.ws_xpixel = term_width * char_width;
 	w.ws_ypixel = term_height * char_height;
 	ioctl(fd_master, TIOCSWINSZ, &w);
+
+	/* Redraw the window */
+	draw_fill(ctx, rgba(0,0,0, TERM_DEFAULT_OPAC));
+	render_decors();
+	term_redraw_all();
 }
 
 static void update_bounds(void) {
-	struct decor_bounds bounds;
-	decor_get_bounds(window, &bounds);
+	if (!_no_frame) {
+		struct decor_bounds bounds;
+		decor_get_bounds(window, &bounds);
 
-	decor_left_width = bounds.left_width;
-	decor_top_height = bounds.top_height;
-	decor_right_width = bounds.right_width;
-	decor_bottom_height = bounds.bottom_height;
-	decor_width = bounds.width;
-	decor_height = bounds.height;
+		decor_left_width = bounds.left_width;
+		decor_top_height = bounds.top_height;
+		decor_right_width = bounds.right_width;
+		decor_bottom_height = bounds.bottom_height;
+		decor_width = bounds.width;
+		decor_height = bounds.height;
+		menu_bar_height = 24;
+	} else {
+		decor_left_width = 0;
+		decor_top_height = 0;
+		decor_right_width = 0;
+		decor_bottom_height = 0;
+		decor_width = 0;
+		decor_height = 0;
+		menu_bar_height = 0;
+	}
 }
 
 /* Handle window resize event. */
 static void resize_finish(int width, int height) {
 	static int resize_attempts = 0;
 
-	int extra_x = 0;
-	int extra_y = 0;
-
 	/* Calculate window size */
-	if (!_no_frame) {
-		update_bounds();
-
-		extra_x = decor_width;
-		extra_y = decor_height + menu_bar_height;
-	}
+	update_bounds();
+	int extra_x = decor_width;
+	int extra_y = decor_height + menu_bar_height;
 
 	int t_window_width  = width  - extra_x;
 	int t_window_height = height - extra_y;
@@ -1907,6 +1894,7 @@ static void resize_finish(int width, int height) {
 
 	/* Reinitialize the terminal buffer and ANSI library */
 	reinit();
+	maybe_flip_display(1);
 
 	/* We are done resizing. */
 	yutani_window_resize_done(yctx, window);
@@ -1929,6 +1917,8 @@ static void mouse_event(int button, int x, int y) {
 /* Handle Yutani messages */
 static void * handle_incoming(void) {
 
+	static uint64_t last_click = 0;
+
 	yutani_msg_t * m = yutani_poll(yctx);
 	while (m) {
 		if (menu_process_event(yctx, m)) {
@@ -1945,10 +1935,12 @@ static void * handle_incoming(void) {
 			case YUTANI_MSG_WINDOW_FOCUS_CHANGE:
 				{
 					struct yutani_msg_window_focus_change * wf = (void*)m->data;
-					yutani_window_t * win = hashmap_get(yctx->windows, (void*)wf->wid);
+					yutani_window_t * win = hashmap_get(yctx->windows, (void*)(uintptr_t)wf->wid);
 					if (win == window) {
 						win->focused = wf->focused;
 						render_decors();
+						draw_cursor();
+						maybe_flip_display(1);
 					}
 				}
 				break;
@@ -2023,16 +2015,27 @@ static void * handle_incoming(void) {
 						menu_bar_mouse_event(yctx, window, &terminal_menu_bar, me, me->new_x, me->new_y);
 					}
 
-					if (me->new_x < 0 || me->new_y < 0) break;
-					if (!_no_frame) {
-						if (me->new_x >= (int)window_width + (int)decor_width) break;
-						if (me->new_y < (int)decor_top_height+menu_bar_height) break;
-						if (me->new_y >= (int)(window_height + decor_top_height+menu_bar_height)) break;
-						if (me->new_x < (int)decor_left_width) break;
-						if (me->new_x >= (int)(window_width + decor_left_width)) break;
+					if (me->new_x < 0 || me->new_y < 0 ||
+						(!_no_frame && (me->new_x >= (int)window_width + (int)decor_width ||
+							me->new_y < (int)decor_top_height+menu_bar_height ||
+							me->new_y >= (int)(window_height + decor_top_height+menu_bar_height) ||
+							me->new_x < (int)decor_left_width ||
+							me->new_x >= (int)(window_width + decor_left_width))) ||
+						(_no_frame && (me->new_x >= (int)window_width || me->new_y >= (int)window_height))) {
+						if (window->mouse_state == YUTANI_CURSOR_TYPE_IBEAM) {
+							yutani_window_show_mouse(yctx, window, YUTANI_CURSOR_TYPE_RESET);
+						}
+						break;
+					}
+
+					if (!(ansi_state->mouse_on & TERMEMU_MOUSE_ENABLE)) {
+						if (window->mouse_state == YUTANI_CURSOR_TYPE_RESET) {
+							yutani_window_show_mouse(yctx, window, YUTANI_CURSOR_TYPE_IBEAM);
+						}
 					} else {
-						if (me->new_x >= (int)window_width) break;
-						if (me->new_y >= (int)window_height) break;
+						if (window->mouse_state == YUTANI_CURSOR_TYPE_IBEAM) {
+							yutani_window_show_mouse(yctx, window, YUTANI_CURSOR_TYPE_RESET);
+						}
 					}
 
 					int new_x = me->new_x;
@@ -2092,28 +2095,42 @@ static void * handle_incoming(void) {
 					} else {
 						if (me->command == YUTANI_MOUSE_EVENT_DOWN && me->buttons & YUTANI_MOUSE_BUTTON_LEFT) {
 							redraw_scrollback();
-							selection_start_x = new_x;
-							selection_start_y = new_y;
+							uint64_t now = get_ticks();
+							if (now - last_click < 500000UL && (new_x == selection_start_x && new_y == selection_start_y)) {
+								/* Double click */
+								while (selection_start_x > 0) {
+									term_cell_t * c = cell_at(selection_start_x-1, selection_start_y);
+									if (!c || c->c == ' ' || !c->c) break;
+									selection_start_x--;
+								}
+								while (selection_end_x < term_width - 1) {
+									term_cell_t * c = cell_at(selection_end_x+1, selection_end_y);
+									if (!c || c->c == ' ' || !c->c) break;
+									selection_end_x++;
+								}
+								selection = 1;
+							} else {
+								last_click = get_ticks();
+								selection_start_x = new_x;
+								selection_start_y = new_y;
+								selection_end_x = new_x;
+								selection_end_y = new_y;
+								selection = 0;
+							}
+							redraw_selection();
+						}
+						if (me->command == YUTANI_MOUSE_EVENT_DRAG && me->buttons & YUTANI_MOUSE_BUTTON_LEFT ){
+							mark_selection();
 							selection_end_x = new_x;
 							selection_end_y = new_y;
 							selection = 1;
-							redraw_selection();
-							display_flip();
-						}
-						if (me->command == YUTANI_MOUSE_EVENT_DRAG && me->buttons & YUTANI_MOUSE_BUTTON_LEFT ){
-							int old_end_x = selection_end_x;
-							int old_end_y = selection_end_y;
-							selection_end_x = new_x;
-							selection_end_y = new_y;
-							redraw_new_selection(old_end_x, old_end_y);
-							display_flip();
+							flip_selection();
 						}
 						if (me->command == YUTANI_MOUSE_EVENT_RAISE) {
 							if (me->new_x == me->old_x && me->new_y == me->old_y) {
 								selection = 0;
 								term_redraw_all();
 								redraw_scrollback();
-								display_flip();
 							} /* else selection */
 						}
 						if (me->buttons & YUTANI_MOUSE_SCROLL_UP) {
@@ -2122,11 +2139,14 @@ static void * handle_incoming(void) {
 							scroll_down(5);
 						} else if (me->buttons & YUTANI_MOUSE_BUTTON_RIGHT) {
 							if (!menu_right_click->window) {
-								menu_show(menu_right_click, yctx);
-								if (window->x + me->new_x + menu_right_click->window->width > yctx->display_width) {
-									yutani_window_move(yctx, menu_right_click->window, window->x + me->new_x - menu_right_click->window->width, window->y + me->new_y);
-								} else {
-									yutani_window_move(yctx, menu_right_click->window, window->x + me->new_x, window->y + me->new_y);
+								menu_prepare(menu_right_click, yctx);
+								if (menu_right_click->window) {
+									if (window->x + me->new_x + menu_right_click->window->width > yctx->display_width) {
+										yutani_window_move(yctx, menu_right_click->window, window->x + me->new_x - menu_right_click->window->width, window->y + me->new_y);
+									} else {
+										yutani_window_move(yctx, menu_right_click->window, window->x + me->new_x, window->y + me->new_y);
+									}
+									yutani_flip(yctx, menu_right_click->window);
 								}
 							}
 						}
@@ -2159,27 +2179,32 @@ static struct MenuEntry * _menu_toggle_borders_bar = NULL;
 
 static void _menu_action_hide_borders(struct MenuEntry * self) {
 	_no_frame = !(_no_frame);
-	window_width = window->width - decor_width * (!_no_frame);
-	window_height = window->height - (decor_height + menu_bar_height) * (!_no_frame);
-	menu_update_title(_menu_toggle_borders_context, _no_frame ? "Show borders" : "Hide borders");
-	menu_update_title(_menu_toggle_borders_bar, _no_frame ? "Show borders" : "Hide borders");
+	update_bounds();
+	window_width = window->width - decor_width;
+	window_height = window->height - (decor_height + menu_bar_height);
+	menu_update_icon(_menu_toggle_borders_context, _no_frame ? NULL : "check");
+	menu_update_icon(_menu_toggle_borders_bar, _no_frame ? NULL : "check");
 	reinit();
 }
 
-static void _menu_action_toggle_sdf(struct MenuEntry * self) {
+static struct MenuEntry * _menu_toggle_bitmap_context = NULL;
+static struct MenuEntry * _menu_toggle_bitmap_bar = NULL;
+
+static void _menu_action_toggle_tt(struct MenuEntry * self) {
 	_use_aa = !(_use_aa);
-	menu_update_title(self, _use_aa ? "Bitmap font" : "Anti-aliased font");
+	menu_update_icon(_menu_toggle_bitmap_context, _use_aa ? NULL : "check");
+	menu_update_icon(_menu_toggle_bitmap_bar, _use_aa ? NULL : "check");
 	reinit();
 }
 
 static void _menu_action_toggle_free_size(struct MenuEntry * self) {
 	_free_size = !(_free_size);
-	menu_update_title(self, _free_size ? "Snap to Cell Size" : "Freely Resize");
+	menu_update_icon(self, _free_size ? NULL : "check");
 }
 
 static void _menu_action_show_about(struct MenuEntry * self) {
 	char about_cmd[1024] = "\0";
-	strcat(about_cmd, "about \"About Terminal\" /usr/share/icons/48/utilities-terminal.png \"PonyOS Terminal\" \"(C) 2013-2020 K. Lange\n-\nPart of PonyOS, which is free software\nreleased under the NCSA/University of Illinois\nlicense.\n-\n%https://ponyos.org\n%https://github.com/klange/ponyos\" ");
+	strcat(about_cmd, "about \"About Terminal\" /usr/share/icons/48/utilities-terminal.png \"PonyOS Terminal\" \"© 2013-2021 K. Lange\n-\nPart of PonyOS, which is free software\nreleased under the NCSA/University of Illinois\nlicense.\n-\n%https://toaruos.org\n%https://github.com/klange/toaruos\" ");
 	char coords[100];
 	sprintf(coords, "%d %d &", (int)window->x + (int)window->width / 2, (int)window->y + (int)window->height / 2);
 	strcat(about_cmd, coords);
@@ -2217,6 +2242,51 @@ static void render_decors_callback(struct menu_bar * self) {
 	render_decors();
 }
 
+/**
+ * Geometry argument follows this format:
+ *    [@]WxH[+X,Y]
+ *
+ * If @ is present, W and H are in characters.
+ * If + is present, X and Y are the left and top offset.
+ */
+static void parse_geometry(char ** argv, char * str) {
+
+	int in_chars = 0;
+	if (*str == '@') {
+		in_chars = 1;
+		str++;
+	}
+
+	/* Split on 'x', which is required. */
+	char * c = strstr(str, "x");
+	if (!c) return; /* Ignore invalid arg */
+	*c = '\0';
+	c++;
+
+	/* Find optional + that starts position */
+	char * plus = strstr(c, "+");
+	if (plus) {
+		*plus = '\0';
+		plus++;
+	}
+
+	/* Parse size */
+	window_width = atoi(str) * (in_chars ? char_width : 1);
+	window_height = atoi(c) * (in_chars ? char_height : 1);
+
+	if (plus) {
+		/* If there was a plus, let's look for a comma */
+		char * comma = strstr(plus, ",");
+		if (!comma) return; /* Skip invalid position */
+		*comma = '\0';
+		comma++;
+
+		window_position_set = 1;
+		window_left = atoi(plus);
+		window_top  = atoi(comma);
+	}
+}
+
 int main(int argc, char ** argv) {
 
 	window_width  = char_width * 80;
@@ -2230,13 +2300,12 @@ int main(int argc, char ** argv) {
 		{"grid",       no_argument,       0, 'x'},
 		{"no-frame",   no_argument,       0, 'n'},
 		{"geometry",   required_argument, 0, 'g'},
-		{"no-ft",      no_argument,       0, 'f'},
 		{0,0,0,0}
 	};
 
 	/* Read some arguments */
 	int index, c;
-	while ((c = getopt_long(argc, argv, "bhxnfFls:g:", long_opts, &index)) != -1) {
+	while ((c = getopt_long(argc, argv, "bhxnFls:g:", long_opts, &index)) != -1) {
 		if (!c) {
 			if (long_opts[index].flag == 0) {
 				c = long_opts[index].val;
@@ -2248,9 +2317,6 @@ int main(int argc, char ** argv) {
 				break;
 			case 'n':
 				_no_frame = 1;
-				break;
-			case 'f':
-				_force_no_ft = 1;
 				break;
 			case 'F':
 				_fullscreen = 1;
@@ -2268,30 +2334,12 @@ int main(int argc, char ** argv) {
 				font_scaling = atof(optarg);
 				break;
 			case 'g':
-				{
-					char * c = strstr(optarg, "x");
-					if (c) {
-						*c = '\0';
-						c++;
-						window_width  = atoi(optarg);
-						window_height = atoi(c);
-					}
-				}
+				parse_geometry(argv,optarg);
 				break;
 			case '?':
 				break;
 			default:
 				break;
-		}
-	}
-
-	if (!_force_no_ft) {
-		void * freetype = dlopen("libtoaru_ext_freetype_fonts.so", 0);
-		if (freetype) {
-			_have_freetype = 1;
-			freetype_set_font_face = dlsym(freetype, "freetype_set_font_face");
-			freetype_set_font_size = dlsym(freetype, "freetype_set_font_size");
-			freetype_draw_char   = dlsym(freetype, "freetype_draw_char");
 		}
 	}
 
@@ -2303,6 +2351,13 @@ int main(int argc, char ** argv) {
 		return 1;
 	}
 
+	_tt_font_normal       = tt_font_from_shm("monospace");
+	_tt_font_bold         = tt_font_from_shm("monospace.bold");
+	_tt_font_oblique      = tt_font_from_shm("monospace.italic");
+	_tt_font_bold_oblique = tt_font_from_shm("monospace.bolditalic");
+	_tt_font_fallback     = _tt_font_normal;
+	_tt_font_japanese     = tt_font_from_file("/usr/share/fonts/truetype/vlgothic/VL-Gothic-Regular.ttf"); /* Might not be present */
+
 	/* Full screen mode forces window size to be that the display server */
 	if (_fullscreen) {
 		window_width = yctx->display_width;
@@ -2310,13 +2365,12 @@ int main(int argc, char ** argv) {
 	}
 
 	if (_no_frame) {
-		window = yutani_window_create(yctx, window_width, window_height);
+		window = yutani_window_create_flags(yctx, window_width, window_height, YUTANI_WINDOW_FLAG_NO_ANIMATION);
 	} else {
 		init_decorations();
 		struct decor_bounds bounds;
 		decor_get_bounds(NULL, &bounds);
 		window = yutani_window_create(yctx, window_width + bounds.width, window_height + bounds.height + menu_bar_height);
-		update_bounds();
 	}
 
 	if (_fullscreen) {
@@ -2326,6 +2380,8 @@ int main(int argc, char ** argv) {
 	} else {
 		window->focused = 0;
 	}
+
+	update_bounds();
 
 	/* Set up menus */
 	terminal_menu_bar.entries = terminal_menu_entries;
@@ -2338,11 +2394,13 @@ int main(int argc, char ** argv) {
 	menu_right_click = menu_create();
 	menu_insert(menu_right_click, _menu_copy);
 	menu_insert(menu_right_click, _menu_paste);
+	menu_insert(menu_right_click, menu_create_separator());
 	if (!_fullscreen) {
-		menu_insert(menu_right_click, menu_create_separator());
-		_menu_toggle_borders_context = menu_create_normal(NULL, NULL, _no_frame ? "Show borders" : "Hide borders", _menu_action_hide_borders);
+		_menu_toggle_borders_context = menu_create_normal(_no_frame ? NULL : "check", NULL, "Show borders", _menu_action_hide_borders);
 		menu_insert(menu_right_click, _menu_toggle_borders_context);
 	}
+	_menu_toggle_bitmap_context = menu_create_normal(_use_aa ? NULL : "check", NULL, "Bitmap font", _menu_action_toggle_tt);
+	menu_insert(menu_right_click, _menu_toggle_bitmap_context);
 	menu_insert(menu_right_click, menu_create_separator());
 	menu_insert(menu_right_click, _menu_exit);
 
@@ -2366,11 +2424,12 @@ int main(int argc, char ** argv) {
 	menu_set_insert(terminal_menu_bar.set, "zoom", m);
 
 	m = menu_create();
-	_menu_toggle_borders_bar = menu_create_normal(NULL, NULL, _no_frame ? "Show borders" : "Hide borders", _menu_action_hide_borders);
+	_menu_toggle_borders_bar = menu_create_normal(_no_frame ? NULL : "check", NULL, "Show borders", _menu_action_hide_borders);
 	menu_insert(m, _menu_toggle_borders_bar);
 	menu_insert(m, menu_create_submenu(NULL,"zoom","Set zoom..."));
-	menu_insert(m, menu_create_normal(NULL, NULL, _use_aa ? "Bitmap font" : "Anti-aliased font", _menu_action_toggle_sdf));
-	menu_insert(m, menu_create_normal(NULL, NULL, _free_size ? "Snap to Cell Size" : "Freely Resize", _menu_action_toggle_free_size));
+	_menu_toggle_bitmap_bar = menu_create_normal(_use_aa ? NULL : "check", NULL, "Bitmap font", _menu_action_toggle_tt);
+	menu_insert(m, _menu_toggle_bitmap_bar);
+	menu_insert(m, menu_create_normal(_free_size ? NULL : "check", NULL, "Snap to Cell Size", _menu_action_toggle_free_size));
 	menu_insert(m, menu_create_separator());
 	menu_insert(m, menu_create_normal(NULL, NULL, "Redraw", _menu_action_redraw));
 	menu_set_insert(terminal_menu_bar.set, "view", m);
@@ -2390,8 +2449,13 @@ int main(int argc, char ** argv) {
 	/* Clear to black */
 	draw_fill(ctx, rgba(0,0,0,0));
 
-	/* Move window to screen center (XXX maybe remove this and do better window placement elsewhere */
-	yutani_window_move(yctx, window, yctx->display_width / 2 - window->width / 2, yctx->display_height / 2 - window->height / 2);
+	if (window_position_set) {
+		/* Move to requested position */
+		yutani_window_move(yctx, window, window_left, window_top);
+	} else {
+		/* Move window to screen center */
+		yutani_window_move(yctx, window, yctx->display_width / 2 - window->width / 2, yctx->display_height / 2 - window->height / 2);
+	}
 
 	/* Open a PTY */
 	openpty(&fd_master, &fd_slave, NULL, NULL, NULL);
@@ -2448,29 +2512,35 @@ int main(int argc, char ** argv) {
 
 		/* PTY read buffer */
 		unsigned char buf[4096];
+		int next_wait = 200;
 
 		while (!exit_application) {
 
 			/* Wait for something to happen. */
 			int res[] = {0,0};
-			fswait3(2,fds,200,res);
+			fswait3(2,fds,next_wait,res);
 
 			/* Check if the child application has closed. */
 			check_for_exit();
 			maybe_flip_cursor();
 
+			int force_flip = (!res[1] && (next_wait == 10));
+
 			if (res[1]) {
 				/* Read from PTY */
-				int r = read(fd_master, buf, 4096);
-				for (int i = 0; i < r; ++i) {
+				ssize_t r = read(fd_master, buf, 4096);
+				for (ssize_t i = 0; i < r; ++i) {
 					ansi_put(ansi_state, buf[i]);
 				}
-				display_flip();
+				next_wait = 10;
+			} else {
+				next_wait = 200;
 			}
 			if (res[0]) {
 				/* Handle Yutani events. */
 				handle_incoming();
 			}
+			maybe_flip_display(force_flip);
 		}
 	}
 

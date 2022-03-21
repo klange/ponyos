@@ -1,0 +1,46 @@
+#!/bin/kuroko
+
+import fileio
+
+let lines
+let cpus = {0: {}}
+let current = 0
+
+with fileio.open('/proc/cpuinfo','r') as f:
+    lines = f.readlines()
+
+for line in lines:
+    if line == '\n':
+        current++
+        cpus[current] = {}
+        continue
+    line = line.strip()
+    if ': ' in line:
+        let key, value = line.split(': ')
+        cpus[current][key] = value
+
+if cpus and 'Model name' in cpus[0]:
+    print(cpus[0]['Model name'])
+else if cpus and 'PartNum' in cpus[0]:
+    # ARM
+    let manuf = {
+        0x41: 'ARM',
+        0x61: 'Apple',
+    }
+    let parts = {
+        0xD02: 'Cortex-A34',
+        0xD03: 'Cortex-A53',
+        0xD04: 'Cortex-A35',
+        0xD05: 'Cortex-A55',
+        0xD07: 'Cortex-A57',
+        0xD08: 'Cortex-A72',
+        0xD09: 'Cortex-A73',
+
+        # Apple stuff
+        0x022: 'M1', # Icestorm core
+        0x023: 'M1', # Firestorm core
+    }
+    print(
+        manuf.get(int(cpus[0]['Implementer']),cpus[0]['Implementer']),
+        parts.get(int(cpus[0]['PartNum']),cpus[0]['PartNum'])
+    )

@@ -1,8 +1,16 @@
+/**
+ * @brief Test tool for thread local storage.
+ *
+ * @copyright
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2020-2021 K. Lange
+ */
 #include <stdio.h>
 #include <pthread.h>
 #include <sys/sysfunc.h>
 
-__thread int myvalue;
+__thread volatile int myvalue;
 
 void * getaddressinthread(void * _unused) {
 	fprintf(stderr, "in thread before:\n");

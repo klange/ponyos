@@ -1,7 +1,9 @@
+import os
 from bim import getCommands
 from syntax import Highlighter, bind
 from syntax.doxygen import tryDoxygenComment
 
+@bind
 class KrkHighlighter(Highlighter):
     name = 'krk'
     extensions = ('.krk',)
@@ -15,6 +17,7 @@ class KrkHighlighter(Highlighter):
         'and','class','def','else','export','for','if','in','import','let','not',
         'or','return','while','try','except','raise','continue','break','as','from',
         'elif', 'lambda', 'pass', 'with', 'is', 'del', 'assert', 'yield', 'finally',
+        'async', 'await',
     ]
 
     types = [
@@ -22,7 +25,7 @@ class KrkHighlighter(Highlighter):
         'object','exception','isinstance','type','print','tuple','bool','any','all',
         'hex','ord','chr','bytes','set','getattr','setattr','input','zip','enumerate',
         'property','staticmethod','classmethod','filter','min','max','id','map','bin',
-        'sum','sorted','issubclass','hasattr','delattr',
+        'sum','sorted','issubclass','hasattr','delattr', 'NotImplemented',
     ]
 
     special = [
@@ -159,16 +162,30 @@ class KrkHighlighter(Highlighter):
             return self.paintString("'\""[self.state % 2], (self.state % 10) <= 2, self.state > 10)
         return None
 
-bind(KrkHighlighter)
-
+@bind
 class BimcmdHighlighter(KrkHighlighter):
     name = 'bimcmd'
     extensions = ('.bim3rc',)
 
+    file_commands = ['e','tabnew','split','w','runscript','rundir']
+
     def calculate(self):
         if self.state <= 0 and self[-1] != '.':
+            if self.i == 0:
+                if self.findKeywords(self.file_commands, self.FLAG_KEYWORD, self.cKeywordQualifier):
+                    if self[0] == ' ':
+                        while self[0] == ' ': self.skip()
+                        let filePath = self[0:]
+                        if filePath:
+                            if filePath.startswith('~/'):
+                                filePath = filePath.replace('~',os.environ.get('HOME','~'),1)
+                            try:
+                                os.stat(filePath)
+                                self.paint(-1, self.FLAG_DIFFPLUS)
+                            except:
+                                self.paint(-1, self.FLAG_DIFFMINUS)
+                        return -1
             if self.findKeywords(getCommands(), self.FLAG_KEYWORD, self.cKeywordQualifier):
                 return 0
         return super().calculate()
 
-bind(BimcmdHighlighter)

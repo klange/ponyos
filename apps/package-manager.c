@@ -1,22 +1,26 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
+/**
+ * @brief Graphical interface to msk
+ *
+ * @copyright
  * This file is part of ToaruOS and is released under the terms
  * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2018 K. Lange
- *
- * package-manager - Graphical interface to msk
+ * Copyright (C) 2018-2021 K. Lange
  */
 #include <stdio.h>
 #include <unistd.h>
 #include <math.h>
+#include <pthread.h>
 
 #include <sys/time.h>
 #include <sys/stat.h>
+
+#include <sys/fswait.h>
 
 #include <toaru/yutani.h>
 #include <toaru/graphics.h>
 #include <toaru/decorations.h>
 #include <toaru/menu.h>
-#include <toaru/sdf.h>
+#include <toaru/text.h>
 #include <toaru/confreader.h>
 #include <toaru/icon_cache.h>
 
@@ -38,6 +42,13 @@ static int scroll_offset = 0; /* How far the icon view should be scrolled */
 static int hilighted_offset = -1; /* Which file is hovered by the mouse */
 static uint64_t last_click = 0; /* For double click */
 static int last_click_offset = -1; /* So that clicking two different things quickly doesn't count as a double click */
+
+static int installation_done = 0;
+static int currently_installing = 0;
+static pthread_t _waiter_thread;
+
+struct TT_Font * tt_font_thin = NULL;
+struct TT_Font * tt_font_bold = NULL;
 
 struct Package {
 	char name[256];
@@ -130,10 +141,12 @@ static void draw_package(struct Package * package, int index) {
 
 	char tmp[2048];
 	sprintf(tmp, "%s - %s", package->friendly_name, package->version);
-	draw_sdf_string(contents, 64, offset_y + 4, tmp, 20, text_color, SDF_FONT_BOLD);
+	tt_set_size(tt_font_bold, 18);
+	tt_draw_string(contents, tt_font_bold, 64, offset_y + 4 + 18, tmp, text_color);
 	sprintf(tmp, "%s - %s", package->name, package->description);
-	int x = draw_sdf_string(contents, 65, offset_y + 24, package->name, 16, rgb(150,150,150), SDF_FONT_THIN);
-	draw_sdf_string(contents, 64 + x + 4, offset_y + 24, package->description, 16, text_color, SDF_FONT_THIN);
+	tt_set_size(tt_font_thin, 13);
+	int x = tt_draw_string(contents, tt_font_thin, 65, offset_y + 24 + 13, package->name, rgb(150,150,150));
+	tt_draw_string(contents, tt_font_thin, 64 + x + 4, offset_y + 24 + 13, package->description, text_color);
 
 }
 
@@ -325,23 +338,50 @@ static void _menu_action_refresh(struct MenuEntry * entry) {
 	redraw_window();
 }
 
-static void install_package(struct Package * package) {
-	if (package->installed) return;
 
+static void * package_installer_thread(void * arg) {
+	char * packages = arg;
 	putenv("MSK_YES=1");
 	char tmp[1024];
-	sprintf(tmp, "terminal msk install %s", package->name);
+	sprintf(tmp, "terminal msk install %s", packages);
+	free(packages);
 	system(tmp);
+	installation_done = 1;
+	return NULL;
+}
 
-	load_manifest();
-	reinitialize_contents();
-	redraw_window();
+static void install_packages(void) {
+	if (currently_installing) return;
+
+	/* Figure out what packages to install */
+	size_t c_len = 0;
+	for (int i = 0; i <pkg_pointers_len; ++i) {
+		if (pkg_pointers[i]->selected) {
+			c_len += strlen(pkg_pointers[i]->name) + 2;
+		}
+	}
+
+	if (!c_len) return; /* Nothing selected? */
+
+	char * packages = malloc(c_len);
+	char * cursor = packages;
+
+	for (int i = 0; i <pkg_pointers_len; ++i) {
+		if (pkg_pointers[i]->selected) {
+			cursor += sprintf(cursor, "%s ", pkg_pointers[i]->name);
+		}
+	}
+
+	installation_done = 0;
+	currently_installing = 1;
+
+	pthread_create(&_waiter_thread, NULL, package_installer_thread, packages);
 }
 
 static void _menu_action_about(struct MenuEntry * entry) {
 	/* Show About dialog */
 	char about_cmd[1024] = "\0";
-	strcat(about_cmd, "about \"About " APPLICATION_TITLE "\" /usr/share/icons/48/package.png \"PonyOS " APPLICATION_TITLE "\" \"(C) 2018 K. Lange\n-\nPart of PonyOS, which is free software\nreleased under the NCSA/University of Illinois\nlicense.\n-\n%https://ponyos.org\n%https://github.com/klange/ponyos\" ");
+	strcat(about_cmd, "about \"About " APPLICATION_TITLE "\" /usr/share/icons/48/package.png \"PonyOS " APPLICATION_TITLE "\" \"© 2018 K. Lange\n-\nPart of PonyOS, which is free software\nreleased under the NCSA/University of Illinois\nlicense.\n-\n%https://toaruos.org\n%https://github.com/klange/toaruos\" ");
 	char coords[100];
 	sprintf(coords, "%d %d &", (int)main_window->x + (int)main_window->width / 2, (int)main_window->y + (int)main_window->height / 2);
 	strcat(about_cmd, coords);
@@ -409,8 +449,10 @@ static void arrow_select(int y) {
 	for (int i = 0; i <pkg_pointers_len; ++i) {
 		if (pkg_pointers[i]->selected) {
 			selected = i;
+			pkg_pointers[i]->selected = 0;
+			clear_offset(i);
+			draw_package(pkg_pointers[i], i);
 		}
-		pkg_pointers[i]->selected = 0;
 	}
 
 	if (selected == -1) {
@@ -429,7 +471,8 @@ static void arrow_select(int y) {
 	}
 
 	pkg_pointers[selected]->selected = 1;
-	reinitialize_contents();
+	clear_offset(selected);
+	draw_package(pkg_pointers[selected], selected);
 	redraw_window();
 }
 
@@ -456,6 +499,9 @@ int main(int argc, char * argv[]) {
 	main_window = yutani_window_create(yctx, 640, 480);
 	yutani_window_move(yctx, main_window, yctx->display_width / 2 - main_window->width / 2, yctx->display_height / 2 - main_window->height / 2);
 	ctx = init_graphics_yutani_double_buffer(main_window);
+
+	tt_font_thin = tt_font_from_shm("sans-serif");
+	tt_font_bold = tt_font_from_shm("sans-serif.bold");
 
 	yutani_window_advertise_icon(yctx, main_window, APPLICATION_TITLE, "package");
 
@@ -492,7 +538,24 @@ int main(int argc, char * argv[]) {
 		/* also redraws window */
 	}
 
+	int fds[1] = {fileno(yctx->sock)};
+
 	while (application_running) {
+		int index = fswait2(1,fds,200);
+
+		/* Were we waiting for a package to install? */
+		if (currently_installing) {
+			if (installation_done) {
+				currently_installing = 0;
+				installation_done = 0;
+				load_manifest();
+				reinitialize_contents();
+				redraw_window();
+			}
+		}
+
+		if (index != 0) continue;
+
 		yutani_msg_t * m = yutani_poll(yctx);
 		while (m) {
 			if (menu_process_event(yctx, m)) {
@@ -519,11 +582,7 @@ int main(int argc, char * argv[]) {
 									arrow_select(-1);
 									break;
 								case '\n':
-									for (int i = 0; i <pkg_pointers_len; ++i) {
-										if (pkg_pointers[i]->selected) {
-											install_package(pkg_pointers[i]);
-										}
-									}
+									install_packages();
 									break;
 								case 'f':
 									if (ke->event.modifiers & YUTANI_KEY_MODIFIER_ALT) {
@@ -552,7 +611,7 @@ int main(int argc, char * argv[]) {
 				case YUTANI_MSG_WINDOW_FOCUS_CHANGE:
 					{
 						struct yutani_msg_window_focus_change * wf = (void*)m->data;
-						yutani_window_t * win = hashmap_get(yctx->windows, (void*)wf->wid);
+						yutani_window_t * win = hashmap_get(yctx->windows, (void*)(uintptr_t)wf->wid);
 						if (win == main_window) {
 							win->focused = wf->focused;
 							redraw_packages();
@@ -571,7 +630,7 @@ int main(int argc, char * argv[]) {
 				case YUTANI_MSG_WINDOW_MOUSE_EVENT:
 					{
 						struct yutani_msg_window_mouse_event * me = (void*)m->data;
-						yutani_window_t * win = hashmap_get(yctx->windows, (void*)me->wid);
+						yutani_window_t * win = hashmap_get(yctx->windows, (void*)(uintptr_t)me->wid);
 
 						if (win == main_window) {
 							int result = decor_handle_event(yctx, m);
@@ -629,8 +688,7 @@ int main(int argc, char * argv[]) {
 									struct Package * f = get_package_at_offset(hilighted_offset);
 									if (f) {
 										if (last_click_offset == hilighted_offset && precise_time_since(last_click) < 400) {
-											install_package(f);
-											//open_file(f);
+											install_packages();
 											last_click = 0;
 										} else {
 											last_click = precise_current_time();

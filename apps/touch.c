@@ -1,10 +1,10 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
+/**
+ * @brief touch - Create or update file timestamps
+ *
+ * @copyright
  * This file is part of ToaruOS and is released under the terms
  * of the NCSA / University of Illinois License - see LICENSE.md
  * Copyright (C) 2013 K. Lange
- *
- * touch - Create or update file timestamps
- *
  */
 #include <stdio.h>
 #include <string.h>
@@ -22,6 +22,7 @@ int main(int argc, char * argv[]) {
 		if (!f) {
 			fprintf(stderr, "%s: %s: %s\n", argv[0], argv[i], strerror(errno));
 			out = 1;
+			continue;
 		}
 		fclose(f);
 	}

@@ -1,256 +1,809 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
+/**
+ * @file  readelf.c
+ * @brief Display information about a 64-bit Elf binary or object.
+ *
+ * Implementation of a `readelf` utility.
+ *
+ * I've tried to get the output here as close to the binutils format
+ * as possible, so it should be compatible with tools that try to
+ * parse that. Most of the same arguments should also be supported.
+ *
+ * This is a rewrite of an earlier version.
+ *
+ * @copyright
  * This file is part of ToaruOS and is released under the terms
  * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2013-2018 K Lange
- *
- * readelf - Show information about ELF objects
- *
- * This is a very custom implementation and nothing remotely
- * like the version that comes with binutils. Making it more
- * like that version might be worthwhile.
+ * Copyright (C) 2020-2021 K. Lange
  */
 #include <stdio.h>
-#include <stdlib.h>
-#include <stdint.h>
 #include <string.h>
+#include <stdlib.h>
 #include <errno.h>
+#include <getopt.h>
 #include <kernel/elf.h>
 
-/**
- * Show usage for the readelf application.
- * @param argc Argument count (unused)
- * @param argv Arguments to binary
- */
-void usage(int argc, char ** argv) {
-	/* Show usage */
-	printf("%s [filename]\n", argv[0]);
-	printf("\tDisplays information on ELF binaries such as section names,\n");
-	printf("\tlocations, sizes, and loading positions in memory.\n");
-	exit(1);
+#define SHOW_FILE_HEADER      0x0001
+#define SHOW_SECTION_HEADERS  0x0002
+#define SHOW_PROGRAM_HEADERS  0x0004
+#define SHOW_SYMBOLS          0x0008
+#define SHOW_DYNAMIC          0x0010
+#define SHOW_RELOCATIONS      0x0020
+
+static const char * elf_classToStr(unsigned char ei_class) {
+	static char buf[64];
+	switch (ei_class) {
+		case ELFCLASS32: return "ELF32";
+		case ELFCLASS64: return "ELF64";
+		default:
+			sprintf(buf, "unknown (%d)", ei_class);
+			return buf;
+	}
 }
 
-/**
- * Application entry point.
- * @returns 0 on sucess, 1 on failure
- */
-int main(int argc, char ** argv) {
-	/* Process arguments */
-	if (argc < 2) usage(argc,argv);
-
-	FILE * binary;           /**< File pointer for requested executable */
-	size_t binary_size;      /**< Size of the file */
-	char * binary_buf;       /**< Buffer to store the binary in memory */
-	Elf32_Header * header;   /**< ELF header */
-	char * string_table = NULL;     /**< The section header string table */
-	char * sym_string_table = NULL; /**< The symbol string table */
-
-	/* Open the requested binary */
-	binary = fopen(argv[1], "r");
-
-	if (!binary) {
-		fprintf(stderr, "%s: %s: %s\n", argv[0], argv[1], strerror(errno));
-		return 1;
+static const char * elf_dataToStr(unsigned char ei_data) {
+	static char buf[64];
+	switch (ei_data) {
+		case ELFDATA2LSB: return "2's complement, little endian";
+		case ELFDATA2MSB: return "2's complement, big endian";
+		default:
+			sprintf(buf, "unknown (%d)", ei_data);
+			return buf;
 	}
+}
 
-	/* Jump to the end so we can get the size */
-	fseek(binary, 0, SEEK_END);
-	binary_size = ftell(binary);
-	fseek(binary, 0, SEEK_SET);
-
-	/* Some sanity checks */
-	if (binary_size < 4 || binary_size > 0xFFFFFFF) {
-		printf("Oh no! I don't quite like the size of this binary.\n");
-		return 1;
+static char * elf_versionToStr(unsigned char ei_version) {
+	static char buf[64];
+	switch (ei_version) {
+		case 1: return "1 (current)";
+		default:
+			sprintf(buf, "unknown (%d)", ei_version);
+			return buf;
 	}
-	printf("Binary is %u bytes.\n", (unsigned int)binary_size);
+}
 
-	/* Read the binary into a buffer */
-	binary_buf = malloc(binary_size);
-	fread((void *)binary_buf, binary_size, 1, binary);
-
-	/* Let's start considering this guy an elf, 'eh? */
-	header = (Elf32_Header *)binary_buf;
-
-	/* Verify the magic */
-	if (	header->e_ident[0] != ELFMAG0 ||
-			header->e_ident[1] != ELFMAG1 ||
-			header->e_ident[2] != ELFMAG2 ||
-			header->e_ident[3] != ELFMAG3) {
-		printf("Header magic is wrong!\n");
-		printf("Are you sure this is a 32-bit ELF binary or object file?\n");
-		return 1;
+static char * elf_osabiToStr(unsigned char ei_osabi) {
+	static char buf[64];
+	switch (ei_osabi) {
+		case 0: return "UNIX - System V";
+		case 1: return "HP-UX";
+		case 255: return "Standalone";
+		default:
+			sprintf(buf, "unknown (%d)", ei_osabi);
+			return buf;
 	}
+}
 
-	/* Let's print out some of the header information, shall we? */
-	printf("\033[1mELF Header\033[0m\n");
+static char * elf_typeToStr(Elf64_Half type) {
+	static char buf[64];
+	switch (type) {
+		case ET_NONE: return "NONE (No file type)";
+		case ET_REL:  return "REL (Relocatable object file)";
+		case ET_EXEC: return "EXEC (Executable file)";
+		case ET_DYN:  return "DYN (Shared object file)";
+		case ET_CORE: return "CORE (Core file)";
+		default:
+			sprintf(buf, "unknown (%d)", type);
+			return buf;
+	}
+}
 
-	/* File type */
-	printf("[Type %d] ", header->e_type);
-	switch (header->e_type) {
-		case ET_NONE:
-			printf("No file type.\n");
+static char * elf_machineToStr(Elf64_Half machine) {
+	static char buf[64];
+	switch (machine) {
+		case EM_X86_64: return "Advanced Micro Devices X86-64";
+		default:
+			sprintf(buf, "unknown (%d)", machine);
+			return buf;
+	}
+}
+
+static char * sectionHeaderTypeToStr(Elf64_Word type) {
+	static char buf[64];
+	switch (type) {
+		case SHT_NULL: return "NULL";
+		case SHT_PROGBITS: return "PROGBITS";
+		case SHT_SYMTAB: return "SYMTAB";
+		case SHT_STRTAB: return "STRTAB";
+		case SHT_RELA: return "RELA";
+		case SHT_HASH: return "HASH";
+		case SHT_DYNAMIC: return "DYNAMIC";
+		case SHT_NOTE: return "NOTE";
+		case SHT_NOBITS: return "NOBITS";
+		case SHT_REL: return "REL";
+		case SHT_SHLIB: return "SHLIB";
+		case SHT_DYNSYM: return "DYNSYM";
+
+		case 0xE: return "INIT_ARRAY";
+		case 0xF: return "FINI_ARRAY";
+		case 0x6ffffff6: return "GNU_HASH";
+		case 0x6ffffffe: return "VERNEED";
+		case 0x6fffffff: return "VERSYM";
+		default:
+			sprintf(buf, "(%x)", type);
+			return buf;
+	}
+}
+
+static char * programHeaderTypeToStr(Elf64_Word type) {
+	static char buf[64];
+	switch (type) {
+		case PT_NULL: return "NULL";
+		case PT_LOAD: return "LOAD";
+		case PT_DYNAMIC: return "DYNAMIC";
+		case PT_INTERP: return "INTERP";
+		case PT_NOTE: return "NOTE";
+		case PT_PHDR: return "PHDR";
+		case PT_GNU_EH_FRAME: return "GNU_EH_FRAME";
+
+		case 0x6474e553: return "GNU_PROPERTY";
+		case 0x6474e551: return "GNU_STACK";
+		case 0x6474e552: return "GNU_RELRO";
+
+		default:
+			sprintf(buf, "(%x)", type);
+			return buf;
+	}
+}
+
+static char * programHeaderFlagsToStr(Elf64_Word flags) {
+	static char buf[10];
+
+	snprintf(buf, 10, "%c%c%c   ",
+		(flags & PF_R) ? 'R' : ' ',
+		(flags & PF_W) ? 'W' : ' ',
+		(flags & PF_X) ? 'E' : ' '); /* yes, E, not X... */
+
+	return buf;
+}
+
+static char * dynamicTagToStr(Elf64_Dyn * dynEntry, char * dynstr) {
+	static char buf[1024];
+	static char extra[500];
+	char * name = NULL;
+	sprintf(extra, "0x%lx", dynEntry->d_un.d_val);
+
+	switch (dynEntry->d_tag) {
+		case DT_NULL:
+			name = "(NULL)";
 			break;
-		case ET_REL:
-			printf("Relocatable file.\n");
+		case DT_NEEDED:
+			name = "(NEEDED)";
+			sprintf(extra, "[shared lib = %s]", dynstr + dynEntry->d_un.d_val);
 			break;
-		case ET_EXEC:
-			printf("Executable file.\n");
+		case DT_PLTRELSZ:
+			name = "(PLTRELSZ)";
 			break;
-		case ET_DYN:
-			printf("Shared object file.\n");
+		case DT_PLTGOT:
+			name = "(PLTGOT)";
 			break;
-		case ET_CORE:
-			printf("Core file.\n");
+		case DT_HASH:
+			name = "(HASH)";
+			break;
+		case DT_STRTAB:
+			name = "(STRTAB)";
+			break;
+		case DT_SYMTAB:
+			name = "(SYMTAB)";
+			break;
+		case DT_RELA:
+			name = "(RELA)";
+			break;
+		case DT_RELASZ:
+			name = "(RELASZ)";
+			break;
+		case DT_RELAENT:
+			name = "(RELAENT)";
+			break;
+		case DT_STRSZ:
+			name = "(STRSZ)";
+			sprintf(extra, "%ld (bytes)", dynEntry->d_un.d_val);
+			break;
+		case DT_SYMENT:
+			name = "(SYMENT)";
+			sprintf(extra, "%ld (bytes)", dynEntry->d_un.d_val);
+			break;
+		case DT_INIT:
+			name = "(INIT)";
+			break;
+		case DT_FINI:
+			name = "(FINI)";
+			break;
+		case DT_SONAME:
+			name = "(SONAME)";
+			break;
+		case DT_RPATH:
+			name = "(RPATH)";
+			break;
+		case DT_SYMBOLIC:
+			name = "(SYMBOLIC)";
+			break;
+		case DT_REL:
+			name = "(REL)";
+			break;
+		case DT_RELSZ:
+			name = "(RELSZ)";
+			sprintf(extra, "%ld (bytes)", dynEntry->d_un.d_val);
+			break;
+		case DT_RELENT:
+			name = "(RELENT)";
+			break;
+		case DT_PLTREL:
+			name = "(PLTREL)";
+			sprintf(extra, "%s",
+				dynEntry->d_un.d_val == DT_REL ? "REL" : "RELA");
+			break;
+		case DT_DEBUG:
+			name = "(DEBUG)";
+			break;
+		case DT_TEXTREL:
+			name = "(TEXTREL)";
+			break;
+		case DT_JMPREL:
+			name = "(JMPREL)";
+			break;
+		case DT_BIND_NOW:
+			name = "(BIND_NOW)";
+			break;
+		case DT_INIT_ARRAY:
+			name = "(INIT_ARRAY)";
+			break;
+		case DT_FINI_ARRAY:
+			name = "(FINI_ARRAY)";
+			break;
+		case DT_INIT_ARRAYSZ:
+			name = "(INIT_ARRAYSZ)";
+			sprintf(extra, "%ld (bytes)", dynEntry->d_un.d_val);
+			break;
+		case DT_FINI_ARRAYSZ:
+			name = "(FINI_ARRASZ)";
+			sprintf(extra, "%ld (bytes)", dynEntry->d_un.d_val);
+			break;
+		case 0x1E:
+			name = "(FLAGS)";
+			break;
+		case 0x6ffffef5:
+			name = "(GNU_HASH)";
+			break;
+		case 0x6ffffffb:
+			name = "(FLAGS_1)";
+			break;
+		case 0x6ffffffe:
+			name = "(VERNEED)";
+			break;
+		case 0x6fffffff:
+			name = "(VERNEEDNUM)";
+			sprintf(extra, "%ld", dynEntry->d_un.d_val);
+			break;
+		case 0x6ffffff0:
+			name = "(VERSYM)";
+			break;
+		case 0x6ffffff9:
+			name = "(RELACOUNT)";
+			sprintf(extra, "%ld", dynEntry->d_un.d_val);
 			break;
 		default:
-			printf("(Unknown file type)\n");
+			name = "(unknown)";
 			break;
 	}
 
-	/* Machine Type */
-	switch (header->e_machine) {
-		case EM_386:
-			printf("Intel x86\n");
-			break;
+	sprintf(buf,"%-15s %s", name, extra);
+	return buf;
+}
+
+static char * relocationInfoToStr(Elf64_Xword info) {
+#define CASE(o) case o: return #o;
+	switch (info) {
+		CASE(R_X86_64_NONE)
+		CASE(R_X86_64_64)
+		CASE(R_X86_64_PC32)
+		CASE(R_X86_64_GOT32)
+		CASE(R_X86_64_PLT32)
+		CASE(R_X86_64_COPY)
+		CASE(R_X86_64_GLOB_DAT)
+		CASE(R_X86_64_JUMP_SLOT)
+		CASE(R_X86_64_RELATIVE)
+		CASE(R_X86_64_GOTPCREL)
+		CASE(R_X86_64_32)
+		CASE(R_X86_64_32S)
+		CASE(R_X86_64_DTPMOD64)
+		CASE(R_X86_64_DTPOFF64)
+		CASE(R_X86_64_TPOFF64)
+		CASE(R_X86_64_TLSGD)
+		CASE(R_X86_64_TLSLD)
+		CASE(R_X86_64_DTPOFF32)
+		CASE(R_X86_64_GOTTPOFF)
+		CASE(R_X86_64_TPOFF32)
+		CASE(R_X86_64_PC64)
+		CASE(R_X86_64_GOTOFF64)
+		CASE(R_X86_64_GOTPC32)
+		CASE(R_X86_64_GOT64)
+		CASE(R_X86_64_GOTPCREL64)
+		CASE(R_X86_64_GOTPC64)
+		CASE(R_X86_64_GOTPLT64)
+		CASE(R_X86_64_PLTOFF64)
+		CASE(R_X86_64_SIZE32)
+		CASE(R_X86_64_SIZE64)
+		CASE(R_X86_64_GOTPC32_TLSDESC)
+		CASE(R_X86_64_TLSDESC_CALL)
+		CASE(R_X86_64_TLSDESC)
+		CASE(R_X86_64_IRELATIVE)
 		default:
-			printf("Unknown machine: %d\n", header->e_machine);
-			break;
+			return "unknown";
 	}
+#undef CASE
+}
 
-	/* Version == EV_CURRENT? */
-	if (header->e_version == EV_CURRENT) {
-		printf("ELF version is 1, as it should be.\n");
-	}
-
-	/* Entry point in memory */
-	printf("Binary entry point in virtual memory is at 0x%x\n", (unsigned int)header->e_entry);
-
-	/* Program header table offset */
-	printf("Program header table is at +0x%x and one entry is 0x%x bytes.\n"
-			"There are %d total program headers.\n",
-			(unsigned int)header->e_phoff, (unsigned int)header->e_phentsize, (unsigned int)header->e_phnum);
-
-	/* Section header table offset */
-	printf("Section header table is at +0x%x and one entry is 0x%x bytes.\n"
-			"There are %d total section headers.\n",
-			(unsigned int)header->e_shoff, (unsigned int)header->e_shentsize, (unsigned int)header->e_shnum);
-
-	/* Read the program headers */
-	printf("\033[1mProgram Headers\033[0m\n");
-	for (uint32_t x = 0; x < header->e_phentsize * header->e_phnum; x += header->e_phentsize) {
-		if (header->e_phoff + x > binary_size) {
-			printf("Tried to read beyond the end of the file.\n");
+static int sizeOfRelocationValue(int type) {
+	switch (type) {
+		case R_X86_64_TLSDESC:
+			return 16;
+		case R_X86_64_64:
+		case R_X86_64_GLOB_DAT:
+		case R_X86_64_JUMP_SLOT:
+		case R_X86_64_RELATIVE:
+		case R_X86_64_DTPMOD64:
+		case R_X86_64_DTPOFF64:
+		case R_X86_64_TPOFF64:
+		case R_X86_64_PC64:
+		case R_X86_64_GOTOFF64:
+		case R_X86_64_GOT64:
+		case R_X86_64_GOTPCREL64:
+		case R_X86_64_GOTPC64:
+		case R_X86_64_GOTPLT64:
+		case R_X86_64_PLTOFF64:
+		case R_X86_64_SIZE64:
+		case R_X86_64_IRELATIVE:
+			return 8;
+		case R_X86_64_PC32:
+		case R_X86_64_GOT32:
+		case R_X86_64_PLT32:
+		case R_X86_64_GOTPCREL:
+		case R_X86_64_32:
+		case R_X86_64_32S:
+		case R_X86_64_TLSGD:
+		case R_X86_64_TLSLD:
+		case R_X86_64_DTPOFF32:
+		case R_X86_64_GOTTPOFF:
+		case R_X86_64_TPOFF32:
+		case R_X86_64_GOTPC32:
+		case R_X86_64_SIZE32:
+		case R_X86_64_GOTPC32_TLSDESC:
+			return 4;
+		case R_X86_64_16:
+		case R_X86_64_PC16:
+			return 2;
+		case R_X86_64_8:
+		case R_X86_64_PC8:
 			return 1;
-		}
-		/* Grab the program header */
-		Elf32_Phdr * phdr = (Elf32_Phdr *)((uintptr_t)binary_buf + (header->e_phoff + x));
+		case R_X86_64_NONE:
+		case R_X86_64_COPY:
+		case R_X86_64_TLSDESC_CALL:
+		default:
+			return 0;
+	}
+}
 
-		/* Print the header type */
-		switch (phdr->p_type) {
-			case PT_LOAD:
-				printf("[Loadable Segment]\n");
+static char * symbolTypeToStr(int type) {
+	static char buf[10];
+	switch (type) {
+		case STT_NOTYPE:  return "NOTYPE";
+		case STT_OBJECT:  return "OBJECT";
+		case STT_FUNC:    return "FUNC";
+		case STT_SECTION: return "SECTION";
+		case STT_FILE:    return "FILE";
+		default:
+			sprintf(buf, "%x", type);
+			return buf;
+	}
+}
+
+static char * symbolBindToStr(int bind) {
+	static char buf[10];
+	switch (bind) {
+		case STB_LOCAL:  return "LOCAL";
+		case STB_GLOBAL: return "GLOBAL";
+		case STB_WEAK:   return "WEAK";
+		default:
+			sprintf(buf, "%x", bind);
+			return buf;
+	}
+}
+
+static int usage(char * argv[]) {
+	fprintf(stderr,
+		"Usage: %s <option(s)> elf-file(s)\n"
+		" Displays information about ELF object files in a GNU binutils-compatible way.\n"
+		" Supported options:\n"
+		"  -a --all             Equivalent to -h -l -S -s -d -r\n"
+		"  -h --file-header     Display the ELF file header\n"
+		"  -l --program-headers Display the program headers\n"
+		"  -S --section-headers Display the section headers\n"
+		"  -e --headers         Equivalent to -h -l -S\n"
+		"  -s --syms            Display symbol table\n"
+		"  -d --dynamic         Display dynamic section\n"
+		"  -r --relocs          Display relocations\n"
+		"  -H --help            Show this help text\n"
+		" Aliases:\n"
+		"  --segments   Same as --file-header\n"
+		"  --sections   Same as --section-headers\n"
+		"  --symbols    Same as --syms\n"
+		, argv[0]);
+	return 1;
+}
+
+int main(int argc, char * argv[]) {
+
+	static struct option long_opts[] = {
+		{"all",             no_argument, 0, 'a'},
+		{"file-header",     no_argument, 0, 'h'},
+		{"program-headers", no_argument, 0, 'l'},
+		{"section-headers", no_argument, 0, 'S'},
+		{"headers",         no_argument, 0, 'e'},
+		{"syms",            no_argument, 0, 's'},
+		{"dynamic",         no_argument, 0, 'd'},
+		{"relocs",          no_argument, 0, 'r'},
+		{"help",            no_argument, 0, 'H'},
+
+		{"segments",        no_argument, 0, 'l'}, /* Alias for --program-headers */
+		{"sections",        no_argument, 0, 'S'}, /* Alias for --section-headers */
+		{"symbols",         no_argument, 0, 's'}, /* Alias for --syms */
+		{0,0,0,0}
+	};
+
+	int show_bits = 0;
+	int index, c;
+
+	while ((c = getopt_long(argc, argv, "ahlSesdrH", long_opts, &index)) != -1) {
+		if (!c) {
+			if (long_opts[index].flag == 0) {
+				c = long_opts[index].val;
+			}
+		}
+		switch (c) {
+			case 'H':
+				return usage(argv);
+			case 'a':
+				show_bits |= SHOW_FILE_HEADER | SHOW_SECTION_HEADERS | SHOW_PROGRAM_HEADERS | SHOW_SYMBOLS | SHOW_DYNAMIC | SHOW_RELOCATIONS;
 				break;
-			case PT_DYNAMIC:
-				printf("[Dynamic Loading Information]\n");
+			case 'd':
+				show_bits |= SHOW_DYNAMIC;
 				break;
-			case PT_INTERP:
-				printf("[Interpreter Path]\n");
+			case 'h':
+				show_bits |= SHOW_FILE_HEADER;
+				break;
+			case 'l':
+				show_bits |= SHOW_PROGRAM_HEADERS;
+				break;
+			case 'S':
+				show_bits |= SHOW_SECTION_HEADERS;
+				break;
+			case 'e':
+				show_bits |= SHOW_FILE_HEADER | SHOW_PROGRAM_HEADERS | SHOW_SECTION_HEADERS;
+				break;
+			case 's':
+				show_bits |= SHOW_SYMBOLS;
+				break;
+			case 'r':
+				show_bits |= SHOW_RELOCATIONS;
 				break;
 			default:
-				printf("[Unused Segement]\n");
+				fprintf(stderr, "Unrecognized option: %c\n", c);
 				break;
 		}
 	}
 
-	uint32_t i = 0;
-	for (uint32_t x = 0; x < header->e_shentsize * header->e_shnum; x += header->e_shentsize) {
-		if (header->e_shoff + x > binary_size) {
-			printf("Tried to read beyond the end of the file.\n");
-			return 1;
-		}
-		Elf32_Shdr * shdr = (Elf32_Shdr *)((uintptr_t)binary_buf + (header->e_shoff + x));
-		if (shdr->sh_type == SHT_STRTAB) {
-			if (i == header->e_shstrndx) {
-				string_table = (char *)((uintptr_t)binary_buf + shdr->sh_offset);
-				printf("Found the section string table at 0x%x\n", (unsigned int)shdr->sh_offset);
-			}
-		}
-		i++;
+	if (optind >= argc || !show_bits) {
+		return usage(argv);
 	}
 
-	if (!string_table) {
-		printf("No string table, skipping rest of output.\n");
-		return 1;
+	int out = 0;
+	int print_names = 0;
+
+	if (optind + 1 < argc) {
+		print_names = 1;
 	}
 
-	/* Find the (hopefully two) string tables */
-	printf("\033[1mString Tables\033[0m\n");
-	for (uint32_t x = 0; x < header->e_shentsize * header->e_shnum; x += header->e_shentsize) {
-		if (header->e_shoff + x > binary_size) {
-			printf("Tried to read beyond the end of the file.\n");
-			return 1;
+	for (; optind < argc; optind++) {
+		FILE * f = fopen(argv[optind],"r");
+
+		if (!f) {
+			fprintf(stderr, "%s: %s: %s\n", argv[0], argv[optind], strerror(errno));
+			out = 1;
+			continue;
 		}
-		Elf32_Shdr * shdr = (Elf32_Shdr *)((uintptr_t)binary_buf + (header->e_shoff + x));
-		if (shdr->sh_type == SHT_STRTAB) {
-			if (!strcmp((char *)((uintptr_t)string_table + shdr->sh_name), ".strtab")) {
-				sym_string_table = (char *)((uintptr_t)binary_buf + shdr->sh_offset);
-				printf("Found the symbol string table at 0x%x\n", (unsigned int)shdr->sh_offset);
+
+		if (print_names) {
+			printf("\nFile: %s\n", argv[optind]);
+		}
+
+		/**
+		 * Validate header.
+		 */
+		Elf64_Header header;
+		fread(&header, sizeof(Elf64_Header), 1, f);
+
+		if (memcmp("\x7F" "ELF",&header,4)) {
+			fprintf(stderr, "%s: %s: not an elf\n", argv[0], argv[optind]);
+			out = 1;
+			continue;
+		}
+
+		if (show_bits & SHOW_FILE_HEADER) {
+			printf("ELF Header:\n");
+			printf("  Magic:   %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+				header.e_ident[0],  header.e_ident[1],  header.e_ident[2],  header.e_ident[3],
+				header.e_ident[4],  header.e_ident[5],  header.e_ident[6],  header.e_ident[7],
+				header.e_ident[8],  header.e_ident[9],  header.e_ident[10], header.e_ident[11],
+				header.e_ident[12], header.e_ident[13], header.e_ident[14], header.e_ident[15]);
+			printf("  Class:                             %s\n", elf_classToStr(header.e_ident[EI_CLASS]));
+			printf("  Data:                              %s\n", elf_dataToStr(header.e_ident[EI_DATA]));
+			printf("  Version:                           %s\n", elf_versionToStr(header.e_ident[EI_VERSION]));
+			printf("  OS/ABI:                            %s\n", elf_osabiToStr(header.e_ident[EI_OSABI]));
+			printf("  ABI Version:                       %u\n", header.e_ident[EI_ABIVERSION]);
+		}
+
+		if (header.e_ident[EI_CLASS] != ELFCLASS64) {
+			continue;
+		}
+
+		if (show_bits & SHOW_FILE_HEADER) {
+			/* Byte-order dependent from here on out... */
+			printf("  Type:                              %s\n", elf_typeToStr(header.e_type));
+			printf("  Machine:                           %s\n", elf_machineToStr(header.e_machine));
+			printf("  Version:                           0x%x\n", header.e_version);
+			printf("  Entry point address:               0x%lx\n", header.e_entry);
+			printf("  Start of program headers:          %lu (bytes into file)\n", header.e_phoff);
+			printf("  Start of section headers:          %lu (bytes into file)\n", header.e_shoff);
+			printf("  Flags:                             0x%x\n", header.e_flags);
+			printf("  Size of this header:               %u (bytes)\n", header.e_ehsize);
+			printf("  Size of program headers:           %u (bytes)\n", header.e_phentsize);
+			printf("  Number of program headers:         %u\n", header.e_phnum);
+			printf("  Size of section headers:           %u (bytes)\n", header.e_shentsize);
+			printf("  Number of section headers:         %u\n", header.e_shnum);
+			printf("  Section header string table index: %u\n", header.e_shstrndx);
+		}
+
+		/* Get the section header string table */
+		Elf64_Shdr shstr_hdr;
+		fseek(f, header.e_shoff + header.e_shentsize * header.e_shstrndx, SEEK_SET);
+		fread(&shstr_hdr, sizeof(Elf64_Shdr), 1, f);
+
+		char * stringTable = malloc(shstr_hdr.sh_size);
+		fseek(f, shstr_hdr.sh_offset, SEEK_SET);
+		fread(stringTable, shstr_hdr.sh_size, 1, f);
+
+		/**
+		 * Section Headers
+		 */
+		if (show_bits & SHOW_SECTION_HEADERS) {
+			printf("\nSection Headers:\n");
+			printf("  [Nr] Name              Type             Address           Offset\n");
+			printf("       Size              EntSize          Flags  Link  Info  Align\n");
+			for (unsigned int i = 0; i < header.e_shnum; ++i) {
+				fseek(f, header.e_shoff + header.e_shentsize * i, SEEK_SET);
+				Elf64_Shdr sectionHeader;
+				fread(&sectionHeader, sizeof(Elf64_Shdr), 1, f);
+
+				printf("  [%2d] %-17.17s %-16.16s %016lx  %08lx\n",
+					i, stringTable + sectionHeader.sh_name, sectionHeaderTypeToStr(sectionHeader.sh_type),
+					sectionHeader.sh_addr, sectionHeader.sh_offset);
+				printf("       %016lx  %016lx %4ld %6d %5d %5ld\n",
+					sectionHeader.sh_size, sectionHeader.sh_entsize, sectionHeader.sh_flags,
+					sectionHeader.sh_link, sectionHeader.sh_info, sectionHeader.sh_addralign);
 			}
-			printf("Displaying string table at 0x%x\n", (unsigned int)shdr->sh_offset);
-			char * _string_table = (char *)((uintptr_t)binary_buf + shdr->sh_offset);
-			unsigned int j = 1;
-			int k = 0;
-			printf("%d\n", (unsigned int)shdr->sh_size);
-			while (j < shdr->sh_size) {
-				int t = strlen((char *)((uintptr_t)_string_table + j));
-				if (t) {
-					printf("%d [%d] %s\n", k, j, (char *)((uintptr_t)_string_table + j));
-					k++;
-					j += t;
-				} else {
-					j += 1;
+		}
+
+		/**
+		 * Program Headers
+		 */
+		if (show_bits & SHOW_PROGRAM_HEADERS && header.e_phoff && header.e_phnum) {
+			printf("\nProgram Headers:\n");
+			printf("  Type           Offset             VirtAddr           PhysAddr\n");
+			printf("                 FileSiz            MemSiz              Flags  Align\n");
+			for (unsigned int i = 0; i < header.e_phnum; ++i) {
+				fseek(f, header.e_phoff + header.e_phentsize * i, SEEK_SET);
+				Elf64_Phdr programHeader;
+				fread(&programHeader, sizeof(Elf64_Phdr), 1, f);
+
+				printf("  %-14.14s 0x%016lx 0x%016lx 0x%016lx\n",
+					programHeaderTypeToStr(programHeader.p_type),
+					programHeader.p_offset, programHeader.p_vaddr, programHeader.p_paddr);
+				printf("                 0x%016lx 0x%016lx  %s 0x%lx\n",
+					programHeader.p_filesz, programHeader.p_memsz,
+					programHeaderFlagsToStr(programHeader.p_flags), programHeader.p_align);
+
+				if (programHeader.p_type == PT_INTERP) {
+					/* Read interpreter string */
+					char * tmp = malloc(programHeader.p_filesz);
+					fseek(f, programHeader.p_offset, SEEK_SET);
+					fread(tmp, programHeader.p_filesz, 1, f);
+					printf("    [Requesting program interpreter: %.*s]\n",
+						(int)programHeader.p_filesz, tmp);
+					free(tmp);
 				}
 			}
 		}
-	}
 
-	/* Read the section headers */
-	printf("\033[1mSection Headers\033[0m\n");
-	for (uint32_t x = 0; x < header->e_shentsize * header->e_shnum; x += header->e_shentsize) {
-		if (header->e_shoff + x > binary_size) {
-			printf("Tried to read beyond the end of the file.\n");
-			return 1;
-		}
-		Elf32_Shdr * shdr = (Elf32_Shdr *)((uintptr_t)binary_buf + (header->e_shoff + x));
+		/* TODO Section to segment mapping? */
 
-		printf("[%d] %s\n", (unsigned int)shdr->sh_type, (char *)((uintptr_t)string_table + shdr->sh_name));
-		printf("Section starts at 0x%x and is 0x%x bytes long.\n", (unsigned int)shdr->sh_offset, (unsigned int)shdr->sh_size);
-		if (shdr->sh_addr) {
-			printf("It should be loaded at 0x%x.\n", (unsigned int)shdr->sh_addr);
-		}
-	}
+		/**
+		 * Dump section information.
+		 */
+		for (unsigned int i = 0; i < header.e_shnum; ++i) {
+			fseek(f, header.e_shoff + header.e_shentsize * i, SEEK_SET);
+			Elf64_Shdr sectionHeader;
+			fread(&sectionHeader, sizeof(Elf64_Shdr), 1, f);
 
-#if 1
-	printf("\033[1mSymbol Tables\033[0m\n");
-	for (uint32_t x = 0; x < header->e_shentsize * header->e_shnum; x += header->e_shentsize) {
-		if (header->e_shoff + x > binary_size) {
-			printf("Tried to read beyond the end of the file.\n");
-			return 1;
-		}
-		Elf32_Shdr * shdr = (Elf32_Shdr *)((uintptr_t)binary_buf + (header->e_shoff + x));
+			/* I think there should only be one of these... */
+			switch (sectionHeader.sh_type) {
+				case SHT_DYNAMIC:
+					if (show_bits & SHOW_DYNAMIC) {
+						printf("\nDynamic section at offset 0x%lx contains (up to) %ld entries:\n",
+							sectionHeader.sh_offset, sectionHeader.sh_size / sectionHeader.sh_entsize);
+						printf("  Tag        Type                         Name/Value\n");
 
-		if (shdr->sh_type == SHT_SYMTAB) {
-			printf("Found symbol table: %s\n", (char *)((uintptr_t)string_table + shdr->sh_name));
+						/* Read the linked string table */
+						Elf64_Shdr dynstr;
+						fseek(f, header.e_shoff + header.e_shentsize * sectionHeader.sh_link, SEEK_SET);
+						fread(&dynstr, sizeof(Elf64_Shdr), 1, f);
+						char * dynStr = malloc(dynstr.sh_size);
+						fseek(f, dynstr.sh_offset, SEEK_SET);
+						fread(dynStr, dynstr.sh_size, 1, f);
 
-			Elf32_Sym * table = (Elf32_Sym *)((uintptr_t)binary_buf + (shdr->sh_offset));
-			while ((uintptr_t)table - ((uintptr_t)binary_buf + shdr->sh_offset) < shdr->sh_size) {
-				printf("%s: 0x%x [0x%x]\n", (char *)((uintptr_t)sym_string_table + table->st_name), (unsigned int)table->st_value, (unsigned int)table->st_size);
-				table++;
+						char * dynTable = malloc(sectionHeader.sh_size);
+						fseek(f, sectionHeader.sh_offset, SEEK_SET);
+						fread(dynTable, sectionHeader.sh_size, 1, f);
+
+						for (unsigned int i = 0; i < sectionHeader.sh_size / sectionHeader.sh_entsize; i++) {
+							Elf64_Dyn * dynEntry = (Elf64_Dyn *)(dynTable + sectionHeader.sh_entsize * i);
+
+							printf(" 0x%016lx %s\n",
+								dynEntry->d_tag,
+								dynamicTagToStr(dynEntry, dynStr));
+
+							if (dynEntry->d_tag == DT_NULL) break;
+						}
+
+						free(dynStr);
+						free(dynTable);
+					}
+					break;
+				case SHT_RELA:
+					if (show_bits & SHOW_RELOCATIONS) {
+						printf("\nRelocation section '%s' at offset 0x%lx contains %ld entries.\n",
+							stringTable + sectionHeader.sh_name, sectionHeader.sh_offset,
+							sectionHeader.sh_size / sizeof(Elf64_Rela));
+						printf("  Offset          Info           Type           Sym. Value    Sym. Name + Addend\n");
+
+						/* Section this relocation is in */
+						Elf64_Shdr shdr_this;
+						fseek(f, header.e_shoff + header.e_shentsize * sectionHeader.sh_info, SEEK_SET);
+						fread(&shdr_this, sizeof(Elf64_Shdr), 1, f);
+
+						/* Symbol table link */
+						Elf64_Shdr shdr_symtab;
+						fseek(f, header.e_shoff + header.e_shentsize * sectionHeader.sh_link, SEEK_SET);
+						fread(&shdr_symtab, sizeof(Elf64_Shdr), 1, f);
+						Elf64_Sym * symtab = malloc(shdr_symtab.sh_size);
+						fseek(f, shdr_symtab.sh_offset, SEEK_SET);
+						fread(symtab, shdr_symtab.sh_size, 1, f);
+
+						/* Symbol table's string table link */
+						Elf64_Shdr shdr_strtab;
+						fseek(f, header.e_shoff + header.e_shentsize * shdr_symtab.sh_link, SEEK_SET);
+						fread(&shdr_strtab, sizeof(Elf64_Shdr), 1, f);
+						char * strtab = malloc(shdr_strtab.sh_size);
+						fseek(f, shdr_strtab.sh_offset, SEEK_SET);
+						fread(strtab, shdr_strtab.sh_size, 1, f);
+
+						/* Load relocations from file */
+						Elf64_Rela * relocations = malloc(sectionHeader.sh_size);
+						fseek(f, sectionHeader.sh_offset, SEEK_SET);
+						fread((void*)relocations, sectionHeader.sh_size, 1, f);
+
+						for (unsigned int i = 0; i < sectionHeader.sh_size / sizeof(Elf64_Rela); ++i) {
+							Elf64_Shdr shdr;
+							Elf64_Sym * this = &symtab[ELF64_R_SYM(relocations[i].r_info)];
+							char * symName;
+
+							/* Get symbol name for this relocation */
+							if ((this->st_info & 0xF) == STT_SECTION) {
+								fseek(f, header.e_shoff + header.e_shentsize * this->st_shndx, SEEK_SET);
+								fread(&shdr, sizeof(Elf64_Shdr), 1, f);
+								symName = stringTable + shdr.sh_name;
+							} else { 
+								symName = strtab + this->st_name;
+							}
+
+							/* Get the value currently in the section data */
+							Elf64_Xword value = 0;
+							int valueSize = sizeOfRelocationValue(ELF64_R_TYPE(relocations[i].r_info));
+							fseek(f, shdr_this.sh_offset + relocations[i].r_offset, SEEK_SET);
+							switch (valueSize) {
+								case 8:
+									{
+										uint64_t val;
+										fread(&val, valueSize, 1, f);
+										value = val;
+										break;
+									}
+								case 4:
+									{
+										uint32_t val;
+										fread(&val, valueSize, 1, f);
+										value = val;
+										break;
+									}
+								case 2:
+									{
+										uint16_t val;
+										fread(&val, valueSize, 1, f);
+										value = val;
+										break;
+									}
+								case 1:
+									{
+										uint8_t val;
+										fread(&val, valueSize, 1, f);
+										value = val;
+										break;
+									}
+								default:
+									break;
+							}
+
+							printf("%012lx  %012lx %-15.15s %016lx %s + %lx\n",
+								relocations[i].r_offset, relocations[i].r_info,
+								relocationInfoToStr(ELF64_R_TYPE(relocations[i].r_info)),
+								value,
+								symName,
+								relocations[i].r_addend);
+						}
+
+						free(relocations);
+						free(strtab);
+						free(symtab);
+					}
+					break;
+				case SHT_DYNSYM:
+				case SHT_SYMTAB:
+					if (show_bits & SHOW_SYMBOLS) {
+						printf("\nSymbol table '%s' contains %ld entries.\n",
+							stringTable + sectionHeader.sh_name,
+							sectionHeader.sh_size / sizeof(Elf64_Sym));
+						printf("   Num:    Value          Size Type    Bind   Vis      Ndx Name\n");
+
+						Elf64_Sym * symtab = malloc(sectionHeader.sh_size);
+						fseek(f, sectionHeader.sh_offset, SEEK_SET);
+						fread(symtab, sectionHeader.sh_size, 1, f);
+
+						Elf64_Shdr shdr_strtab;
+						fseek(f, header.e_shoff + header.e_shentsize * sectionHeader.sh_link, SEEK_SET);
+						fread(&shdr_strtab, sizeof(Elf64_Shdr), 1, f);
+						char * strtab = malloc(shdr_strtab.sh_size);
+						fseek(f, shdr_strtab.sh_offset, SEEK_SET);
+						fread(strtab, shdr_strtab.sh_size, 1, f);
+
+						for (unsigned int i = 0; i < sectionHeader.sh_size / sizeof(Elf64_Sym); ++i) {
+							printf("%6u: %016lx %6lu %-7.7s %-6.6s %-4d %6d %s\n",
+								i, symtab[i].st_value, symtab[i].st_size,
+								symbolTypeToStr(symtab[i].st_info & 0xF),
+								symbolBindToStr(symtab[i].st_info >> 4),
+								symtab[i].st_other,
+								symtab[i].st_shndx,
+								strtab + symtab[i].st_name);
+						}
+
+						free(strtab);
+						free(symtab);
+					}
+					break;
+				default:
+					break;
+
 			}
 		}
 	}
-#endif
 
-	return 0;
+	return out;
 }
-

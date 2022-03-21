@@ -1,13 +1,14 @@
 #pragma once
 
-#include <kernel/fs.h>
+#include <kernel/vfs.h>
 #include <kernel/ringbuffer.h>
+#include <sys/types.h>
 #include <sys/ioctl.h>
 #include <sys/termios.h>
 
 typedef struct pty {
 	/* the PTY number */
-	int            name;
+	intptr_t       name;
 
 	/* Master and slave endpoints */
 	fs_node_t *    master;
@@ -37,9 +38,10 @@ typedef struct pty {
 
 	void (*fill_name)(struct pty *, char *);
 
+	void * _private;
 } pty_t;
 
 void tty_output_process_slave(pty_t * pty, uint8_t c);
 void tty_output_process(pty_t * pty, uint8_t c);
 void tty_input_process(pty_t * pty, uint8_t c);
-pty_t * pty_new(struct winsize * size);
+pty_t * pty_new(struct winsize * size, int index);

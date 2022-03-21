@@ -1,12 +1,13 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
+/**
+ * @brief pex - Packet EXchange client library
+ *
+ * Provides a friendly interface to the "Packet Exchange"
+ * functionality provided by the packetfs kernel interface.
+ *
+ * @copyright
  * This file is part of ToaruOS and is released under the terms
  * of the NCSA / University of Illinois License - see LICENSE.md
  * Copyright (C) 2014-2018 K. Lange
- *
- * pex - Packet EXchange client library
- *
- * Provides a friendly interface to the "Packet Exchange"
- * functionality provided by the packetfs kernel module.
  */
 #include <alloca.h>
 #include <assert.h>
@@ -15,11 +16,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/ioctl.h>
 
 #include <toaru/pex.h>
 
-size_t pex_send(FILE * sock, unsigned int rcpt, size_t size, char * blob) {
+size_t pex_send(FILE * sock, uintptr_t rcpt, size_t size, char * blob) {
 	assert(size <= MAX_PACKET_SIZE);
 	pex_header_t * broadcast = malloc(sizeof(pex_header_t) + size);
 	broadcast->target = rcpt;
@@ -61,7 +63,11 @@ FILE * pex_bind(char * target) {
 	char tmp[100];
 	if (strlen(target) > 80) return NULL;
 	sprintf(tmp, "/dev/pex/%s", target);
-	FILE * out = fopen(tmp, "a+");
+	int fd = open(tmp, O_CREAT | O_EXCL | O_RDWR | O_APPEND);
+	if (fd < 0) {
+		return NULL;
+	}
+	FILE * out = fdopen(fd, "a+");
 	if (out) {
 		setbuf(out, NULL);
 	}

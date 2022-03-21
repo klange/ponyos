@@ -1,6 +1,3 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
- * 
- */
 ENTRY(_start)
 
 SECTIONS
@@ -30,9 +27,14 @@ SECTIONS
 		*(.bss)
 	}
 
-	.eh_frame BLOCK(4K) : ALIGN(4K)
-	{
+	.eh_frame BLOCK(4K) : ALIGN(4K) {
 		*(.eh_frame)
+	}
+
+	.init_array : {
+		PROVIDE_HIDDEN (__init_array_start = .);
+		*(.init_array);
+		PROVIDE_HIDDEN (__init_array_end = .);
 	}
 
 	end = .;

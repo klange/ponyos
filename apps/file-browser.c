@@ -1,13 +1,15 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
- * This file is part of ToaruOS and is released under the terms
- * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2018 K. Lange
- *
- * file-browser - Graphical file manager.
+/**
+ * @brief Graphical file browser
+ * @file apps/file-browser.c
  *
  * Based on the original Python implementation and inspired by
  * Nautilus and Thunar. Also provides a "wallpaper" mode for
  * managing the desktop backgrond.
+ *
+ * @copyright
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2018-2021 K. Lange
  */
 #include <stdio.h>
 #include <unistd.h>
@@ -30,7 +32,7 @@
 #include <toaru/menu.h>
 #include <toaru/icon_cache.h>
 #include <toaru/list.h>
-#include <toaru/sdf.h>
+#include <toaru/text.h>
 #include <toaru/button.h>
 
 #define APPLICATION_TITLE "File Browser"
@@ -58,11 +60,12 @@ static int show_hidden = 0; /* Whether or not show hidden files */
 static int scroll_offset = 0; /* How far the icon view should be scrolled */
 static int available_height = 0; /* How much space is available in the main window for the icon view */
 static int is_desktop_background = 0; /* If we're in desktop background mode */
-static int menu_bar_height = MENU_BAR_HEIGHT + 36; /* Height of the menu bar, if present - it's not in desktop mode */
+static int is_picker_dialog = 0; /* If we're an open-file dialog */
+static int menu_bar_height = MENU_BAR_HEIGHT; /* Height of the menu bar, if present - it's not in desktop mode */
+static int nav_bar_height = 36;
 static sprite_t * wallpaper_buffer = NULL; /* Prebaked wallpaper texture */
 static sprite_t * wallpaper_old = NULL; /* Previous wallpaper when transitioning */
 static uint64_t timer = 0; /* Timer for wallpaper transition fade */
-static int restart = 0; /* Signal for desktop wallpaper to kill itself to save memory (this is dumb) */
 static char title[512]; /* Application title bar */
 static int FILE_HEIGHT = 80; /* Height of one row of icons */
 static int FILE_WIDTH = 100; /* Width of one column of icons */
@@ -75,6 +78,12 @@ static struct File ** file_pointers = NULL; /* List of file pointers */
 static ssize_t file_pointers_len = 0; /* How many files are in the current list */
 static uint64_t last_click = 0; /* For double click */
 static int last_click_offset = -1; /* So that clicking two different things quickly doesn't count as a double click */
+static struct TT_Font * tt_font_thin = NULL;
+static struct TT_Font * tt_font_bold = NULL;
+
+static struct MenuEntry * _menu_entry_show_icons = NULL;
+static struct MenuEntry * _menu_entry_show_tiles = NULL;
+static struct MenuEntry * _menu_entry_show_list  = NULL;
 
 /**
  * Navigation input box
@@ -83,9 +92,11 @@ static char nav_bar[512] = {0};
 static int  nav_bar_cursor = 0;
 static int  nav_bar_cursor_x = 0;
 static int  nav_bar_focused = 0;
+static int  nav_bar_blink = 0;
+static struct timeval nav_bar_last_blinked;
 
 /* Status bar displayed at the bottom of the window */
-static char window_status[512] = {0};
+static char window_status[1024] = {0};
 
 /* Button row visibility statuses */
 static int _button_hilights[4] = {3,3,3,3};
@@ -105,6 +116,7 @@ static struct menu_bar_entries menu_entries[] = {
 
 /* Right click context menu */
 static struct MenuList * context_menu = NULL;
+static struct MenuList * directory_context_menu = NULL;
 
 /**
  * Accurate time comparison.
@@ -138,6 +150,8 @@ static uint64_t precise_time_since(uint64_t start_time) {
 static int _decor_get_bounds(yutani_window_t * win, struct decor_bounds * bounds) {
 	if (is_desktop_background) {
 		memset(bounds, 0, sizeof(struct decor_bounds));
+		bounds->height = 54;
+		bounds->width = 20;
 		bounds->top_height = 54;
 		bounds->left_width = 20;
 		return 0;
@@ -199,12 +213,13 @@ static int print_human_readable_size(char * _out, uint64_t s) {
 /**
  * Clip text and add ellipsis to fit a specified display width.
  */
-static char * ellipsify(char * input, int font_size, int font, int max_width, int * out_width) {
+static char * ellipsify(char * input, int font_size, struct TT_Font * font, int max_width, int * out_width) {
 	int len = strlen(input);
 	char * out = malloc(len + 4);
 	memcpy(out, input, len + 1);
 	int width;
-	while ((width = draw_sdf_string_width(out, font_size, font)) > max_width) {
+	tt_set_size(font, font_size);
+	while ((width = tt_string_width(font, out)) > max_width) {
 		len--;
 		out[len+0] = '.';
 		out[len+1] = '.';
@@ -234,7 +249,7 @@ static void draw_file(struct File * f, int offset) {
 
 		/* If the display name is too long to fit, cut it with an ellipsis. */
 		int name_width;
-		char * name = ellipsify(f->name, 16, SDF_FONT_THIN, FILE_WIDTH - 8, &name_width);
+		char * name = ellipsify(f->name, 13, tt_font_thin, FILE_WIDTH - 8, &name_width);
 
 		/* Draw the icon */
 		int center_x_icon = (FILE_WIDTH - icon->width) / 2;
@@ -248,15 +263,16 @@ static void draw_file(struct File * f, int offset) {
 			}
 			/* And draw the name with a blue background and white text */
 			draw_rounded_rectangle(contents, center_x_text + x - 2, y + 54, name_width + 6, 20, 3, rgb(255,72,254));
-			draw_sdf_string(contents, center_x_text + x, y + 54, name, 16, rgb(255,255,255), SDF_FONT_THIN);
+			tt_set_size(tt_font_thin, 13);
+			tt_draw_string(contents, tt_font_thin, center_x_text + x, y + 54 + 13, name, rgb(255,255,255));
 		} else {
 			if (is_desktop_background) {
 				/* If this is the desktop view, white text with a drop shadow */
-				draw_sdf_string_stroke(contents, center_x_text + x + 1, y + 55, name, 16, rgba(0,0,0,120), SDF_FONT_THIN, 1.7, 0.5);
-				draw_sdf_string(contents, center_x_text + x, y + 54, name, 16, rgb(255,255,255), SDF_FONT_THIN);
+				tt_draw_string_shadow(contents, tt_font_thin, name, 13, center_x_text + x, y + 54, rgba(0,0,0,0), rgb(0,0,0), 4);
+				tt_draw_string_shadow(contents, tt_font_thin, name, 13, center_x_text + x, y + 54, rgb(255,255,255), rgb(0,0,0), 4);
 			} else {
 				/* Otherwise, black text */
-				draw_sdf_string(contents, center_x_text + x, y + 54, name, 16, rgb(0,0,0), SDF_FONT_THIN);
+				tt_draw_string(contents, tt_font_thin, center_x_text + x, y + 54 + 13, name, rgb(0,0,0));
 			}
 		}
 
@@ -293,12 +309,14 @@ static void draw_file(struct File * f, int offset) {
 			draw_sprite_alpha_paint(contents, icon, x + 11, y + 11, 0.3, rgb(255,255,255));
 		}
 
-		char * name = ellipsify(f->name, 16, SDF_FONT_BOLD, FILE_WIDTH - 81, NULL);
-		char * type = ellipsify(f->filetype, 16, SDF_FONT_THIN, FILE_WIDTH - 81, NULL);
+		char * name = ellipsify(f->name, 13, tt_font_bold, FILE_WIDTH - 81, NULL);
+		char * type = ellipsify(f->filetype, 13, tt_font_thin, FILE_WIDTH - 81, NULL);
 
 		if (f->type == 0) {
-			draw_sdf_string(contents, x + 70, y + 8, name, 16, text_color, SDF_FONT_BOLD);
-			draw_sdf_string(contents, x + 70, y + 25, type, 16, text_color, SDF_FONT_THIN);
+			tt_set_size(tt_font_bold, 13);
+			tt_draw_string(contents, tt_font_bold, x + 70, y + 8 + 13, name, text_color);
+			tt_set_size(tt_font_thin, 13);
+			tt_draw_string(contents, tt_font_thin, x + 70, y + 25 + 13, type, text_color);
 
 			char line_three[48] = {0};
 			if (*f->link) {
@@ -306,10 +324,12 @@ static void draw_file(struct File * f, int offset) {
 			} else {
 				print_human_readable_size(line_three, f->size);
 			}
-			draw_sdf_string(contents, x + 70, y + 42, line_three, 16, text_color, SDF_FONT_THIN);
+			tt_draw_string(contents, tt_font_thin, x + 70, y + 42 + 13, line_three, text_color);
 		} else {
-			draw_sdf_string(contents, x + 70, y + 15, name, 16, text_color, SDF_FONT_BOLD);
-			draw_sdf_string(contents, x + 70, y + 32, type, 16, text_color, SDF_FONT_THIN);
+			tt_set_size(tt_font_bold, 13);
+			tt_draw_string(contents, tt_font_bold, x + 70, y + 15 + 13, name, text_color);
+			tt_set_size(tt_font_thin, 13);
+			tt_draw_string(contents, tt_font_thin, x + 70, y + 32 + 13, type, text_color);
 		}
 
 		free(name);
@@ -336,9 +356,10 @@ static void draw_file(struct File * f, int offset) {
 			draw_sprite(contents, icon, x + 4, y + 4);
 		}
 
-		char * name = ellipsify(f->name, 16, SDF_FONT_THIN, FILE_WIDTH - 26, NULL);
+		char * name = ellipsify(f->name, 13, tt_font_thin, FILE_WIDTH - 26, NULL);
 
-		draw_sdf_string(contents, x + 24, y + 2, name, 16, text_color, SDF_FONT_THIN);
+		tt_set_size(tt_font_thin, 13);
+		tt_draw_string(contents, tt_font_thin, x + 24, y + 15, name, text_color);
 
 		free(name);
 
@@ -374,8 +395,10 @@ static void set_title(char * directory) {
 	/* Do nothing in desktop mode to avoid advertisement. */
 	if (is_desktop_background) return;
 
-	/* If the directory name is set... */
-	if (directory) {
+	if (is_picker_dialog) {
+		/* TODO: Maybe make this an option... */
+		sprintf(title, "Open File");
+	} else if (directory) {
 		sprintf(title, "%s - " APPLICATION_TITLE, directory);
 	} else {
 		/* Otherwise, just "File Browser" */
@@ -435,7 +458,7 @@ static void update_status(void) {
 	char tmp_size[50];
 	if (selected_count == 0) {
 		print_human_readable_size(tmp_size, total_size);
-		sprintf(window_status, "%d item%s (%s)", file_pointers_len, file_pointers_len == 1 ? "" : "s", tmp_size);
+		sprintf(window_status, "%zd item%s (%s)", file_pointers_len, file_pointers_len == 1 ? "" : "s", tmp_size);
 	} else if (selected_count == 1) {
 		print_human_readable_size(tmp_size, selected->size);
 		sprintf(window_status, "\"%s\" (%s) %s", selected->name, tmp_size, selected->filetype);
@@ -578,8 +601,12 @@ static void load_directory(const char * path, int modifies_history) {
 			f->selected = 0;
 
 			if (S_ISDIR(statbuf.st_mode)) {
-				/* Directory */
-				sprintf(f->icon, "folder");
+				/* Is this /cdrom? */
+				if (!strcmp(tmp,"//cdrom")) {
+					sprintf(f->icon, "cd");
+				} else {
+					sprintf(f->icon, "folder");
+				}
 				sprintf(f->filetype, "Directory");
 				f->type = 1;
 			} else {
@@ -637,17 +664,28 @@ static void load_directory(const char * path, int modifies_history) {
 						sprintf(f->filetype, "Portable Network Graphics Image");
 					} else if (has_extension(f, ".sdf")) {
 						sprintf(f->icon, "font");
-						sprintf(f->filetype, "SDF Font");
-						/* TODO: Font viewer for SDF and TrueType */
+						sprintf(f->filetype, "Legacy SDF Font");
 					} else if (has_extension(f, ".ttf")) {
 						sprintf(f->icon, "font");
+						sprintf(f->launcher,"exec font-preview");
 						sprintf(f->filetype, "TrueType Font");
+					} else if (has_extension(f, ".pdf")) {
+						sprintf(f->icon, "pdf");
+						sprintf(f->launcher,"exec maybe-pdfviewer.krk");
+						sprintf(f->filetype, "Portable Document Format");
 					} else if (has_extension(f, ".tgz") || has_extension(f, ".tar.gz")) {
-						sprintf(f->icon, "package");
+						sprintf(f->icon, "package_targz");
 						sprintf(f->filetype, "Compressed Archive File");
+						/* TODO: Archive viewer */
 					} else if (has_extension(f, ".tar")) {
-						sprintf(f->icon, "package");
+						sprintf(f->icon, "package_tar");
 						sprintf(f->filetype, "Archive File");
+					} else if (has_extension(f, ".a")) {
+						sprintf(f->icon, "package_a");
+						sprintf(f->filetype, "Archive File");
+					} else if (has_extension(f, ".zip")) {
+						sprintf(f->icon, "package_zip");
+						sprintf(f->filetype, "ZIP Archive File");
 					} else if (has_extension(f, ".sh")) {
 						sprintf(f->icon, "sh");
 						if (statbuf.st_mode & 0111) {
@@ -656,6 +694,15 @@ static void load_directory(const char * path, int modifies_history) {
 							sprintf(f->filetype, "Executable Shell Script");
 						} else {
 							sprintf(f->filetype, "Shell Script");
+						}
+					} else if (has_extension(f, ".krk")) {
+						sprintf(f->icon, "krk");
+						if (statbuf.st_mode & 0111) {
+							/* Make executable */
+							sprintf(f->launcher, "SELF");
+							sprintf(f->filetype, "Executable Kuroko Script");
+						} else {
+							sprintf(f->filetype, "Kuroko Script");
 						}
 					} else if (has_extension(f, ".py")) {
 						sprintf(f->icon, "py");
@@ -667,13 +714,13 @@ static void load_directory(const char * path, int modifies_history) {
 							sprintf(f->filetype, "Python Script");
 						}
 					} else if (has_extension(f, ".ko")) {
-						sprintf(f->icon, "file");
+						sprintf(f->icon, "so");
 						sprintf(f->filetype, "Kernel Module");
 					} else if (has_extension(f, ".o")) {
-						sprintf(f->icon, "file");
+						sprintf(f->icon, "so");
 						sprintf(f->filetype, "Object File");
 					} else if (has_extension(f, ".so")) {
-						sprintf(f->icon, "file");
+						sprintf(f->icon, "so");
 						sprintf(f->filetype, "Shared Object File");
 					} else if (has_extension(f, ".S")) {
 						sprintf(f->icon, "file");
@@ -681,6 +728,31 @@ static void load_directory(const char * path, int modifies_history) {
 					} else if (has_extension(f, ".ld")) {
 						sprintf(f->icon, "file");
 						sprintf(f->filetype, "Linker Script");
+					} else if (has_extension(f, ".md")) {
+						sprintf(f->icon, "file");
+						sprintf(f->filetype, "Markdown Text Document");
+					} else if (has_extension(f, ".eshrc")) {
+						sprintf(f->icon, "sh");
+						sprintf(f->filetype, "Shell Configuration");
+					} else if (has_extension(f, ".bim3rc")) {
+						sprintf(f->icon, "krk");
+						sprintf(f->filetype, "Bim Configuration");
+					} else if (has_extension(f, ".biminfo")) {
+						sprintf(f->icon, "file");
+						sprintf(f->filetype, "Bim Status Cache");
+					} else if (has_extension(f, ".conf")) {
+						sprintf(f->icon, "file");
+						sprintf(f->filetype, "Configuration File");
+					} else if (has_extension(f, ".launcher")) {
+						sprintf(f->icon, "file");
+						sprintf(f->filetype, "Application Launcher");
+					} else if (has_extension(f, ".trt")) {
+						sprintf(f->icon, "file");
+						sprintf(f->filetype, "Toaru Rich Text Document");
+						sprintf(f->launcher, "exec help-browser");
+					} else if (has_extension(f, ".json")) {
+						sprintf(f->icon, "file");
+						sprintf(f->filetype, "JavaScript Object Notation File");
 					} else if (statbuf.st_mode & 0111) {
 						/* Executable files - use their name for their icon, and launch themselves. */
 						sprintf(f->icon, "%s", f->name);
@@ -762,12 +834,23 @@ static void reinitialize_contents(void) {
 	} else if (view_mode == VIEW_MODE_LIST) {
 		FILE_PTR_WIDTH = 1;
 		FILE_WIDTH = (ctx->width - bounds.width);
+	} else if (view_mode == VIEW_MODE_TILES) {
+		/* We want to get close to 260 */
+		int avail = ctx->width - bounds.width;
+		int columns = avail / 260;
+		FILE_WIDTH = avail / columns;
+		FILE_PTR_WIDTH = (ctx->width - bounds.width) / FILE_WIDTH;
+	} else if (view_mode == VIEW_MODE_ICONS) {
+		int avail = ctx->width - bounds.width;
+		int columns = avail / 100;
+		FILE_WIDTH = avail / columns;
+		FILE_PTR_WIDTH = (ctx->width - bounds.width) / FILE_WIDTH;
 	} else {
 		FILE_PTR_WIDTH = (ctx->width - bounds.width) / FILE_WIDTH;
 	}
 
 	/* Calculate required height to fit files */
-	int calculated_height = (file_pointers_len / FILE_PTR_WIDTH + 1) * FILE_HEIGHT;
+	int calculated_height = (file_pointers_len / FILE_PTR_WIDTH + !!(file_pointers_len % FILE_PTR_WIDTH)) * FILE_HEIGHT;
 
 	/* Create buffer */
 	contents_sprite = create_sprite(FILE_PTR_WIDTH * FILE_WIDTH, calculated_height, ALPHA_EMBEDDED);
@@ -789,14 +872,14 @@ static void _draw_buttons(struct decor_bounds bounds) {
 	uint32_t gradient_bot = rgb(40,40,40);
 	for (int i = 0; i < 36; ++i) {
 		uint32_t c = interp_colors(gradient_top, gradient_bot, i * 255 / 36);
-		draw_rectangle(ctx, bounds.left_width, bounds.top_height + MENU_BAR_HEIGHT + i,
+		draw_rectangle(ctx, bounds.left_width, bounds.top_height + menu_bar_height + i,
 				BUTTON_SPACE * BUTTON_COUNT, 1, c);
 	}
 
 	int x = 0;
 	int i = 0;
 #define draw_button(label) do { \
-	struct TTKButton _up = {bounds.left_width + 2 + x,bounds.top_height + MENU_BAR_HEIGHT + 2,32,32,"\033" label,_button_hilights[i] | (_button_disabled[i] << 8)}; \
+	struct TTKButton _up = {bounds.left_width + 2 + x,bounds.top_height + menu_bar_height + 2,32,32,"\033" label,_button_hilights[i] | (_button_disabled[i] << 8)}; \
 	ttk_button_draw(ctx, &_up); \
 	x += BUTTON_SPACE; i++; } while (0)
 
@@ -820,10 +903,11 @@ static void _figure_out_navbar_cursor(int x, struct decor_bounds bounds) {
 
 	char * tmp = strdup(nav_bar);
 	int candidate = 0;
-	while (*tmp && x + 2 < (candidate = draw_sdf_string_width(tmp, 16, SDF_FONT_THIN))) {
+	tt_set_size(tt_font_thin, 13);
+	while (*tmp && x + 2 < (candidate = tt_string_width(tt_font_thin, tmp))) {
 		tmp[strlen(tmp)-1] = '\0';
 	}
-	nav_bar_cursor_x = candidate + 2;
+	nav_bar_cursor_x = candidate;
 	nav_bar_cursor = strlen(tmp);
 	free(tmp);
 }
@@ -843,7 +927,8 @@ static void _recalculate_nav_bar_cursor(void) {
 	}
 	char * tmp = strdup(nav_bar);
 	tmp[nav_bar_cursor] = '\0';
-	nav_bar_cursor_x = draw_sdf_string_width(tmp, 16, SDF_FONT_THIN) + 2;
+	tt_set_size(tt_font_thin, 13);
+	nav_bar_cursor_x = tt_string_width(tt_font_thin, tmp);
 	free(tmp);
 }
 
@@ -859,34 +944,34 @@ static void _draw_nav_bar(struct decor_bounds bounds) {
 
 	for (int i = 0; i < 36; ++i) {
 		uint32_t c = interp_colors(gradient_top, gradient_bot, i * 255 / 36);
-		draw_rectangle(ctx, bounds.left_width + BUTTON_SPACE * BUTTON_COUNT, bounds.top_height + MENU_BAR_HEIGHT + i,
+		draw_rectangle(ctx, bounds.left_width + BUTTON_SPACE * BUTTON_COUNT, bounds.top_height + menu_bar_height + i,
 				ctx->width - bounds.width - BUTTON_SPACE * BUTTON_COUNT, 1, c);
 	}
 
 	/* Draw input box */
 	if (nav_bar_focused) {
-		struct gradient_definition edge = {28, bounds.top_height + MENU_BAR_HEIGHT + 3, rgb(0,120,220), rgb(0,120,220)};
-		draw_rounded_rectangle_pattern(ctx, bounds.left_width + 2 + x + 1, bounds.top_height + MENU_BAR_HEIGHT + 4, main_window->width - bounds.width - x - 6, 26, 4, gfx_vertical_gradient_pattern, &edge);
-		draw_rounded_rectangle(ctx, bounds.left_width + 2 + x + 3, bounds.top_height + MENU_BAR_HEIGHT + 6, main_window->width - bounds.width - x - 10, 22, 3, rgb(250,250,250));
+		struct gradient_definition edge = {28, bounds.top_height + menu_bar_height + 3, rgb(0,120,220), rgb(0,120,220)};
+		draw_rounded_rectangle_pattern(ctx, bounds.left_width + 2 + x + 1, bounds.top_height + menu_bar_height + 4, main_window->width - bounds.width - x - 6, 26, 4, gfx_vertical_gradient_pattern, &edge);
+		draw_rounded_rectangle(ctx, bounds.left_width + 2 + x + 3, bounds.top_height + menu_bar_height + 6, main_window->width - bounds.width - x - 10, 22, 2, rgb(250,250,250));
 	} else {
-		struct gradient_definition edge = {28, bounds.top_height + MENU_BAR_HEIGHT + 3, rgb(90,90,90), rgb(110,110,110)};
-		draw_rounded_rectangle_pattern(ctx, bounds.left_width + 2 + x + 1, bounds.top_height + MENU_BAR_HEIGHT + 4, main_window->width - bounds.width - x - 6, 26, 4, gfx_vertical_gradient_pattern, &edge);
-		draw_rounded_rectangle(ctx, bounds.left_width + 2 + x + 2, bounds.top_height + MENU_BAR_HEIGHT + 5, main_window->width - bounds.width - x - 8, 24, 3, rgb(250,250,250));
+		struct gradient_definition edge = {28, bounds.top_height + menu_bar_height + 3, rgb(90,90,90), rgb(110,110,110)};
+		draw_rounded_rectangle_pattern(ctx, bounds.left_width + 2 + x + 1, bounds.top_height + menu_bar_height + 4, main_window->width - bounds.width - x - 6, 26, 4, gfx_vertical_gradient_pattern, &edge);
+		draw_rounded_rectangle(ctx, bounds.left_width + 2 + x + 2, bounds.top_height + menu_bar_height + 5, main_window->width - bounds.width - x - 8, 24, 3, rgb(250,250,250));
 	}
 
 	/* Draw the nav bar text, ellipsified if needed */
 	int max_width = main_window->width - bounds.width - x - 12;
-	char * name = ellipsify(nav_bar, 16, SDF_FONT_THIN, max_width, NULL);
-	draw_sdf_string(ctx, bounds.left_width + 2 + x + 5, bounds.top_height + MENU_BAR_HEIGHT + 8, name, 16, rgb(0,0,0), SDF_FONT_THIN);
+	char * name = ellipsify(nav_bar, 13, tt_font_thin, max_width, NULL);
+	tt_draw_string(ctx, tt_font_thin, bounds.left_width + 2 + x + 5, bounds.top_height + menu_bar_height + 8 + 13, name, rgb(0,0,0));
 	free(name);
 
-	if (nav_bar_focused) {
+	if (nav_bar_focused && !nav_bar_blink) {
 		/* Draw cursor indicator at cursor_x */
 		draw_line(ctx,
 				bounds.left_width + 2 + x + 5 + nav_bar_cursor_x,
 				bounds.left_width + 2 + x + 5 + nav_bar_cursor_x,
-				bounds.top_height + MENU_BAR_HEIGHT + 8,
-				bounds.top_height + MENU_BAR_HEIGHT + 8 + 15,
+				bounds.top_height + menu_bar_height + 8,
+				bounds.top_height + menu_bar_height + 8 + 15,
 				rgb(0,0,0));
 	}
 }
@@ -915,10 +1000,11 @@ static void _draw_status(struct decor_bounds bounds) {
 		gfx_context_t * _tmp = init_graphics_sprite(_tmp_s);
 
 		draw_fill(_tmp, rgba(0,0,0,0));
-		draw_sdf_string(_tmp, 1, 1, window_status, 16, rgb(0,0,0), SDF_FONT_THIN);
+		tt_set_size(tt_font_thin, 13);
+		tt_draw_string(_tmp, tt_font_thin, 1, 14, window_status, rgb(0,0,0));
 		blur_context_box(_tmp, 4);
 
-		draw_sdf_string(_tmp, 0, 0, window_status, 16, rgb(255,255,255), SDF_FONT_THIN);
+		tt_draw_string(_tmp, tt_font_thin, 0, 13, window_status, rgb(255,255,255));
 
 		free(_tmp);
 		draw_sprite(ctx, _tmp_s, bounds.left_width + 4, ctx->height - bounds.bottom_height - STATUS_HEIGHT + 3);
@@ -935,6 +1021,36 @@ static void _redraw_nav_bar(void) {
 	_draw_nav_bar(bounds);
 	flip(ctx);
 	yutani_flip(yctx, main_window);
+}
+
+/**
+ * Blink the navbar cursor, maybe.
+ */
+static void maybe_blink_cursor(void) {
+	if (!nav_bar_focused) return;
+
+	struct timeval t;
+	gettimeofday(&t, NULL);
+
+	time_t sec_diff = t.tv_sec - nav_bar_last_blinked.tv_sec;
+	suseconds_t usec_diff = t.tv_usec - nav_bar_last_blinked.tv_usec;
+
+	if (t.tv_usec < nav_bar_last_blinked.tv_usec) {
+		sec_diff -= 1;
+		usec_diff = (1000000 + t.tv_usec) - nav_bar_last_blinked.tv_usec;
+	}
+
+	if (sec_diff >= 1 || usec_diff >= 530000) {
+		nav_bar_blink = !nav_bar_blink;
+		gettimeofday(&nav_bar_last_blinked, NULL);
+		_redraw_nav_bar();
+	}
+}
+
+static void nav_bar_set_focused(void) {
+	nav_bar_focused = 1;
+	nav_bar_blink = 0;
+	gettimeofday(&nav_bar_last_blinked, NULL);
 }
 
 /**
@@ -959,6 +1075,7 @@ static void nav_bar_backspace_word(void) {
 	free(after);
 
 	_recalculate_nav_bar_cursor();
+	nav_bar_set_focused();
 	_redraw_nav_bar();
 }
 
@@ -977,6 +1094,21 @@ static void nav_bar_backspace(void) {
 	free(after);
 
 	_recalculate_nav_bar_cursor();
+	nav_bar_set_focused();
+	_redraw_nav_bar();
+}
+
+static void nav_bar_delete(void) {
+	if (!nav_bar[nav_bar_cursor]) return;
+
+	char * after = strdup(&nav_bar[nav_bar_cursor+1]);
+	nav_bar[nav_bar_cursor] = '\0';
+
+	strcat(nav_bar, after);
+	free(after);
+
+	_recalculate_nav_bar_cursor();
+	nav_bar_set_focused();
 	_redraw_nav_bar();
 }
 
@@ -993,24 +1125,51 @@ static void nav_bar_insert_char(char c) {
 
 	nav_bar_cursor += 1;
 	_recalculate_nav_bar_cursor();
+	nav_bar_set_focused();
 	_redraw_nav_bar();
 }
 
 /**
  * navbar: Move editing cursor one character left
  */
-static void nav_bar_cursor_left(void) {
-	nav_bar_cursor--;
+static void nav_bar_cursor_left(int modifiers) {
+	if (!*nav_bar) return;
+	if (nav_bar_cursor == 0) return;
+
+	if (modifiers & (KEY_MOD_LEFT_CTRL | KEY_MOD_RIGHT_CTRL)) {
+		if (nav_bar[nav_bar_cursor-1] == '/') {
+			nav_bar_cursor--;
+		}
+		while (nav_bar_cursor && nav_bar[nav_bar_cursor-1] != '/') {
+			nav_bar_cursor--;
+		}
+	} else {
+		nav_bar_cursor--;
+	}
 	_recalculate_nav_bar_cursor();
+	nav_bar_set_focused();
 	_redraw_nav_bar();
 }
 
 /**
  * navbar: Move editing cursor one character right
  */
-static void nav_bar_cursor_right(void) {
-	nav_bar_cursor++;
+static void nav_bar_cursor_right(int modifiers) {
+	if (!*nav_bar) return;
+
+	if (modifiers & (KEY_MOD_LEFT_CTRL | KEY_MOD_RIGHT_CTRL)) {
+		if (nav_bar[nav_bar_cursor] == '/') {
+			nav_bar_cursor++;
+		}
+		while (nav_bar[nav_bar_cursor] && nav_bar[nav_bar_cursor] != '/') {
+			nav_bar_cursor++;
+		}
+	} else {
+		nav_bar_cursor++;
+	}
+
 	_recalculate_nav_bar_cursor();
+	nav_bar_set_focused();
 	_redraw_nav_bar();
 }
 
@@ -1028,10 +1187,9 @@ static void redraw_window(void) {
 			draw_sprite(ctx, wallpaper_old, 0, 0);
 			uint64_t ellapsed = precise_time_since(timer);
 			if (ellapsed > 1000) {
-				free(wallpaper_old);
+				sprite_free(wallpaper_old);
 				wallpaper_old = NULL;
 				draw_sprite(ctx, wallpaper_buffer, 0, 0);
-				restart = 1; /* quietly restart */
 			} else {
 				draw_sprite_alpha(ctx, wallpaper_buffer, 0, 0, (float)ellapsed / 1000.0);
 			}
@@ -1045,11 +1203,13 @@ static void redraw_window(void) {
 
 	if (!is_desktop_background) {
 		/* Position, size, and draw the menu bar */
-		menu_bar.x = bounds.left_width;
-		menu_bar.y = bounds.top_height;
-		menu_bar.width = ctx->width - bounds.width;
-		menu_bar.window = main_window;
-		menu_bar_render(&menu_bar, ctx);
+		if (menu_bar_height) {
+			menu_bar.x = bounds.left_width;
+			menu_bar.y = bounds.top_height;
+			menu_bar.width = ctx->width - bounds.width;
+			menu_bar.window = main_window;
+			menu_bar_render(&menu_bar, ctx);
+		}
 
 		/* Draw toolbar */
 		_draw_buttons(bounds);
@@ -1060,8 +1220,8 @@ static void redraw_window(void) {
 
 	/* Draw the icon view, clipped to the viewport and scrolled appropriately. */
 	gfx_clear_clip(ctx);
-	gfx_add_clip(ctx, bounds.left_width, bounds.top_height + menu_bar_height, ctx->width - bounds.width, available_height);
-	draw_sprite(ctx, contents_sprite, bounds.left_width, bounds.top_height + menu_bar_height - scroll_offset);
+	gfx_add_clip(ctx, bounds.left_width, bounds.top_height + menu_bar_height + nav_bar_height, ctx->width - bounds.width, available_height);
+	draw_sprite(ctx, contents_sprite, bounds.left_width, bounds.top_height + menu_bar_height + nav_bar_height - scroll_offset);
 	gfx_clear_clip(ctx);
 	gfx_add_clip(ctx, 0, 0, ctx->width, ctx->height);
 
@@ -1078,7 +1238,7 @@ static void draw_background(int width, int height) {
 	/* If the wallpaper is already loaded, free it. */
 	if (wallpaper_buffer) {
 		if (wallpaper_old) {
-			free(wallpaper_old);
+			sprite_free(wallpaper_old);
 		}
 		wallpaper_old = wallpaper_buffer;
 		timer = precise_current_time();
@@ -1169,7 +1329,7 @@ static void resize_finish(int w, int h) {
 	_decor_get_bounds(main_window, &bounds);
 
 	/* Recalculate available size */
-	available_height = ctx->height - menu_bar_height - bounds.height - (is_desktop_background ? 0 : STATUS_HEIGHT);
+	available_height = ctx->height - menu_bar_height - nav_bar_height - bounds.height - (is_desktop_background ? 0 : STATUS_HEIGHT);
 	fprintf(stderr, "available_height = %d; bounds.bottom_height = %d, (isd...) = %d\n", available_height, bounds.bottom_height, (is_desktop_background ? 0 : STATUS_HEIGHT));
 
 	/* If the width changed, we need to rebuild the icon view */
@@ -1289,7 +1449,7 @@ static void _menu_action_paste(struct MenuEntry * entry) {
 static void _menu_action_about(struct MenuEntry * entry) {
 	/* Show About dialog */
 	char about_cmd[1024] = "\0";
-	strcat(about_cmd, "about \"About File Browser\" /usr/share/icons/48/folder.png \"PonyOS File Browser\" \"(C) 2018 K. Lange\n-\nPart of PonyOS, which is free software\nreleased under the NCSA/University of Illinois\nlicense.\n-\n%https://ponyos.org\n%https://github.com/klange/ponyos\" ");
+	strcat(about_cmd, "about \"About File Browser\" /usr/share/icons/48/folder.png \"PonyOS File Browser\" \"© 2018-2021 K. Lange\n-\nPart of PonyOS, which is free software\nreleased under the NCSA/University of Illinois\nlicense.\n-\n%https://toaruos.org\n%https://github.com/klange/toaruos\" ");
 	char coords[100];
 	sprintf(coords, "%d %d &", (int)main_window->x + (int)main_window->width / 2, (int)main_window->y + (int)main_window->height / 2);
 	strcat(about_cmd, coords);
@@ -1336,6 +1496,16 @@ static void open_file(struct File * f) {
 			redraw_window();
 		}
 	} else if (f->launcher[0]) {
+		if (is_picker_dialog) {
+			int base_is_root = !strcmp(current_directory, "/"); /* avoid redundant slash */
+			for (int i = 0; i < file_pointers_len; ++i) {
+				if (file_pointers[i]->selected) {
+					printf("%s%s%s\n", current_directory, base_is_root ? "" : "/",
+						file_pointers[i]->type == 2 ? file_pointers[i]->filename : file_pointers[i]->name);
+				}
+			}
+			exit(0);
+		}
 		char tmp[4096];
 		if (!strcmp(f->launcher, "SELF")) {
 			/* "SELF" launchers are for binaries. */
@@ -1374,7 +1544,7 @@ static void _menu_action_edit(struct MenuEntry * self) {
 /* View > (Show/Hide) Hidden Files */
 static void _menu_action_toggle_hidden(struct MenuEntry * self) {
 	show_hidden = !show_hidden;
-	menu_update_title(self, show_hidden ? "Hide Hidden Files" : "Show Hidden Files");
+	menu_update_icon(self, show_hidden ? "check" : NULL);
 	_menu_action_refresh(NULL);
 }
 
@@ -1415,9 +1585,6 @@ static void set_view_mode(int mode) {
 			view_mode = VIEW_MODE_LIST;
 			break;
 	}
-
-	reinitialize_contents();
-	redraw_window();
 }
 
 /**
@@ -1435,6 +1602,11 @@ static void _menu_action_view_mode(struct MenuEntry * entry) {
 		mode = VIEW_MODE_LIST;
 	}
 	set_view_mode(mode);
+	menu_update_icon(_menu_entry_show_icons, view_mode == VIEW_MODE_ICONS ? "check" : NULL);
+	menu_update_icon(_menu_entry_show_tiles, view_mode == VIEW_MODE_TILES ? "check" : NULL);
+	menu_update_icon(_menu_entry_show_list,  view_mode == VIEW_MODE_LIST  ? "check" : NULL);
+	reinitialize_contents();
+	redraw_window();
 }
 
 /**
@@ -1648,8 +1820,10 @@ static void arrow_select(int x, int y) {
 	for (int i = 0; i < file_pointers_len; ++i) {
 		if (file_pointers[i]->selected) {
 			selected = i;
+			file_pointers[i]->selected = 0;
+			clear_offset(i);
+			draw_file(file_pointers[i], i);
 		}
-		file_pointers[i]->selected = 0;
 	}
 
 	if (selected == -1) {
@@ -1685,8 +1859,9 @@ static void arrow_select(int x, int y) {
 	}
 
 	file_pointers[selected]->selected = 1;
+	clear_offset(selected);
+	draw_file(file_pointers[selected], selected);
 	update_status();
-	reinitialize_contents();
 	redraw_window();
 }
 
@@ -1695,16 +1870,43 @@ static void redraw_window_callback(struct menu_bar * self) {
 	redraw_window();
 }
 
+static void show_context_menu(struct yutani_msg_window_mouse_event * me) {
+	if (!context_menu->window && !directory_context_menu->window) {
+		struct File * f = get_file_at_offset(hilighted_offset);
+		if (f && !f->selected) {
+			toggle_selected(hilighted_offset, me->modifiers);
+		}
+
+		int _have_selection = 0;
+		for (int i = 0; i < file_pointers_len; ++i) {
+			if (file_pointers[i]->selected) {
+				_have_selection = 1;
+				break;
+			}
+		}
+
+		if (_have_selection) {
+			menu_show_at(context_menu, main_window, me->new_x, me->new_y);
+		} else {
+			menu_show_at(directory_context_menu, main_window, me->new_x, me->new_y);
+		}
+	}
+}
+
 int main(int argc, char * argv[]) {
 
 	yctx = yutani_init();
 	init_decorations();
+
+	tt_font_thin = tt_font_from_shm("sans-serif");
+	tt_font_bold = tt_font_from_shm("sans-serif.bold");
 
 	int arg_ind = 1;
 
 	if (argc > 1 && !strcmp(argv[1], "--wallpaper")) {
 		is_desktop_background = 1;
 		menu_bar_height = 0;
+		nav_bar_height = 0;
 		signal(SIGUSR1, sig_usr1);
 		signal(SIGUSR2, sig_usr2);
 		draw_background(yctx->display_width, yctx->display_height);
@@ -1715,9 +1917,17 @@ int main(int argc, char * argv[]) {
 		FILE * f = fopen("/var/run/.wallpaper.pid", "w");
 		fprintf(f, "%d\n", getpid());
 		fclose(f);
+	} else if (argc > 1 && !strcmp(argv[1], "--picker")) {
+		is_picker_dialog = 1;
+		menu_bar_height = 0;
+		main_window = yutani_window_create_flags(yctx, 640, 400,  YUTANI_WINDOW_FLAG_DIALOG_ANIMATION);
+		main_window->decorator_flags |= DECOR_FLAG_NO_MAXIMIZE;
+		yutani_window_move(yctx, main_window, yctx->display_width / 2 - main_window->width / 2, yctx->display_height / 2 - main_window->height / 2);
+		set_view_mode(VIEW_MODE_LIST);
 	} else {
 		main_window = yutani_window_create(yctx, 800, 600);
 		yutani_window_move(yctx, main_window, yctx->display_width / 2 - main_window->width / 2, yctx->display_height / 2 - main_window->height / 2);
+		set_view_mode(VIEW_MODE_TILES);
 	}
 
 	if (arg_ind < argc) {
@@ -1731,46 +1941,47 @@ int main(int argc, char * argv[]) {
 
 	set_title(NULL);
 
-	menu_bar.entries = menu_entries;
-	menu_bar.redraw_callback = redraw_window_callback;
+	if (menu_bar_height) {
+		menu_bar.entries = menu_entries;
+		menu_bar.redraw_callback = redraw_window_callback;
 
-	menu_bar.set = menu_set_create();
+		menu_bar.set = menu_set_create();
 
-	struct MenuList * m = menu_create(); /* File */
-	menu_insert(m, menu_create_normal("exit",NULL,"Exit", _menu_action_exit));
-	menu_set_insert(menu_bar.set, "file", m);
+		struct MenuList * m = menu_create(); /* File */
+		menu_insert(m, menu_create_normal("exit",NULL,"Exit", _menu_action_exit));
+		menu_set_insert(menu_bar.set, "file", m);
 
-	m = menu_create();
-	menu_insert(m, menu_create_normal(NULL,NULL,"Copy",_menu_action_copy));
-	menu_insert(m, menu_create_normal(NULL,NULL,"Paste",_menu_action_paste));
-	menu_insert(m, menu_create_separator());
-	menu_insert(m, menu_create_normal(NULL,NULL,"Select all",_menu_action_select_all));
-	menu_set_insert(menu_bar.set, "edit", m);
+		m = menu_create();
+		menu_insert(m, menu_create_normal(NULL,NULL,"Copy",_menu_action_copy));
+		menu_insert(m, menu_create_normal(NULL,NULL,"Paste",_menu_action_paste));
+		menu_insert(m, menu_create_separator());
+		menu_insert(m, menu_create_normal(NULL,NULL,"Select all",_menu_action_select_all));
+		menu_set_insert(menu_bar.set, "edit", m);
 
-	m = menu_create();
-	menu_insert(m, menu_create_normal("refresh",NULL,"Refresh", _menu_action_refresh));
-	menu_insert(m, menu_create_separator());
-	menu_insert(m, menu_create_normal(NULL,"icons","Show Icons", _menu_action_view_mode));
-	menu_insert(m, menu_create_normal(NULL,"tiles","Show Tiles", _menu_action_view_mode));
-	menu_insert(m, menu_create_normal(NULL,"list","Show List", _menu_action_view_mode));
-	menu_insert(m, menu_create_separator());
-	menu_insert(m, menu_create_normal(NULL,NULL,"Show Hidden Files", _menu_action_toggle_hidden));
-	menu_set_insert(menu_bar.set, "view", m);
+		m = menu_create();
+		menu_insert(m, menu_create_normal("refresh",NULL,"Refresh", _menu_action_refresh));
+		menu_insert(m, menu_create_separator());
+		menu_insert(m, (_menu_entry_show_icons = menu_create_normal(view_mode == VIEW_MODE_ICONS ? "check" : NULL,"icons","Show Icons", _menu_action_view_mode)));
+		menu_insert(m, (_menu_entry_show_tiles = menu_create_normal(view_mode == VIEW_MODE_TILES ? "check" : NULL,"tiles","Show Tiles", _menu_action_view_mode)));
+		menu_insert(m, (_menu_entry_show_list  = menu_create_normal(view_mode == VIEW_MODE_LIST  ? "check" : NULL,"list", "Show List",  _menu_action_view_mode)));
+		menu_insert(m, menu_create_separator());
+		menu_insert(m, menu_create_normal(NULL,NULL,"Show Hidden Files", _menu_action_toggle_hidden));
+		menu_set_insert(menu_bar.set, "view", m);
 
-	m = menu_create(); /* Go */
-	menu_insert(m, menu_create_normal("home",getenv("HOME"),"Home",_menu_action_navigate));
-	menu_insert(m, menu_create_normal(NULL,"/","File System",_menu_action_navigate));
-	menu_insert(m, menu_create_normal("up",NULL,"Up",_menu_action_up));
-	menu_set_insert(menu_bar.set, "go", m);
+		m = menu_create(); /* Go */
+		menu_insert(m, menu_create_normal("home",getenv("HOME"),"Home",_menu_action_navigate));
+		menu_insert(m, menu_create_normal(NULL,"/","File System",_menu_action_navigate));
+		menu_insert(m, menu_create_normal("up",NULL,"Up",_menu_action_up));
+		menu_set_insert(menu_bar.set, "go", m);
 
-	m = menu_create();
-	menu_insert(m, menu_create_normal("help",NULL,"Contents",_menu_action_help));
-	menu_insert(m, menu_create_separator());
-	menu_insert(m, menu_create_normal("star",NULL,"About " APPLICATION_TITLE,_menu_action_about));
-	menu_set_insert(menu_bar.set, "help", m);
+		m = menu_create();
+		menu_insert(m, menu_create_normal("help",NULL,"Contents",_menu_action_help));
+		menu_insert(m, menu_create_separator());
+		menu_insert(m, menu_create_normal("star",NULL,"About " APPLICATION_TITLE,_menu_action_about));
+		menu_set_insert(menu_bar.set, "help", m);
+	}
 
-	available_height = ctx->height - menu_bar_height - bounds.height - (is_desktop_background ? 0 : STATUS_HEIGHT);
-	fprintf(stderr, "available_height = %d\n", available_height);
+	available_height = ctx->height - menu_bar_height - nav_bar_height - bounds.height - (is_desktop_background ? 0 : STATUS_HEIGHT);
 
 	context_menu = menu_create(); /* Right-click menu */
 	menu_insert(context_menu, menu_create_normal(NULL,NULL,"Open",_menu_action_open));
@@ -1784,6 +1995,16 @@ int main(int argc, char * argv[]) {
 	}
 	menu_insert(context_menu, menu_create_normal("refresh",NULL,"Refresh",_menu_action_refresh));
 	menu_insert(context_menu, menu_create_normal("utilities-terminal","terminal","Open Terminal",launch_application_menu));
+
+	directory_context_menu = menu_create(); /* the other right click menu */
+	menu_insert(directory_context_menu, menu_create_normal(NULL,NULL,"Paste",_menu_action_paste));
+	menu_insert(directory_context_menu, menu_create_separator());
+	if (!is_desktop_background) {
+		menu_insert(directory_context_menu, menu_create_normal("up",NULL,"Up",_menu_action_up));
+	}
+	menu_insert(directory_context_menu, menu_create_normal("refresh",NULL,"Refresh",_menu_action_refresh));
+	menu_insert(directory_context_menu, menu_create_normal("utilities-terminal","terminal","Open Terminal",launch_application_menu));
+
 
 	history_back = list_create();
 	history_forward = list_create();
@@ -1803,10 +2024,7 @@ int main(int argc, char * argv[]) {
 		int fds[1] = {fileno(yctx->sock)};
 		int index = fswait2(1,fds,wallpaper_old ? 10 : 200);
 
-		if (restart) {
-			execvp(argv[0],argv);
-			return 1;
-		}
+		maybe_blink_cursor();
 
 		if (index == 1) {
 			if (wallpaper_old) {
@@ -1815,9 +2033,10 @@ int main(int argc, char * argv[]) {
 			continue;
 		}
 
+		int redraw = 0;
+
 		yutani_msg_t * m = yutani_poll(yctx);
 		while (m) {
-			int redraw = 0;
 			if (menu_process_event(yctx, m)) {
 				redraw = 1;
 			}
@@ -1838,7 +2057,11 @@ int main(int argc, char * argv[]) {
 										redraw_window();
 										break;
 									case KEY_BACKSPACE:
-										nav_bar_backspace();
+										if (ke->event.modifiers & (KEY_MOD_LEFT_CTRL | KEY_MOD_RIGHT_CTRL)) {
+											nav_bar_backspace_word();
+										} else {
+											nav_bar_backspace();
+										}
 										break;
 									case KEY_CTRL_W:
 										nav_bar_backspace_word();
@@ -1856,10 +2079,13 @@ int main(int argc, char * argv[]) {
 										} else {
 											switch (ke->event.keycode) {
 												case KEY_ARROW_LEFT:
-													nav_bar_cursor_left();
+													nav_bar_cursor_left(ke->event.modifiers);
 													break;
 												case KEY_ARROW_RIGHT:
-													nav_bar_cursor_right();
+													nav_bar_cursor_right(ke->event.modifiers);
+													break;
+												case KEY_DEL:
+													nav_bar_delete();
 													break;
 											}
 										}
@@ -1897,32 +2123,32 @@ int main(int argc, char * argv[]) {
 									break;
 								case 'l':
 									if (ke->event.modifiers & YUTANI_KEY_MODIFIER_CTRL && !is_desktop_background) {
-										nav_bar_focused = 1;
+										nav_bar_set_focused();
 										redraw_window();
 									}
 									break;
 								case 'f':
-									if (ke->event.modifiers & YUTANI_KEY_MODIFIER_ALT && !is_desktop_background) {
+									if (ke->event.modifiers & YUTANI_KEY_MODIFIER_ALT && menu_bar_height) {
 										menu_bar_show_menu(yctx,main_window,&menu_bar,-1,&menu_entries[0]);
 									}
 									break;
 								case 'e':
-									if (ke->event.modifiers & YUTANI_KEY_MODIFIER_ALT && !is_desktop_background) {
+									if (ke->event.modifiers & YUTANI_KEY_MODIFIER_ALT && menu_bar_height) {
 										menu_bar_show_menu(yctx,main_window,&menu_bar,-1,&menu_entries[1]);
 									}
 									break;
 								case 'v':
-									if (ke->event.modifiers & YUTANI_KEY_MODIFIER_ALT && !is_desktop_background) {
+									if (ke->event.modifiers & YUTANI_KEY_MODIFIER_ALT && menu_bar_height) {
 										menu_bar_show_menu(yctx,main_window,&menu_bar,-1,&menu_entries[2]);
 									}
 									break;
 								case 'g':
-									if (ke->event.modifiers & YUTANI_KEY_MODIFIER_ALT && !is_desktop_background) {
+									if (ke->event.modifiers & YUTANI_KEY_MODIFIER_ALT && menu_bar_height) {
 										menu_bar_show_menu(yctx,main_window,&menu_bar,-1,&menu_entries[3]);
 									}
 									break;
 								case 'h':
-									if (ke->event.modifiers & YUTANI_KEY_MODIFIER_ALT && !is_desktop_background) {
+									if (ke->event.modifiers & YUTANI_KEY_MODIFIER_ALT && menu_bar_height) {
 										menu_bar_show_menu(yctx,main_window,&menu_bar,-1,&menu_entries[4]);
 									}
 									break;
@@ -1940,7 +2166,7 @@ int main(int argc, char * argv[]) {
 				case YUTANI_MSG_WINDOW_FOCUS_CHANGE:
 					{
 						struct yutani_msg_window_focus_change * wf = (void*)m->data;
-						yutani_window_t * win = hashmap_get(yctx->windows, (void*)wf->wid);
+						yutani_window_t * win = hashmap_get(yctx->windows, (void*)(uintptr_t)wf->wid);
 						if (win == main_window) {
 							win->focused = wf->focused;
 							redraw_files();
@@ -1979,7 +2205,7 @@ int main(int argc, char * argv[]) {
 				case YUTANI_MSG_WINDOW_MOUSE_EVENT:
 					{
 						struct yutani_msg_window_mouse_event * me = (void*)m->data;
-						yutani_window_t * win = hashmap_get(yctx->windows, (void*)me->wid);
+						yutani_window_t * win = hashmap_get(yctx->windows, (void*)(uintptr_t)me->wid);
 						struct decor_bounds bounds;
 						_decor_get_bounds(win, &bounds);
 
@@ -1999,11 +2225,11 @@ int main(int argc, char * argv[]) {
 							}
 
 							/* Menu bar */
-							menu_bar_mouse_event(yctx, main_window, &menu_bar, me, me->new_x, me->new_y);
+							if (menu_bar_height) menu_bar_mouse_event(yctx, main_window, &menu_bar, me, me->new_x, me->new_y);
 
-							if (menu_bar_height &&
-								me->new_y > (int)(bounds.top_height + menu_bar_height - 36) &&
-								me->new_y < (int)(bounds.top_height + menu_bar_height) &&
+							if (nav_bar_height &&
+								me->new_y > (int)(bounds.top_height + menu_bar_height) &&
+								me->new_y < (int)(bounds.top_height + menu_bar_height + nav_bar_height) &&
 								me->new_x > (int)(bounds.left_width) &&
 								me->new_x < (int)(main_window->width - bounds.right_width)) {
 
@@ -2032,16 +2258,25 @@ int main(int argc, char * argv[]) {
 												}
 											}
 										}
+										if (main_window->mouse_state == YUTANI_CURSOR_TYPE_IBEAM) {
+											yutani_window_show_mouse(yctx, main_window, YUTANI_CURSOR_TYPE_RESET);
+										}
 									} else {
 										_set_hilight(-1,0);
 										if (me->command == YUTANI_MOUSE_EVENT_DOWN) {
-											nav_bar_focused = 1;
+											nav_bar_set_focused();
 											_figure_out_navbar_cursor(me->new_x, bounds);
 											redraw = 1;
+										}
+										if (main_window->mouse_state == YUTANI_CURSOR_TYPE_RESET) {
+											yutani_window_show_mouse(yctx, main_window, YUTANI_CURSOR_TYPE_IBEAM);
 										}
 									}
 								}
 							} else {
+								if (main_window->mouse_state == YUTANI_CURSOR_TYPE_IBEAM) {
+									yutani_window_show_mouse(yctx, main_window, YUTANI_CURSOR_TYPE_RESET);
+								}
 								if (me->command == YUTANI_MOUSE_EVENT_DOWN) {
 									if (nav_bar_focused) {
 										nav_bar_focused = 0;
@@ -2057,7 +2292,7 @@ int main(int argc, char * argv[]) {
 
 							if (!is_desktop_background && me->new_y > (int)(main_window->height - bounds.bottom_height - STATUS_HEIGHT)) {
 
-							} else if (me->new_y > (int)(bounds.top_height + menu_bar_height) &&
+							} else if (me->new_y > (int)(bounds.top_height + menu_bar_height + nav_bar_height) &&
 								me->new_y < (int)(main_window->height - bounds.bottom_height) &&
 								me->new_x > (int)(bounds.left_width) &&
 								me->new_x < (int)(main_window->width - bounds.right_width) &&
@@ -2072,7 +2307,7 @@ int main(int argc, char * argv[]) {
 								}
 
 								/* Get offset into contents */
-								int y_into = me->new_y - bounds.top_height - menu_bar_height + scroll_offset;
+								int y_into = me->new_y - bounds.top_height - menu_bar_height - nav_bar_height + scroll_offset;
 								int x_into = me->new_x - bounds.left_width;
 								int offset = (y_into / FILE_HEIGHT) * FILE_PTR_WIDTH + x_into / FILE_WIDTH;
 								if (x_into > FILE_PTR_WIDTH * FILE_WIDTH) {
@@ -2122,13 +2357,7 @@ int main(int argc, char * argv[]) {
 										}
 									}
 								} else if (me->buttons & YUTANI_MOUSE_BUTTON_RIGHT) {
-									if (!context_menu->window) {
-										struct File * f = get_file_at_offset(hilighted_offset);
-										if (f && !f->selected) {
-											toggle_selected(hilighted_offset, me->modifiers);
-										}
-										menu_show_at(context_menu, main_window, me->new_x, me->new_y);
-									}
+									show_context_menu(me);
 								}
 
 							} else {
@@ -2155,11 +2384,12 @@ int main(int argc, char * argv[]) {
 				default:
 					break;
 			}
-			if (redraw || wallpaper_old) {
-				redraw_window();
-			}
 			free(m);
 			m = yutani_poll_async(yctx);
+		}
+
+		if (redraw || wallpaper_old) {
+			redraw_window();
 		}
 	}
 }

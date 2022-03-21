@@ -1,126 +1,52 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
+/**
+ * @brief Console log manager.
+ *
+ * Presents a PEX endpoint for startup processes to write log
+ * messages to and will only send them to the console if the
+ * debug flag is set or 2 seconds have elapsed since we started.
+ *
+ * This also makes message writes a bit more asynchonrous, which
+ * is useful because the framebuffer console output can be quite
+ * slow and we don't want to slow down start up processes...
+ *
+ * The downside to that is that splash-log may have to play catch-up
+ * and could still be spewing messages to the console after startup
+ * has finished...
+ *
+ * This used to do a lot more work, as it managed both graphical
+ * output of messages and output to the VGA terminal, but that has
+ * all moved back into the kernel's 'fbterm', so now we're just
+ * a message buffer.
+ *
+ * @copyright
  * This file is part of ToaruOS and is released under the terms
  * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2018 K. Lange
- *
- * splash-log - Display startup messages before UI has started.
+ * Copyright (C) 2018-2021 K. Lange
  */
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
+#include <signal.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
+#include <sys/utsname.h>
+#include <sys/times.h>
+#include <sys/fswait.h>
 
 #include <kernel/video.h>
 #include <toaru/pex.h>
+#include <toaru/hashmap.h>
 
 #include "terminal-font.h"
 
-/**
- * For legacy backwards-compatibility reasons, the VGA
- * text-mode window is normalled mapped 1:1. If this
- * ever changes, a few applications will need to be updated.
- */
-static unsigned short * textmemptr = (unsigned short *)0xB8000;
-static void placech(unsigned char c, int x, int y, int attr) {
-	unsigned short *where;
-	unsigned att = attr << 8;
-	where = textmemptr + (y * 80 + x);
-	*where = c | att;
-}
+#define TIMEOUT_SECS 2
 
-/**
- * Graphical framebuffer is a bit more straightforward.
- */
-static int framebuffer_fd = -1;
-static int width, height, depth;
-static char * framebuffer;
+static FILE * console;
 
-static void set_point(int x, int y, uint32_t value) {
-	uint32_t * disp = (uint32_t *)framebuffer;
-	uint32_t * cell = &disp[y * width + x];
-	*cell = value;
-}
-
-#define BG_COLOR 0xFF050505
-#define FG_COLOR 0xFFCCCCCC
-#define char_width  9
-#define char_height 20
-static void write_char(int x, int y, int val, uint32_t color) {
-	if (val > 128) {
-		val = 4;
-	}
-	uint16_t * c = large_font[val];
-	for (uint8_t i = 0; i < char_height; ++i) {
-		for (uint8_t j = 0; j < char_width; ++j) {
-			if (c[i] & (1 << (15-j))) {
-				set_point(x+j,y+i,color);
-			} else {
-				set_point(x+j,y+i,BG_COLOR);
-			}
-		}
-	}
-}
-
-static void update_message(char * c, int line) {
-	if (framebuffer_fd != -1) {
-		int x = 20;
-		int y = 20 + char_height * line;
-		while (*c) {
-			write_char(x, y, *c, FG_COLOR);
-			c++;
-			x += char_width;
-		}
-		while (x < width - char_width) {
-			write_char(x, y, ' ', FG_COLOR);
-			x += char_width;
-		}
-	} else {
-		int x = 2;
-		int y = 2 + line;
-		while (*c) {
-			placech(*c, x, y, 0x7);
-			c++;
-			x++;
-		}
-		while (x < 80) {
-			placech(' ', x, y, 0x7);
-			x++;
-		}
-	}
-}
-
-static void clear_screen(void) {
-	if (framebuffer_fd != -1) {
-		for (int y = 0; y < height; ++y) {
-			for (int x = 0; x < width; ++x) {
-				set_point(x,y,BG_COLOR);
-			}
-		}
-
-	} else {
-		for (int y = 0; y < 24; ++y) {
-			for (int x = 0; x < 80; ++x) {
-				placech(' ', x, y, 0); /* Clear */
-			}
-		}
-	}
-}
-
-static void check_framebuffer(void) {
-	int tmpfd = open("/proc/framebuffer", O_RDONLY);
-	if (tmpfd > 0) {
-		framebuffer_fd = open("/dev/fb0", O_RDONLY);
-		ioctl(framebuffer_fd, IO_VID_WIDTH,  &width);
-		ioctl(framebuffer_fd, IO_VID_HEIGHT, &height);
-		ioctl(framebuffer_fd, IO_VID_DEPTH,  &depth);
-		ioctl(framebuffer_fd, IO_VID_ADDR,   &framebuffer);
-		ioctl(framebuffer_fd, IO_VID_SIGNAL, NULL);
-	} else {
-		framebuffer_fd = -1;
-	}
+static void update_message(char * c) {
+	fprintf(console, "%s\n", c);
 }
 
 static FILE * pex_endpoint = NULL;
@@ -129,45 +55,147 @@ static void open_socket(void) {
 	if (!pex_endpoint) exit(1);
 }
 
+static void say_hello(void) {
+	/* Get our release version */
+	struct utsname u;
+	uname(&u);
+	/* Strip git tag */
+	char * tmp = strstr(u.release, "-");
+	if (tmp) *tmp = '\0';
+	/* Setup hello message */
+	char hello_msg[512];
+	snprintf(hello_msg, 511, "ToaruOS %s is starting up...", u.release);
+	/* Add it to the log */
+	update_message(hello_msg);
+}
+
+static int tokenize(char * str, char * sep, char **buf) {
+	char * pch_i;
+	char * save_i;
+	int    argc = 0;
+	pch_i = strtok_r(str,sep,&save_i);
+	if (!pch_i) { return 0; }
+	while (pch_i != NULL) {
+		buf[argc] = (char *)pch_i;
+		++argc;
+		pch_i = strtok_r(NULL,sep,&save_i);
+	}
+	buf[argc] = NULL;
+	return argc;
+}
+
+static hashmap_t * get_cmdline(void) {
+	int fd = open("/proc/cmdline", O_RDONLY);
+	char * out = malloc(1024);
+	size_t r = read(fd, out, 1024);
+	out[r] = '\0';
+	if (out[r-1] == '\n') {
+		out[r-1] = '\0';
+	}
+
+	char * arg = strdup(out);
+	char * argv[1024];
+	int argc = tokenize(arg, " ", argv);
+
+	/* New let's parse the tokens into the arguments list so we can index by key */
+
+	hashmap_t * args = hashmap_create(10);
+
+	for (int i = 0; i < argc; ++i) {
+		char * c = strdup(argv[i]);
+
+		char * name;
+		char * value;
+
+		name = c;
+		value = NULL;
+		/* Find the first = and replace it with a null */
+		char * v = c;
+		while (*v) {
+			if (*v == '=') {
+				*v = '\0';
+				v++;
+				value = v;
+				goto _break;
+			}
+			v++;
+		}
+
+_break:
+		hashmap_set(args, name, value);
+	}
+
+	free(arg);
+	free(out);
+
+	return args;
+}
+
+
 int main(int argc, char * argv[]) {
 	if (getuid() != 0) {
 		fprintf(stderr, "%s: only root should run this\n", argv[0]);
 		return 1;
 	}
 
-	open_socket();
-
 	if (!fork()) {
-		check_framebuffer();
-		clear_screen();
-		update_message("PonyOS is starting up...", 0);
+		hashmap_t * cmdline = get_cmdline();
+
+		int quiet = 0;
+		char * last_message = NULL;
+		clock_t start = times(NULL);
+
+		if (!hashmap_has(cmdline, "debug")) {
+			quiet = 1;
+		}
+
+		open_socket();
+		console = fopen("/dev/console","a");
+
+		if (!quiet) say_hello();
 
 		while (1) {
-			pex_packet_t * p = calloc(PACKET_SIZE, 1);
-			pex_listen(pex_endpoint, p);
+			int pex_fd[] = {fileno(pex_endpoint)};
+			int index = fswait2(1, pex_fd, 100);
 
-			if (p->size < 4)  continue; /* Ignore blank messages, erroneous line feeds, etc. */
-			if (p->size > 80) continue; /* Ignore overly large messages */
+			if (index == 0) {
+				pex_packet_t * p = calloc(PACKET_SIZE, 1);
+				pex_listen(pex_endpoint, p);
 
-			if (!strncmp((char*)p->data, "!quit", 5)) {
-				/* Use the special message !quit to exit. */
-				fclose(pex_endpoint);
-				return 0;
-			} else if (p->data[0] == ':') {
-				/* Make sure message is nil terminated (it should be...) */
-				char * tmp = malloc(p->size + 1);
-				memcpy(tmp, p->data, p->size);
-				tmp[p->size] = '\0';
-				update_message(tmp+1, 1);
-				free(tmp);
-			} else {
-				/* Make sure message is nil terminated (it should be...) */
-				char * tmp = malloc(p->size + 1);
-				memcpy(tmp, p->data, p->size);
-				tmp[p->size] = '\0';
-				update_message(tmp, 0);
-				update_message("", 1);
-				free(tmp);
+				if (p->size < 4)  { free(p); continue; } /* Ignore blank messages, erroneous line feeds, etc. */
+				if (p->size > 80) { free(p); continue; } /* Ignore overly large messages */
+
+				if (!strncmp((char*)p->data, "!quit", 5)) {
+					/* Use the special message !quit to exit. */
+					fclose(pex_endpoint);
+					return 0;
+				}
+
+				if (!quiet) {
+					p->data[p->size] = '\0';
+					update_message((char*)p->data + (p->data[0] == ':' ? 1 : 0));
+				}
+
+				if (last_message) {
+					free(last_message);
+					last_message = NULL;
+				}
+
+				if (quiet) {
+					last_message = strdup((char*)p->data + (p->data[0] == ':' ? 1 : 0));
+				}
+
+				free(p);
+			} else if (quiet && times(NULL) - start > TIMEOUT_SECS * 1000000L) {
+				quiet = 0;
+				if (last_message) {
+					update_message("Startup is taking a while, enabling log. Last message was:");
+					update_message(last_message);
+					free(last_message);
+					last_message = NULL;
+				} else {
+					update_message("Startup is taking a while, enabling log.");
+				}
 			}
 		}
 	}

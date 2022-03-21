@@ -1,19 +1,31 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
- * This file is part of ToaruOS and is released under the terms
- * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2016-2018 K. Lange
- *
- * cursor-off - Disables the VGA text mode cursor.
+/**
+ * @brief cursor-off - Disables the VGA text mode cursor.
  *
  * This is an old tool that calls a special system call
  * to change the VGA text-mode cursor position. The VGA
  * terminal renders its own cursor in software, so we
  * try to move the hardware cursor off screen so it doesn't
  * interfere with the rest of the terminal and look weird.
+ *
+ * @copyright
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2016-2018 K. Lange
  */
+#include <unistd.h>
+#include <fcntl.h>
 #include <sys/sysfunc.h>
 
 int main(int argc, char * argv[]) {
-	int x[] = {0xFF,0xFF};
-	return sysfunc(TOARU_SYS_FUNC_SETVGACURSOR, (char **)x);
+	int fd = open("/dev/port", O_RDWR);
+	if (fd < 0) return 1;
+	lseek(fd, 0x3D4, SEEK_SET);
+	write(fd, (unsigned char[]){14}, 1);
+	lseek(fd, 0x3D5, SEEK_SET);
+	write(fd, (unsigned char[]){0xFF}, 1);
+	lseek(fd, 0x3D4, SEEK_SET);
+	write(fd, (unsigned char[]){15}, 1);
+	lseek(fd, 0x3D5, SEEK_SET);
+	write(fd, (unsigned char[]){0xFF}, 1);
+	return 0;
 }

@@ -1,209 +1,201 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
+/**
+ * @file  kernel/sys/signal.c
+ * @brief Signal handling.
+ *
+ * Provides signal entry and delivery; also handles suspending
+ * and resuming jobs (SIGTSTP, SIGCONT).
+ *
+ * As of Misaka 2.1, signal delivery has been largely rewritten:
+ * - Signals can only be delivered a times when we would be
+ *   normally returning to userspace. This matches behavior in
+ *   a number of other kernels.
+ * - Signals should cause kernel sleeps to return with an error
+ *   state, ending any blocking system calls and allowing them
+ *   to either gracefully return or bubble up -ERESTARTSYS to
+ *   be restarted.
+ * - Userspace signal handlers now push context on the userspace
+ *   stack. This is arch-specific behavior.
+ * - Signal handler returns work the same as previously, injecting
+ *   a special "magic" return address that should fault.
+ *
+ * @copyright
  * This file is part of ToaruOS and is released under the terms
  * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2012-2018 K. Lange
- *
- * Signal Handling
+ * Copyright (C) 2012-2022 K. Lange
  */
-
-#include <kernel/system.h>
+#include <errno.h>
+#include <stdint.h>
+#include <sys/signal.h>
+#include <sys/signal_defs.h>
+#include <kernel/printf.h>
+#include <kernel/string.h>
+#include <kernel/process.h>
 #include <kernel/signal.h>
-#include <kernel/logging.h>
-
-void enter_signal_handler(uintptr_t location, int signum, uintptr_t stack) {
-	IRQ_OFF;
-	uintptr_t ebp = current_process->syscall_registers->ebp;
-	uintptr_t esp = current_process->syscall_registers->useresp;
-	asm volatile(
-			"mov %2, %%esp\n"
-			"pushl %4\n"
-			"pushl %3\n"
-			"pushl %1\n"           /*          argument count   */
-			"pushl $" STRSTR(SIGNAL_RETURN) "\n"
-			"mov $0x23, %%ax\n"    /* Segment selector */
-			"mov %%ax, %%ds\n"
-			"mov %%ax, %%es\n"
-			"mov %%ax, %%fs\n"
-			"mov $0x33, %%ax\n"    /* Segment selector */
-			"mov %%ax, %%gs\n"
-			"mov %%esp, %%eax\n"   /* Stack -> EAX */
-			"pushl $0x23\n"        /* Segment selector again */
-			"pushl %%eax\n"
-			"pushf\n"              /* Push flags */
-			"popl %%eax\n"         /* Fix the Interrupt flag */
-			"orl  $0x200, %%eax\n"
-			"pushl %%eax\n"
-			"pushl $0x1B\n"
-			"pushl %0\n"           /* Push the entry point */
-			"iret\n"
-			: : "m"(location), "m"(signum), "r"(stack), "m"(ebp), "m"(esp) : "%ax", "%esp", "%eax");
-
-	debug_print(CRITICAL, "Failed to jump to signal handler!");
-}
+#include <kernel/spinlock.h>
+#include <kernel/ptrace.h>
+#include <kernel/syscall.h>
 
 static spin_lock_t sig_lock;
-static spin_lock_t sig_lock_b;
 
-char isdeadly[] = {
+#define SIG_DISP_Ign  0
+#define SIG_DISP_Term 1
+#define SIG_DISP_Core 2
+#define SIG_DISP_Stop 3
+#define SIG_DISP_Cont 4
+
+static char sig_defaults[] = {
 	0, /* 0? */
-	1, /* SIGHUP     */
-	1, /* SIGINT     */
-	2, /* SIGQUIT    */
-	2, /* SIGILL     */
-	2, /* SIGTRAP    */
-	2, /* SIGABRT    */
-	2, /* SIGEMT     */
-	2, /* SIGFPE     */
-	1, /* SIGKILL    */
-	2, /* SIGBUS     */
-	2, /* SIGSEGV    */
-	2, /* SIGSYS     */
-	1, /* SIGPIPE    */
-	1, /* SIGALRM    */
-	1, /* SIGTERM    */
-	1, /* SIGUSR1    */
-	1, /* SIGUSR2    */
-	0, /* SIGCHLD    */
-	0, /* SIGPWR     */
-	0, /* SIGWINCH   */
-	0, /* SIGURG     */
-	0, /* SIGPOLL    */
-	3, /* SIGSTOP    */
-	3, /* SIGTSTP    */
-	4, /* SIGCONT    */
-	3, /* SIGTTIN    */
-	3, /* SIGTTOUT   */
-	1, /* SIGVTALRM  */
-	1, /* SIGPROF    */
-	2, /* SIGXCPU    */
-	2, /* SIGXFSZ    */
-	0, /* SIGWAITING */
-	1, /* SIGDIAF    */
-	0, /* SIGHATE    */
-	0, /* SIGWINEVENT*/
-	0, /* SIGCAT     */
+	[SIGHUP     ] = SIG_DISP_Term,
+	[SIGINT     ] = SIG_DISP_Term,
+	[SIGQUIT    ] = SIG_DISP_Core,
+	[SIGILL     ] = SIG_DISP_Core,
+	[SIGTRAP    ] = SIG_DISP_Core,
+	[SIGABRT    ] = SIG_DISP_Core,
+	[SIGEMT     ] = SIG_DISP_Core,
+	[SIGFPE     ] = SIG_DISP_Core,
+	[SIGKILL    ] = SIG_DISP_Term,
+	[SIGBUS     ] = SIG_DISP_Core,
+	[SIGSEGV    ] = SIG_DISP_Core,
+	[SIGSYS     ] = SIG_DISP_Core,
+	[SIGPIPE    ] = SIG_DISP_Term,
+	[SIGALRM    ] = SIG_DISP_Term,
+	[SIGTERM    ] = SIG_DISP_Term,
+	[SIGUSR1    ] = SIG_DISP_Term,
+	[SIGUSR2    ] = SIG_DISP_Term,
+	[SIGCHLD    ] = SIG_DISP_Ign,
+	[SIGPWR     ] = SIG_DISP_Ign,
+	[SIGWINCH   ] = SIG_DISP_Ign,
+	[SIGURG     ] = SIG_DISP_Ign,
+	[SIGPOLL    ] = SIG_DISP_Ign,
+	[SIGSTOP    ] = SIG_DISP_Stop,
+	[SIGTSTP    ] = SIG_DISP_Stop,
+	[SIGCONT    ] = SIG_DISP_Cont,
+	[SIGTTIN    ] = SIG_DISP_Stop,
+	[SIGTTOUT   ] = SIG_DISP_Stop,
+	[SIGVTALRM  ] = SIG_DISP_Term,
+	[SIGPROF    ] = SIG_DISP_Term,
+	[SIGXCPU    ] = SIG_DISP_Core,
+	[SIGXFSZ    ] = SIG_DISP_Core,
+	[SIGWAITING ] = SIG_DISP_Ign,
+	[SIGDIAF    ] = SIG_DISP_Term,
+	[SIGHATE    ] = SIG_DISP_Ign,
+	[SIGWINEVENT] = SIG_DISP_Ign,
+	[SIGCAT     ] = SIG_DISP_Ign,
 };
 
-void handle_signal(process_t * proc, signal_t * sig) {
-	uintptr_t handler = sig->handler;
+/**
+ * @brief If a system call returned -ERESTARTSYS, restart it.
+ *
+ * Called by both @c handle_signal and @c return_from_signal_handler depending
+ * on how the signal was handled.
+ *
+ * @param r Registers after restoration from signal return.
+ */
+static void maybe_restart_system_call(struct regs * r) {
+	if (this_core->current_process->interrupted_system_call && arch_syscall_number(r) == -ERESTARTSYS) {
+		arch_syscall_return(r, this_core->current_process->interrupted_system_call);
+		this_core->current_process->interrupted_system_call = 0;
+		syscall_handler(r);
+	}
+}
+
+/**
+ * @brief Examine the pending signal and perform an appropriate action.
+ *
+ * This is called by @c process_check_signals below. It should not be called
+ * directly by other parts of the kernel. Previously, it was called through
+ * process switching...
+ *
+ * When a signal handler is called, this does not return. The userspace
+ * process is resumed in the signal handler context, and any future calls
+ * into the kernel are "from scratch".
+ *
+ * @param proc should be the current active process, which should generally
+ *             always be this_core->current_process.
+ * @param sig  is the signal node from the pending queue. Currently, this
+ *             just contains the signal number and nothing else. It used to
+ *             also contain the handler to call, but that led to TOCTOU bugs.
+ * @param r    Userspace registers at time of signal entry. This gets passed
+ *             forward to @c arch_enter_signal_handler
+ * @returns 0 if another signal needs to be handled, 1 otherwise.
+ */
+int handle_signal(process_t * proc, signal_t * sig, struct regs *r) {
 	uintptr_t signum  = sig->signum;
 	free(sig);
 
-	if (proc->finished) {
-		return;
+	uintptr_t handler = proc->signals[signum];
+
+	/* Are we being traced? */
+	if (this_core->current_process->flags & PROC_FLAG_TRACE_SIGNALS) {
+		signum = ptrace_signal(signum, 0);
+	}
+
+	if (proc->flags & PROC_FLAG_FINISHED) {
+		return 1;
 	}
 
 	if (signum == 0 || signum >= NUMSIGNALS) {
-		/* Ignore */
-		return;
+		goto _ignore_signal;
 	}
 
 	if (!handler) {
-		char dowhat = isdeadly[signum];
-		if (dowhat == 1 || dowhat == 2) {
-			debug_print(WARNING, "Process %d killed by unhandled signal (%d)", proc->id, signum);
-			kexit(((128 + signum) << 8) | signum);
+		char dowhat = sig_defaults[signum];
+		if (dowhat == SIG_DISP_Term || dowhat == SIG_DISP_Core) {
+			task_exit(((128 + signum) << 8) | signum);
 			__builtin_unreachable();
-		} else if (dowhat == 3) {
-			debug_print(WARNING, "suspending pid %d", proc->id);
-			current_process->suspended = 1;
-			current_process->status = 0x7F;
+		} else if (dowhat == SIG_DISP_Stop) {
+			__sync_or_and_fetch(&this_core->current_process->flags, PROC_FLAG_SUSPENDED);
+			this_core->current_process->status = 0x7F;
 
-			process_t * parent = process_get_parent((process_t *)current_process);
+			process_t * parent = process_get_parent((process_t *)this_core->current_process);
 
-			if (parent && !parent->finished) {
+			if (parent && !(parent->flags & PROC_FLAG_FINISHED)) {
 				wakeup_queue(parent->wait_queue);
 			}
 
-			switch_task(0);
-		} else if (dowhat == 4) {
-			switch_task(1);
-			return;
-		} else {
-			debug_print(WARNING, "Ignoring signal %d by default in pid %d", signum, proc->id);
+			do {
+				switch_task(0);
+			} while (!this_core->current_process->signal_queue->length);
+
+			return 0; /* Return and handle another */
+		} else if (dowhat == SIG_DISP_Cont) {
+			/* Continue doesn't actually do anything different at this stage. */
+			goto _ignore_signal;
 		}
-		/* XXX dowhat == 2: should dump core */
-		/* XXX dowhat == 3: stop */
-		return;
+		goto _ignore_signal;
 	}
 
-	if (handler == 1) /* Ignore */ {
-		return;
-	}
+	/* If the handler value is 1 we treat it as IGN. */
+	if (handler == 1) goto _ignore_signal;
 
-	debug_print(NOTICE, "handling signal in process %d (%d) (0x%x)", proc->id, signum, handler);
+	proc->signals[signum] = 0;
 
-	uintptr_t stack = 0xFFFF0000;
-	if (proc->syscall_registers->useresp < 0x10000100) {
-		stack = proc->image.user_stack;
-	} else {
-		stack = proc->syscall_registers->useresp;
-	}
+	arch_enter_signal_handler(handler, signum, r);
+	return 1; /* Should not be reachable */
 
-	/* Not marked as ignored, must call signal */
-	enter_signal_handler(handler, signum, stack);
+_ignore_signal:
+	/* we still need to check if we need to restart something */
 
+	maybe_restart_system_call(r);
+
+	return !this_core->current_process->signal_queue->length;
 }
 
-list_t * rets_from_sig;
-
-void return_from_signal_handler(void) {
-#if 0
-	debug_print(ERROR, "Return From Signal for process %d", current_process->id);
-#endif
-
-	if (__builtin_expect(!rets_from_sig, 0)) {
-		rets_from_sig = list_create();
-	}
-
-	spin_lock(sig_lock);
-	list_insert(rets_from_sig, (process_t *)current_process);
-	spin_unlock(sig_lock);
-
-	switch_next();
-}
-
-void fix_signal_stacks(void) {
-	uint8_t redo_me = 0;
-	if (rets_from_sig) {
-		spin_lock(sig_lock_b);
-		while (rets_from_sig->head) {
-			spin_lock(sig_lock);
-			node_t * n = list_dequeue(rets_from_sig);
-			spin_unlock(sig_lock);
-			if (!n) {
-				continue;
-			}
-			process_t * p = n->value;
-			free(n);
-			if (p == current_process) {
-				redo_me = 1;
-				continue;
-			}
-			p->thread.esp = p->signal_state.esp;
-			p->thread.eip = p->signal_state.eip;
-			p->thread.ebp = p->signal_state.ebp;
-			if (!p->signal_kstack) {
-				debug_print(ERROR, "Cannot restore signal stack for pid=%d - unset?", p->id);
-			} else {
-				debug_print(ERROR, "Restoring signal stack for pid=%d", p->id);
-				memcpy((void *)(p->image.stack - KERNEL_STACK_SIZE), p->signal_kstack, KERNEL_STACK_SIZE);
-				free(p->signal_kstack);
-				p->signal_kstack = NULL;
-			}
-			make_process_ready(p);
-		}
-		spin_unlock(sig_lock_b);
-	}
-	if (redo_me) {
-		spin_lock(sig_lock);
-		list_insert(rets_from_sig, (process_t *)current_process);
-		spin_unlock(sig_lock);
-		switch_next();
-	}
-}
-
-int send_signal(pid_t process, uint32_t signal, int force_root) {
+/**
+ * @brief Deliver a signal to another process.
+ *
+ * Called by both system calls like @c kill as well as by some things
+ * that want to trigger SIGSEGV, SIGPIPE, and so on.
+ *
+ * @param process    PID to deliver to. Must be a single PID, not a group specifier.
+ * @param signal     Signal number to deliver.
+ * @param force_root If the current process isn't root, it can't send signals to
+ *                   processes owned by other users, which means we can't send soft
+ *                   signals as part operations like SIGPIPE or SIGCHLD. Kernel callers
+ *                   can use this parameter to skip this check.
+ * @returns General status, should be suitable for sys_kill return value.
+ */
+int send_signal(pid_t process, int signal, int force_root) {
 	process_t * receiver = process_from_pid(process);
 
 	if (!receiver) {
@@ -211,10 +203,15 @@ int send_signal(pid_t process, uint32_t signal, int force_root) {
 		return -ESRCH;
 	}
 
-	if (!force_root && receiver->user != current_process->user && current_process->user != USER_ROOT_UID) {
-		if (!(signal == SIGCONT && receiver->session == current_process->session)) {
+	if (!force_root && receiver->user != this_core->current_process->user && this_core->current_process->user != USER_ROOT_UID) {
+		if (!(signal == SIGCONT && receiver->session == this_core->current_process->session)) {
 			return -EPERM;
 		}
+	}
+
+	if (receiver->flags & PROC_FLAG_IS_TASKLET) {
+		/* Can not send signals to kernel tasklets */
+		return -EINVAL;
 	}
 
 	if (signal > NUMSIGNALS) {
@@ -222,67 +219,70 @@ int send_signal(pid_t process, uint32_t signal, int force_root) {
 		return -EINVAL;
 	}
 
-	if (receiver->finished) {
+	if (receiver->flags & PROC_FLAG_FINISHED) {
 		/* Can't send signals to finished processes */
 		return -EINVAL;
 	}
 
-	if (!receiver->signals.functions[signal] && !isdeadly[signal]) {
-		/* If we're blocking a signal and it's not going to kill us, don't deliver it */
+	if (!receiver->signals[signal] && !sig_defaults[signal]) {
+		/* If there is no handler for a signal and its default disposition is IGNORE,
+		 * we don't even bother sending it, to avoid having to interrupt + restart system calls. */
 		return 0;
 	}
 
-	if (isdeadly[signal] == 4) {
-		if (!receiver->suspended) {
+	if (sig_defaults[signal] == SIG_DISP_Cont) {
+		/* XXX: I'm not sure this check is necessary? And the SUSPEND flag flip probably
+		 *      should be on the receiving end. */
+		if (!(receiver->flags & PROC_FLAG_SUSPENDED)) {
 			return -EINVAL;
 		} else {
-			debug_print(WARNING, "Resuming pid %d from suspend", receiver->id);
-			receiver->suspended = 0;
+			__sync_and_and_fetch(&receiver->flags, ~(PROC_FLAG_SUSPENDED));
 			receiver->status = 0;
 		}
 	}
 
 	/* Append signal to list */
 	signal_t * sig = malloc(sizeof(signal_t));
-	sig->handler = (uintptr_t)receiver->signals.functions[signal];
 	sig->signum  = signal;
-	memset(&sig->registers_before, 0x00, sizeof(regs_t));
 
-	if (receiver->node_waits) {
-		process_awaken_from_fswait(receiver, -1);
-	}
-	if (!process_is_ready(receiver)) {
-		make_process_ready(receiver);
-	}
-
+	spin_lock(sig_lock);
 	list_insert(receiver->signal_queue, sig);
+	spin_unlock(sig_lock);
 
-	if (receiver == current_process) {
-		/* Forces us to be rescheduled and enter signal handler */
-		if (receiver->signal_kstack) {
-			switch_next();
-		} else {
-			switch_task(0);
-		}
+	/* Informs any blocking events that the process has been interrupted
+	 * by a signal, which should trigger those blocking events to complete
+	 * and potentially return -EINTR or -ERESTARTSYS */
+	process_awaken_signal(receiver);
+
+	/* Schedule processes awoken by signals to be run. Unless they're us, we'll
+	 * jump to the signal handler as part of returning from this call. */
+	if (receiver != this_core->current_process && !process_is_ready(receiver)) {
+		make_process_ready(receiver);
 	}
 
 	return 0;
 }
 
-int group_send_signal(int group, uint32_t signal, int force_root) {
+/**
+ * @brief Send a signal to multiple processes.
+ *
+ * Similar to @c send_signal but for when a negative PID needs to be used.
+ *
+ * @param group The group process ID. Positive PID, not negative.
+ * @param signal Signal number to deliver.
+ * @param force_root See explanation in @c send_signal
+ * @returns 1 if something was signalled, 0 if there were no valid recipients.
+ */
+int group_send_signal(pid_t group, int signal, int force_root) {
 
 	int kill_self = 0;
 	int killed_something = 0;
 
-	debug_print(WARNING, "killing group %d", group);
-
 	foreach(node, process_list) {
 		process_t * proc = node->value;
-		debug_print(WARNING, "examining %d %d %d", proc->id, proc->job, proc->group);
 		if (proc->group == proc->id && proc->job == group) {
 			/* Only thread group leaders */
-			debug_print(WARNING, "killing %d", proc->group);
-			if (proc->group == current_process->group) {
+			if (proc->group == this_core->current_process->group) {
 				kill_self = 1;
 			} else {
 				if (send_signal(proc->group, signal, force_root) == 0) {
@@ -293,7 +293,7 @@ int group_send_signal(int group, uint32_t signal, int force_root) {
 	}
 
 	if (kill_self) {
-		if (send_signal(current_process->group, signal, force_root) == 0) {
+		if (send_signal(this_core->current_process->group, signal, force_root) == 0) {
 			killed_something = 1;
 		}
 	}
@@ -301,3 +301,47 @@ int group_send_signal(int group, uint32_t signal, int force_root) {
 	return !!killed_something;
 }
 
+/**
+ * @brief Examine the signal delivery queue of the current process, and handle signals.
+ *
+ * Should be called before a userspace return would happen. If a signal handler is to be
+ * run in userspace, then process_check_signals will not return, similar to exec.
+ *
+ * @param r Userspace registers before signal entry.
+ */
+void process_check_signals(struct regs * r) {
+	spin_lock(sig_lock);
+	if (this_core->current_process &&
+		!(this_core->current_process->flags & PROC_FLAG_FINISHED) &&
+		this_core->current_process->signal_queue &&
+		this_core->current_process->signal_queue->length > 0) {
+		while (1) {
+			node_t * node = list_dequeue(this_core->current_process->signal_queue);
+			spin_unlock(sig_lock);
+
+			signal_t * sig = node->value;
+			free(node);
+
+			if (handle_signal((process_t*)this_core->current_process,sig,r)) return;
+
+			spin_lock(sig_lock);
+		}
+	}
+	spin_unlock(sig_lock);
+}
+
+/**
+ * @brief Restore pre-signal context and possibly restart system calls.
+ *
+ * To be called by the platform's fault handler when it determines that
+ * a signal handler return has been triggered. Calls platform code to restore
+ * the previous userspace context (before the signal) from the userspace stack
+ * and restarts an interrupted system call if there was one.
+ *
+ * @param r Registers at fault, passed to platform code for restoration and
+ *          then to @c maybe_restart_system_call to handle system call restarts.
+ */
+void return_from_signal_handler(struct regs *r) {
+	arch_return_from_signal_handler(r);
+	maybe_restart_system_call(r);
+}

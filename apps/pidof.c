@@ -1,10 +1,10 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
+/**
+ * @brief Look up the PIDs of all processes with a particular name
+ *
+ * @copyright
  * This file is part of ToaruOS and is released under the terms
  * of the NCSA / University of Illinois License - see LICENSE.md
  * Copyright (C) 2018 K. Lange
- *
- * pidof - Find and print process IDs
- *
  */
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -26,7 +26,7 @@ typedef struct process {
 #define LINE_LEN 4096
 
 p_t * build_entry(struct dirent * dent) {
-	char tmp[256];
+	char tmp[300];
 	FILE * f;
 	char line[LINE_LEN];
 

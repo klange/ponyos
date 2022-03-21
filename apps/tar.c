@@ -1,14 +1,15 @@
-/* vim: ts=4 sw=4 noexpandtab
- * This file is part of ToaruOS and is released under the terms
- * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2018 K. Lange
- *
- * tar - extract archives
+/**
+ * @brief tar - extract archives
  *
  * This is a very minimal and incomplete implementation of tar.
  * It supports on ustar-formatted archives, and its arguments
- * must by the - forms. As of writing, creating archives is not
- * supported. No compression formats are supported, either.
+ * must be the - forms. As of writing, creating archives is not
+ * supported. Decompression is supported by piping through gunzip.
+ *
+ * @copyright
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2018-2020 K. Lange
  */
 #include <stdio.h>
 #include <string.h>
@@ -142,6 +143,7 @@ static void write_file(struct ustar * file, FILE * f, FILE * mf, char * name) {
 		fread( buf, 1, length, f);
 		fwrite(buf, 1, length, mf);
 	}
+	fflush(mf);
 	if (mf != stdout) {
 		fclose(mf);
 		chmod(name, interpret_mode(file));
@@ -298,13 +300,13 @@ int main(int argc, char * argv[]) {
 				if (verbose) {
 					fprintf(stdout, "%.155s%.100s\n", file->prefix, file->filename);
 				}
-				char name[1024] = {0};
+				char name[1025] = {0};
 				if (last_was_long) {
-					strncat(name, tmpname, 1023);
+					strncat(name, tmpname, 1024);
 					last_was_long = 0;
 				} else {
-					strncat(name, file->prefix, 155);
-					strncat(name, file->filename, 100);
+					strncat(name, file->prefix, 167);
+					strncat(name, file->filename, 512);
 				}
 
 				if (file->type[0] == '0' || file->type[0] == 0) {
@@ -334,8 +336,8 @@ int main(int argc, char * argv[]) {
 					}
 				} else if (file->type[0] == '1') {
 					if (!to_stdout && (!only_matches || matches_files(argc,argv,optind,name))) {
-						char tmp[101] = {0};
-						strncat(tmp, file->link, 100);
+						char tmp[356] = {0};
+						strncat(tmp, file->link, 355);
 						FILE * mf = fopen(name,"w");
 						if (!mf) {
 							fprintf(stderr, "%s: %s: %s: %s\n", argv[0], fname, name, strerror(errno));
@@ -358,8 +360,8 @@ int main(int argc, char * argv[]) {
 					_seek_forward(f, interpret_size(file));
 				} else if (file->type[0] == '2') {
 					if (!to_stdout && (!only_matches || matches_files(argc,argv,optind,name))) {
-						char tmp[101] = {0};
-						strncat(tmp, file->link, 100);
+						char tmp[356] = {0};
+						strncat(tmp, file->link, 355);
 						if (symlink(tmp, name) < 0) {
 							fprintf(stderr, "%s: %s: %s: %s: %s\n", argv[0], fname, name, tmp, strerror(errno));
 						}

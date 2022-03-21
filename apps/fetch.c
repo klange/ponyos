@@ -1,19 +1,24 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
+/**
+ * @file  apps/fetch.c
+ * @brief Obtain files over HTTP.
+ *
+ * @copyright
  * This file is part of ToaruOS and is released under the terms
  * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2015-2018 K. Lange
- *
- * fetch - Retreive documents from HTTP servers.
- *
+ * Copyright (C) 2015-2021 K. Lange
  */
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <getopt.h>
 #include <time.h>
-#include <sys/time.h>
 #include <termios.h>
 #include <unistd.h>
+#include <sys/time.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netdb.h>
+#include <arpa/inet.h>
 
 #include <toaru/hashmap.h>
 
@@ -23,6 +28,8 @@
 struct http_req {
 	char domain[SIZE];
 	char path[SIZE];
+	int port;
+	int ssl;
 };
 
 struct {
@@ -42,25 +49,38 @@ struct {
 	int machine_readable;
 } fetch_options = {0};
 
-void parse_url(char * d, struct http_req * r) {
+int parse_url(char * d, struct http_req * r) {
 	if (strstr(d, "http://") == d) {
-
 		d += strlen("http://");
-
-		char * s = strstr(d, "/");
-		if (!s) {
-			strcpy(r->domain, d);
-			strcpy(r->path, "");
-		} else {
-			*s = 0;
-			s++;
-			strcpy(r->domain, d);
-			strcpy(r->path, s);
-		}
+		r->port = 80;
+		r->ssl = 0;
+	} else if (strstr(d, "https://") == d) {
+		d += strlen("https://");
+		r->port = 443;
+		r->ssl = 1;
 	} else {
-		fprintf(stderr, "sorry, can't parse %s\n", d);
-		exit(1);
+		fprintf(stderr, "Unrecognized protocol: %s\n", d);
+		return 1;
 	}
+
+	char * s = strstr(d, "/");
+	if (!s) {
+		strcpy(r->domain, d);
+		strcpy(r->path, "");
+	} else {
+		*s = 0;
+		s++;
+		strcpy(r->domain, d);
+		strcpy(r->path, s);
+	}
+	if (strstr(r->domain,":")) {
+		char * port = strstr(r->domain,":");
+		*port = '\0';
+		port++;
+		r->port = atoi(port);
+	}
+
+	return 0;
 }
 
 #define BAR_WIDTH 20
@@ -89,12 +109,13 @@ void print_progress(int force) {
 			fprintf(stderr," %.2f Kbps", s);
 		}
 
-		if (fetch_options.content_length) {
+		if (!force && fetch_options.content_length) {
 			if (rate > 0.0) {
 				double remaining = (double)(fetch_options.content_length - fetch_options.size) / rate;
-
 				fprintf(stderr," (%.2f sec remaining)", remaining);
 			}
+		} else {
+			fprintf(stderr," (%.2f sec elapsed)", timediff);
 		}
 	}
 	fprintf(stderr,"\033[K\033[?25h");
@@ -235,7 +256,7 @@ int http_fetch(FILE * f) {
 		fetch_options.size += r;
 		print_progress(0);
 		if (fetch_options.machine_readable && fetch_options.content_length) {
-			fprintf(stdout,"%d %d\n",(int)fetch_options.size, (int)fetch_options.content_length);
+			fprintf(stdout,"%zu %zu\n",fetch_options.size,fetch_options.content_length);
 		}
 		bytes_to_read -= r;
 	}
@@ -287,10 +308,15 @@ int main(int argc, char * argv[]) {
 	}
 
 	struct http_req my_req;
-	parse_url(argv[optind], &my_req);
+	if (parse_url(argv[optind], &my_req)) {
+		return 1;
+	}
 
-	char file[100];
-	sprintf(file, "/dev/net/%s", my_req.domain);
+	if (my_req.ssl) {
+		/* TODO look for a viable backend. */
+		fprintf(stderr, "%s: no tls backend\n", argv[0]);
+		return 1;
+	}
 
 	if (fetch_options.calculate_output) {
 		char * tmp = strdup(my_req.path);
@@ -306,7 +332,30 @@ int main(int argc, char * argv[]) {
 		fetch_options.out = fopen(fetch_options.output_file, "w+");
 	}
 
-	FILE * f = fopen(file,"r+");
+	int sock = socket(AF_INET, SOCK_STREAM, 0);
+	if (sock < 0) {
+		perror("socket");
+		return 1;
+	}
+
+	struct hostent * remote = gethostbyname(my_req.domain);
+
+	if (!remote) {
+		perror("gethostbyname");
+		return 1;
+	}
+
+	struct sockaddr_in addr;
+	addr.sin_family = AF_INET;
+	memcpy(&addr.sin_addr.s_addr, remote->h_addr, remote->h_length);
+	addr.sin_port = htons(my_req.port);
+
+	if (connect(sock, (struct sockaddr*)&addr, sizeof(struct sockaddr_in)) < 0) {
+		perror("connect");
+		return 1;
+	}
+
+	FILE * f = fdopen(sock,"w+");
 
 	if (!f) {
 		fprintf(stderr, "Nope.\n");

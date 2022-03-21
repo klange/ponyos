@@ -1,11 +1,11 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
+/**
+ * @brief Generic Graphics library for ToaruOS
+ *
+ * @copyright
  * This file is part of ToaruOS and is released under the terms
  * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2012-2018 K. Lange
- *
- * Generic Graphics library for ToaruOS
+ * Copyright (C) 2012-2021 K. Lange
  */
-
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
@@ -15,7 +15,7 @@
 
 #include <sys/ioctl.h>
 
-#ifndef NO_SSE
+#if !defined(NO_SSE) && defined(__x86_64__)
 #include <xmmintrin.h>
 #include <emmintrin.h>
 #endif
@@ -40,8 +40,10 @@ static inline uint16_t max16(uint16_t a, uint16_t b) {
 	return (a > b) ? a : b;
 }
 
+#define fmax(a,b) ((a) > (b) ? (a) : (b))
+#define fmin(a,b) ((a) < (b) ? (a) : (b))
 
-static int _is_in_clip(gfx_context_t * ctx, int32_t y) {
+static inline int _is_in_clip(gfx_context_t * ctx, int32_t y) {
 	if (!ctx->clips) return 1;
 	if (y < 0 || y >= ctx->clips_size) return 1;
 	return ctx->clips[y];
@@ -87,6 +89,18 @@ void flip(gfx_context_t * ctx) {
 	}
 }
 
+void gfx_flip_24bit(gfx_context_t * ctx) {
+	for (size_t y = 0; y < ctx->height; ++y) {
+		if (_is_in_clip(ctx,y)) {
+			for (size_t x = 0; x < ctx->width; ++x) {
+				((uint8_t*)ctx->buffer)[y * ctx->_true_stride + x * 3] = ((uint8_t*)ctx->backbuffer)[y * ctx->stride + x * 4];
+				((uint8_t*)ctx->buffer)[y * ctx->_true_stride + x * 3+1] = ((uint8_t*)ctx->backbuffer)[y * ctx->stride + x * 4+1];
+				((uint8_t*)ctx->buffer)[y * ctx->_true_stride + x * 3+2] = ((uint8_t*)ctx->backbuffer)[y * ctx->stride + x * 4+2];
+			}
+		}
+	}
+}
+
 void clearbuffer(gfx_context_t * ctx) {
 	memset(ctx->backbuffer, 0, ctx->size);
 }
@@ -96,6 +110,7 @@ static int framebuffer_fd = 0;
 gfx_context_t * init_graphics_fullscreen() {
 	gfx_context_t * out = malloc(sizeof(gfx_context_t));
 	out->clips = NULL;
+	out->buffer = NULL;
 
 	if (!framebuffer_fd) {
 		framebuffer_fd = open("/dev/fb0", 0, 0);
@@ -114,6 +129,14 @@ gfx_context_t * init_graphics_fullscreen() {
 	ioctl(framebuffer_fd, IO_VID_SIGNAL, NULL);
 
 	out->size   = GFX_H(out) * GFX_S(out);
+
+	if (out->depth == 24) {
+		out->depth = 32;
+		out->_true_stride = out->stride;
+		out->stride = 4 * GFX_W(out);
+		out->size = 0;
+	}
+
 	out->backbuffer = out->buffer;
 	return out;
 }
@@ -140,7 +163,7 @@ gfx_context_t * init_graphics_subregion(gfx_context_t * base, int x, int y, int 
 	out->width = width;
 	out->height = height;
 	out->stride = base->stride;
-	out->backbuffer = base->buffer + (base->stride * y) + x * 4;
+	out->backbuffer = base->backbuffer + (base->stride * y) + x * 4;
 	out->buffer = base->buffer + (base->stride * y) + x * 4;
 
 	if (base->clips) {
@@ -242,31 +265,17 @@ uint32_t alpha_blend(uint32_t bottom, uint32_t top, uint32_t mask) {
 	return rgba(red,gre,blu, alp);
 }
 
-#define DONT_USE_FLOAT_FOR_ALPHA 1
-
-uint32_t alpha_blend_rgba(uint32_t bottom, uint32_t top) {
+inline uint32_t alpha_blend_rgba(uint32_t bottom, uint32_t top) {
 	if (_ALP(bottom) == 0) return top;
 	if (_ALP(top) == 255) return top;
 	if (_ALP(top) == 0) return bottom;
-#if DONT_USE_FLOAT_FOR_ALPHA
-	uint16_t a = _ALP(top);
-	uint16_t c = 255 - a;
-	uint16_t b = ((int)_ALP(bottom) * c) / 255;
-	uint16_t alp = min16(a + b, 255);
-	uint16_t red = min16((uint32_t)(_RED(bottom) * c + _RED(top) * 255) / 255, 255);
-	uint16_t gre = min16((uint32_t)(_GRE(bottom) * c + _GRE(top) * 255) / 255, 255);
-	uint16_t blu = min16((uint32_t)(_BLU(bottom) * c + _BLU(top) * 255) / 255, 255);
-	return rgba(red,gre,blu,alp);
-#else
-	double a = _ALP(top) / 255.0;
-	double c = 1.0 - a;
-	double b = (_ALP(bottom) / 255.0) * c;
-	double alp = a + b; if (alp > 1.0) alp = 1.0;
-	double red = (_RED(bottom) / 255.0) * c + (_RED(top) / 255.0); if (red > 1.0) red = 1.0;
-	double gre = (_GRE(bottom) / 255.0) * c + (_GRE(top) / 255.0); if (gre > 1.0) gre = 1.0;
-	double blu = (_BLU(bottom) / 255.0) * c + (_BLU(top) / 255.0); if (blu > 1.0) blu = 1.0;
-	return rgba(red * 255, gre * 255, blu * 255, alp * 255);
-#endif
+	uint8_t a = _ALP(top);
+	uint16_t t = 0xFF ^ a;
+	uint8_t d_r = _RED(top) + (((uint32_t)(_RED(bottom) * t + 0x80) * 0x101) >> 16UL);
+	uint8_t d_g = _GRE(top) + (((uint32_t)(_GRE(bottom) * t + 0x80) * 0x101) >> 16UL);
+	uint8_t d_b = _BLU(top) + (((uint32_t)(_BLU(bottom) * t + 0x80) * 0x101) >> 16UL);
+	uint8_t d_a = _ALP(top) + (((uint32_t)(_ALP(bottom) * t + 0x80) * 0x101) >> 16UL);
+	return rgba(d_r, d_g, d_b, d_a);
 }
 
 
@@ -282,7 +291,7 @@ uint32_t premultiply(uint32_t color) {
 	return rgba(r,g,b,a);
 }
 
-static int clamp(int a, int l, int h) {
+static inline int clamp(int a, int l, int h) {
 	return a < l ? l : (a > h ? h : a);
 }
 
@@ -396,8 +405,8 @@ void blur_context_box(gfx_context_t * _src, int radius) {
 	_box_blur_vertical(_src,radius);
 }
 
-static int (*load_sprite_jpg)(sprite_t *, char *) = NULL;
-static int (*load_sprite_png)(sprite_t *, char *) = NULL;
+static int (*load_sprite_jpg)(sprite_t *, const char *) = NULL;
+static int (*load_sprite_png)(sprite_t *, const char *) = NULL;
 
 static void _load_format_libraries() {
 	void * _lib_jpeg = dlopen("libtoaru_jpeg.so", 0);
@@ -406,28 +415,29 @@ static void _load_format_libraries() {
 	if (_lib_png) load_sprite_png = dlsym(_lib_png, "load_sprite_png");
 }
 
-static char * extension_from_filename(char * filename) {
-	char * ext = strrchr(filename, '.');
+static const char * extension_from_filename(const char * filename) {
+	const char * ext = strrchr(filename, '.');
 	if (ext && *ext == '.') return ext + 1;
 	return "";
 }
 
-int load_sprite(sprite_t * sprite, char * filename) {
+int load_sprite(sprite_t * sprite, const char * filename) {
 	static int librariesLoaded = 0;
 	if (!librariesLoaded) {
 		_load_format_libraries();
+		librariesLoaded = 1;
 	}
 
-	char * ext = extension_from_filename(filename);
+	const char * ext = extension_from_filename(filename);
 
-	if (!strcmp(ext,"png") || !strcmp(ext,"sdf")) return load_sprite_png(sprite, filename);
-	if (!strcmp(ext,"jpg") || !strcmp(ext,"jpeg")) return load_sprite_jpg(sprite, filename);
+	if (!strcmp(ext,"png") || !strcmp(ext,"sdf")) return load_sprite_png ? load_sprite_png(sprite, filename) : 1;
+	if (!strcmp(ext,"jpg") || !strcmp(ext,"jpeg")) return load_sprite_jpg ? load_sprite_jpg(sprite, filename) : 1;
 
 	/* Fall back to bitmap */
 	return load_sprite_bmp(sprite, filename);
 }
 
-int load_sprite_bmp(sprite_t * sprite, char * filename) {
+int load_sprite_bmp(sprite_t * sprite, const char * filename) {
 	/* Open the requested binary */
 	FILE * image = fopen(filename, "r");
 
@@ -568,7 +578,7 @@ _cleanup_sprite:
 	return 0;
 }
 
-#ifndef NO_SSE
+#if !defined(NO_SSE) && defined(__x86_64__)
 static __m128i mask00ff;
 static __m128i mask0080;
 static __m128i mask0101;
@@ -578,52 +588,36 @@ __attribute__((constructor)) static void _masks(void) {
 	mask0080 = _mm_set1_epi16(0x0080);
 	mask0101 = _mm_set1_epi16(0x0101);
 }
-#endif
 
 __attribute__((__force_align_arg_pointer__))
-void draw_sprite(gfx_context_t * ctx, sprite_t * sprite, int32_t x, int32_t y) {
+#endif
+void draw_sprite(gfx_context_t * ctx, const sprite_t * sprite, int32_t x, int32_t y) {
 
 	int32_t _left   = max(x, 0);
 	int32_t _top    = max(y, 0);
 	int32_t _right  = min(x + sprite->width,  ctx->width - 1);
 	int32_t _bottom = min(y + sprite->height, ctx->height - 1);
-	if (sprite->alpha == ALPHA_MASK) {
-		for (uint16_t _y = 0; _y < sprite->height; ++_y) {
-			if (!_is_in_clip(ctx, y + _y)) continue;
-			for (uint16_t _x = 0; _x < sprite->width; ++_x) {
-				if (x + _x < _left || x + _x > _right || y + _y < _top || y + _y > _bottom)
-					continue;
-				GFX(ctx, x + _x, y + _y) = alpha_blend(GFX(ctx, x + _x, y + _y), SPRITE(sprite, _x, _y), SMASKS(sprite, _x, _y));
-			}
-		}
-	} else if (sprite->alpha == ALPHA_EMBEDDED) {
+	if (sprite->alpha == ALPHA_EMBEDDED) {
 		/* Alpha embedded is the most important step. */
 		for (uint16_t _y = 0; _y < sprite->height; ++_y) {
+			if (y + _y < _top) continue;
+			if (y + _y > _bottom) break;
 			if (!_is_in_clip(ctx, y + _y)) continue;
-#ifdef NO_SSE
+#if defined(NO_SSE) || !defined(__x86_64__)
 			for (uint16_t _x = 0; _x < sprite->width; ++_x) {
 				if (x + _x < _left || x + _x > _right || y + _y < _top || y + _y > _bottom)
 					continue;
 				GFX(ctx, x + _x, y + _y) = alpha_blend_rgba(GFX(ctx, x + _x, y + _y), SPRITE(sprite, _x, _y));
 			}
 #else
-			uint16_t _x = 0;
+			uint16_t _x = (x < _left) ? _left - x : 0;
 
 			/* Ensure alignment */
-			for (; _x < sprite->width; ++_x) {
-				if (x + _x < _left || x + _x > _right || y + _y < _top || y + _y > _bottom)
-					continue;
-				if (!((uintptr_t)&GFX(ctx, x + _x, y + _y) & 15))
-					break;
+			for (; _x < sprite->width && x + _x <= _right; ++_x) {
+				if (!((uintptr_t)&GFX(ctx, x + _x, y + _y) & 15)) break;
 				GFX(ctx, x + _x, y + _y) = alpha_blend_rgba(GFX(ctx, x + _x, y + _y), SPRITE(sprite, _x, _y));
 			}
-			for (; _x < sprite->width - 3; _x += 4) {
-				if (x + _x < _left || y + _y < _top || y + _y > _bottom) {
-					continue;
-				}
-				if (x + _x + 3 > _right)
-					break;
-
+			for (; _x < sprite->width - 3 && x + _x + 3 <= _right; _x += 4) {
 				__m128i d = _mm_load_si128((void *)&GFX(ctx, x + _x, y + _y));
 				__m128i s = _mm_loadu_si128((void *)&SPRITE(sprite, _x, _y));
 
@@ -660,43 +654,17 @@ void draw_sprite(gfx_context_t * ctx, sprite_t * sprite, int32_t x, int32_t y) {
 				// pack low + high and write back to memory
 				_mm_storeu_si128((void*)&GFX(ctx, x + _x, y + _y), _mm_packus_epi16(d_l,d_h));
 			}
-			for (; _x < sprite->width; ++_x) {
-				if (x + _x < _left || x + _x > _right || y + _y < _top || y + _y > _bottom)
-					continue;
+			for (; _x < sprite->width && x + _x <= _right; ++_x) {
 				GFX(ctx, x + _x, y + _y) = alpha_blend_rgba(GFX(ctx, x + _x, y + _y), SPRITE(sprite, _x, _y));
 			}
 #endif
 		}
-	} else if (sprite->alpha == ALPHA_INDEXED) {
+	} else if (sprite->alpha == ALPHA_OPAQUE) {
 		for (uint16_t _y = 0; _y < sprite->height; ++_y) {
+			if (y + _y < _top) continue;
+			if (y + _y > _bottom) break;
 			if (!_is_in_clip(ctx, y + _y)) continue;
-			for (uint16_t _x = 0; _x < sprite->width; ++_x) {
-				if (x + _x < _left || x + _x > _right || y + _y < _top || y + _y > _bottom)
-					continue;
-				if (SPRITE(sprite, _x, _y) != sprite->blank) {
-					GFX(ctx, x + _x, y + _y) = SPRITE(sprite, _x, _y) | 0xFF000000;
-				}
-			}
-		}
-	} else if (sprite->alpha == ALPHA_FORCE_SLOW_EMBEDDED) {
-		for (uint16_t _y = 0; _y < sprite->height; ++_y) {
-			if (!_is_in_clip(ctx, y + _y)) continue;
-			for (uint16_t _x = 0; _x < sprite->width; ++_x) {
-				if (x + _x < _left || x + _x > _right || y + _y < _top || y + _y > _bottom)
-					continue;
-#if 1
-				GFX(ctx, x + _x, y + _y) = alpha_blend_rgba(GFX(ctx, x + _x, y + _y), SPRITE(sprite, _x, _y));
-#else
-				GFX(ctx, x + _x, y + _y) = alpha_blend_rgba(rgba(255,255,0,255), SPRITE(sprite, _x, _y));
-#endif
-			}
-		}
-	} else {
-		for (uint16_t _y = 0; _y < sprite->height; ++_y) {
-			if (!_is_in_clip(ctx, y + _y)) continue;
-			for (uint16_t _x = 0; _x < sprite->width; ++_x) {
-				if (x + _x < _left || x + _x > _right || y + _y < _top || y + _y > _bottom)
-					continue;
+			for (uint16_t _x = (x < _left) ? _left - x : 0; _x < sprite->width && x + _x <= _right; ++_x) {
 				GFX(ctx, x + _x, y + _y) = SPRITE(sprite, _x, _y) | 0xFF000000;
 			}
 		}
@@ -762,109 +730,279 @@ void draw_fill(gfx_context_t * ctx, uint32_t color) {
 	}
 }
 
-/* Bilinear filtering from Wikipedia */
-uint32_t getBilinearFilteredPixelColor(sprite_t * tex, double u, double v) {
-	u *= tex->width;
-	v *= tex->height;
-	int x = floor(u);
-	int y = floor(v);
-	if (x >= tex->width)  return 0;
-	if (y >= tex->height) return 0;
-	if (x <= 0) return 0;
-	if (y <= 0) return 0;
-	double u_ratio = u - x;
-	double v_ratio = v - y;
-	double u_o = 1 - u_ratio;
-	double v_o = 1 - v_ratio;
-	int r_ALP = 255;
-	if (tex->alpha == ALPHA_MASK) {
-		if (x == tex->width - 1 || y == tex->height - 1) return (SPRITE(tex,x,y) | 0xFF000000) & (0xFFFFFF + ((uint32_t)_RED(SMASKS(tex,x,y)) << 24));
-		r_ALP = (_RED(SMASKS(tex,x,y)) * u_o + _RED(SMASKS(tex,x+1,y)) * u_ratio) * v_o + (_RED(SMASKS(tex,x,y+1)) * u_o  + _RED(SMASKS(tex,x+1,y+1)) * u_ratio) * v_ratio;
-	} else if (tex->alpha == ALPHA_EMBEDDED) {
-		if (x == tex->width - 1 || y == tex->height - 1) return (SPRITE(tex,x,y) | 0xFF000000) & (0xFFFFFF + ((uint32_t)_ALP(SPRITE(tex,x,y)) << 24));
-		r_ALP = (_ALP(SPRITE(tex,x,y)) * u_o + _ALP(SPRITE(tex,x+1,y)) * u_ratio) * v_o + (_ALP(SPRITE(tex,x,y+1)) * u_o  + _ALP(SPRITE(tex,x+1,y+1)) * u_ratio) * v_ratio;
-	}
-	if (x == tex->width - 1 || y == tex->height - 1) return SPRITE(tex,x,y);
-	int r_RED = (_RED(SPRITE(tex,x,y)) * u_o + _RED(SPRITE(tex,x+1,y)) * u_ratio) * v_o + (_RED(SPRITE(tex,x,y+1)) * u_o  + _RED(SPRITE(tex,x+1,y+1)) * u_ratio) * v_ratio;
-	int r_BLU = (_BLU(SPRITE(tex,x,y)) * u_o + _BLU(SPRITE(tex,x+1,y)) * u_ratio) * v_o + (_BLU(SPRITE(tex,x,y+1)) * u_o  + _BLU(SPRITE(tex,x+1,y+1)) * u_ratio) * v_ratio;
-	int r_GRE = (_GRE(SPRITE(tex,x,y)) * u_o + _GRE(SPRITE(tex,x+1,y)) * u_ratio) * v_o + (_GRE(SPRITE(tex,x,y+1)) * u_o  + _GRE(SPRITE(tex,x+1,y+1)) * u_ratio) * v_ratio;
-
-	return rgb(r_RED,r_GRE,r_BLU) & (0xFFFFFF + ((uint32_t)r_ALP << 24));
+static inline int out_of_bounds(const sprite_t * tex, int x, int y) {
+	return x < 0 || y < 0 || x >= tex->width || y >= tex->height;
 }
 
-void draw_sprite_scaled(gfx_context_t * ctx, sprite_t * sprite, int32_t x, int32_t y, uint16_t width, uint16_t height) {
-	int32_t _left   = max(x, 0);
-	int32_t _top    = max(y, 0);
-	int32_t _right  = min(x + width,  ctx->width - 1);
-	int32_t _bottom = min(y + height, ctx->height - 1);
-	for (uint16_t _y = 0; _y < height; ++_y) {
-		if (!_is_in_clip(ctx, y + _y)) continue;
-		for (uint16_t _x = 0; _x < width; ++_x) {
-			if (x + _x < _left || x + _x > _right || y + _y < _top || y + _y > _bottom)
-				continue;
-			if (sprite->alpha > 0) {
-				uint32_t n_color = getBilinearFilteredPixelColor(sprite, (double)_x / (double)width, (double)_y/(double)height);
-				GFX(ctx, x + _x, y + _y) = alpha_blend_rgba(GFX(ctx, x + _x, y + _y), n_color);
-			} else {
-				GFX(ctx, x + _x, y + _y) = getBilinearFilteredPixelColor(sprite, (double)_x / (double)width, (double)_y/(double)height);
-			}
-		}
+/**
+ * @brief Use bilinear interpolation to get a blended color at the point u,v
+ */
+#if 1
+static inline uint32_t linear_interp(uint32_t left, uint32_t right, uint16_t pr) {
+	uint16_t pl = 0xFF ^ pr;
+	uint8_t d_r = (((uint32_t)(_RED(right) * pr + 0x80) * 0x101) >> 16UL) + (((uint32_t)(_RED(left) * pl + 0x80) * 0x101) >> 16UL);
+	uint8_t d_g = (((uint32_t)(_GRE(right) * pr + 0x80) * 0x101) >> 16UL) + (((uint32_t)(_GRE(left) * pl + 0x80) * 0x101) >> 16UL);
+	uint8_t d_b = (((uint32_t)(_BLU(right) * pr + 0x80) * 0x101) >> 16UL) + (((uint32_t)(_BLU(left) * pl + 0x80) * 0x101) >> 16UL);
+	uint8_t d_a = (((uint32_t)(_ALP(right) * pr + 0x80) * 0x101) >> 16UL) + (((uint32_t)(_ALP(left) * pl + 0x80) * 0x101) >> 16UL);
+	return rgba(d_r, d_g, d_b, d_a);
+}
+
+__attribute__((hot))
+static inline uint32_t gfx_bilinear_interpolation(const sprite_t * tex, double u, double v) {
+	int x = (int)(u + 2.0) - 2;
+	int y = (int)(v + 2.0) - 2;
+	uint32_t ul = out_of_bounds(tex,x,y)     ? 0 : SPRITE(tex,x,y);
+	uint32_t ur = out_of_bounds(tex,x+1,y)   ? 0 : SPRITE(tex,x+1,y);
+	uint32_t ll = out_of_bounds(tex,x,y+1)   ? 0 : SPRITE(tex,x,y+1);
+	uint32_t lr = out_of_bounds(tex,x+1,y+1) ? 0 : SPRITE(tex,x+1,y+1);
+	if ((ul | ul | ll | lr) == 0) return 0;
+	uint8_t u_ratio = (u - x) * 0xFF;
+	uint8_t v_ratio = (v - y) * 0xFF;
+	uint32_t top = linear_interp(ul,ur,u_ratio);
+	uint32_t bot = linear_interp(ll,lr,u_ratio);
+	return linear_interp(top,bot,v_ratio);
+}
+#else
+static uint32_t gfx_bilinear_interpolation(const sprite_t * tex, double u, double v) {
+	return out_of_bounds(tex,u,v) ? 0 : SPRITE(tex,(unsigned int)u,(unsigned int)v);
+}
+#endif
+
+static inline void apply_alpha_vector(uint32_t * pixels, size_t width, uint8_t alpha) {
+	size_t i = 0;
+#if !defined(NO_SSE) && defined(__x86_64__)
+	__m128i alp = _mm_set_epi16(alpha,alpha,alpha,alpha,alpha,alpha,alpha,alpha);
+	while (i + 3 < width) {
+		__m128i p = _mm_load_si128((void*)&pixels[i]);
+		__m128i d_l, d_h;
+
+		d_l = _mm_mulhi_epu16(_mm_adds_epu16(_mm_mullo_epi16(_mm_unpacklo_epi8(p, _mm_setzero_si128()),alp),mask0080),mask0101);
+		d_h = _mm_mulhi_epu16(_mm_adds_epu16(_mm_mullo_epi16(_mm_unpackhi_epi8(p, _mm_setzero_si128()),alp),mask0080),mask0101);
+
+		_mm_storeu_si128((void*)&pixels[i], _mm_packus_epi16(d_l,d_h));
+
+		i += 4;
+	}
+#endif
+	while (i < width) {
+		uint8_t r = _RED(pixels[i]);
+		uint8_t g = _GRE(pixels[i]);
+		uint8_t b = _BLU(pixels[i]);
+		uint8_t a = _ALP(pixels[i]);
+
+		r = (((uint16_t)r * alpha + 0x80) * 0x101) >> 16UL;
+		g = (((uint16_t)g * alpha + 0x80) * 0x101) >> 16UL;
+		b = (((uint16_t)b * alpha + 0x80) * 0x101) >> 16UL;
+		a = (((uint16_t)a * alpha + 0x80) * 0x101) >> 16UL;
+
+		pixels[i] = rgba(r,g,b,a);
+		i++;
 	}
 }
 
-void draw_sprite_alpha(gfx_context_t * ctx, sprite_t * sprite, int32_t x, int32_t y, float alpha) {
+void draw_sprite_alpha(gfx_context_t * ctx, const sprite_t * sprite, int32_t x, int32_t y, float alpha) {
 	int32_t _left   = max(x, 0);
 	int32_t _top    = max(y, 0);
-	int32_t _right  = min(x + sprite->width,  ctx->width - 1);
-	int32_t _bottom = min(y + sprite->height, ctx->height - 1);
+	int32_t _right  = min(x + sprite->width,  ctx->width);
+	int32_t _bottom = min(y + sprite->height, ctx->height);
+	sprite_t * scanline = create_sprite(_right - _left, 1, ALPHA_EMBEDDED);
+	uint8_t alp = alpha * 255;
+
 	for (uint16_t _y = 0; _y < sprite->height; ++_y) {
+		if (y + _y < _top) continue;
+		if (y + _y > _bottom) break;
 		if (!_is_in_clip(ctx, y + _y)) continue;
-		for (uint16_t _x = 0; _x < sprite->width; ++_x) {
-			if (x + _x < _left || x + _x > _right || y + _y < _top || y + _y > _bottom)
-				continue;
-			uint32_t n_color = SPRITE(sprite, _x, _y);
-			uint32_t f_color = premultiply((n_color & 0xFFFFFF) | ((uint32_t)(255 * alpha) << 24));
-			f_color = (f_color & 0xFFFFFF) | ((uint32_t)(alpha * _ALP(n_color)) << 24);
+		for (uint16_t _x = (x < _left) ? _left - x : 0; _x < sprite->width && x + _x < _right; ++_x) {
+			SPRITE(scanline,_x + x - _left,0) = SPRITE(sprite, _x, _y);
+		}
+		apply_alpha_vector(scanline->bitmap, scanline->width, alp);
+		draw_sprite(ctx,scanline,_left,y + _y);
+	}
+
+	sprite_free(scanline);
+}
+
+void draw_sprite_alpha_paint(gfx_context_t * ctx, const sprite_t * sprite, int32_t x, int32_t y, float alpha, uint32_t c) {
+	int32_t _left   = max(x, 0);
+	int32_t _top    = max(y, 0);
+	int32_t _right  = min(x + sprite->width,  ctx->width);
+	int32_t _bottom = min(y + sprite->height, ctx->height);
+	for (uint16_t _y = 0; _y < sprite->height; ++_y) {
+		if (y + _y < _top) continue;
+		if (y + _y > _bottom) break;
+		if (!_is_in_clip(ctx, y + _y)) continue;
+		for (uint16_t _x = (x < _left) ? _left - x : 0; _x < sprite->width && x + _x < _right; ++_x) {
+			/* Get the alpha from the sprite at this pixel */
+			float n_alpha = alpha * ((float)_ALP(SPRITE(sprite, _x, _y)) / 255.0);
+			uint32_t f_color = premultiply((c & 0xFFFFFF) | ((uint32_t)(255 * n_alpha) << 24));
+			f_color = (f_color & 0xFFFFFF) | ((uint32_t)(n_alpha * _ALP(c)) << 24);
 			GFX(ctx, x + _x, y + _y) = alpha_blend_rgba(GFX(ctx, x + _x, y + _y), f_color);
 		}
 	}
 }
 
-void draw_sprite_alpha_paint(gfx_context_t * ctx, sprite_t * sprite, int32_t x, int32_t y, float alpha, uint32_t c) {
-	int32_t _left   = max(x, 0);
-	int32_t _top    = max(y, 0);
-	int32_t _right  = min(x + sprite->width,  ctx->width - 1);
-	int32_t _bottom = min(y + sprite->height, ctx->height - 1);
-	for (uint16_t _y = 0; _y < sprite->height; ++_y) {
-		if (!_is_in_clip(ctx, y + _y)) continue;
-		for (uint16_t _x = 0; _x < sprite->width; ++_x) {
-			if (x + _x < _left || x + _x > _right || y + _y < _top || y + _y > _bottom)
-				continue;
-			uint32_t n_color = SPRITE(sprite, _x, _y);
-			uint32_t f_color = rgb(_ALP(n_color) * alpha, 0, 0);
-			GFX(ctx, x + _x, y + _y) = alpha_blend(GFX(ctx, x + _x, y + _y), c, f_color);
-		}
-	}
+static void apply_matrix(double x, double y, gfx_matrix_t matrix, double *out_x, double *out_y) {
+	*out_x = matrix[0][0] * x + matrix[0][1] * y + matrix[0][2];
+	*out_y = matrix[1][0] * x + matrix[1][1] * y + matrix[1][2];
 }
 
-void draw_sprite_scaled_alpha(gfx_context_t * ctx, sprite_t * sprite, int32_t x, int32_t y, uint16_t width, uint16_t height, float alpha) {
-	int32_t _left   = max(x, 0);
-	int32_t _top    = max(y, 0);
-	int32_t _right  = min(x + width,  ctx->width - 1);
-	int32_t _bottom = min(y + height, ctx->height - 1);
-	for (uint16_t _y = 0; _y < height; ++_y) {
-		if (!_is_in_clip(ctx, y + _y)) continue;
-		for (uint16_t _x = 0; _x < width; ++_x) {
-			if (x + _x < _left || x + _x > _right || y + _y < _top || y + _y > _bottom)
-				continue;
-			uint32_t n_color = getBilinearFilteredPixelColor(sprite, (double)_x / (double)width, (double)_y/(double)height);
-			uint32_t f_color = premultiply((n_color & 0xFFFFFF) | ((uint32_t)(255 * alpha) << 24));
-			f_color = (f_color & 0xFFFFFF) | ((uint32_t)(alpha * _ALP(n_color)) << 24);
-			GFX(ctx, x + _x, y + _y) = alpha_blend_rgba(GFX(ctx, x + _x, y + _y), f_color);
-		}
-	}
+static void multiply_matrix(gfx_matrix_t x, gfx_matrix_t y) {
+	double a = x[0][0];
+	double b = x[0][1];
+	double c = x[0][2];
+	double d = x[1][0];
+	double e = x[1][1];
+	double f = x[1][2];
+
+	double g = y[0][0];
+	double h = y[0][1];
+	double i = y[0][2];
+	double j = y[1][0];
+	double k = y[1][1];
+	double l = y[1][2];
+
+	x[0][0] = a * g + b * j;
+	x[0][1] = a * h + b * k;
+	x[0][2] = a * i + b * l + c;
+
+	x[1][0] = d * g + e * j;
+	x[1][1] = d * h + e * k;
+	x[1][2] = d * i + e * l + f;
 }
 
+void gfx_matrix_identity(gfx_matrix_t matrix) {
+	matrix[0][0] = 1;
+	matrix[0][1] = 0;
+	matrix[0][2] = 0;
+	matrix[1][0] = 0;
+	matrix[1][1] = 1;
+	matrix[1][2] = 0;
+}
+
+void gfx_matrix_scale(gfx_matrix_t matrix, double x, double y) {
+	multiply_matrix(matrix, (gfx_matrix_t){
+		{x, 0.0, 0.0},
+		{0.0, y, 0.0},
+	});
+}
+
+void gfx_matrix_rotate(gfx_matrix_t matrix, double r) {
+	multiply_matrix(matrix, (gfx_matrix_t){
+		{ cos(r), -sin(r), 0.0},
+		{ sin(r),  cos(r), 0.0},
+	});
+}
+
+void gfx_matrix_translate(gfx_matrix_t matrix, double x, double y) {
+	multiply_matrix(matrix, (gfx_matrix_t){
+		{ 1.0, 0.0, x },
+		{ 0.0, 1.0, y },
+	});
+}
+
+static double matrix_det(gfx_matrix_t matrix) {
+	double a = matrix[0][0];
+	double b = matrix[0][1];
+	double d = matrix[1][0];
+	double e = matrix[1][1];
+	return a * e - b * d;
+}
+
+int gfx_matrix_invert(gfx_matrix_t m, gfx_matrix_t inverse) {
+
+	double det = matrix_det(m);
+	if (det == 0.0) return 1;
+
+	double a = m[0][0];
+	double b = m[0][1];
+	double c = m[1][0];
+	double d = m[1][1];
+
+	double tx = m[0][2];
+	double ty = m[1][2];
+
+	inverse[0][0] = d * (1.0 / det);
+	inverse[0][1] = -b * (1.0 / det);
+	inverse[1][0] = -c * (1.0 / det);
+	inverse[1][1] = a * (1.0 / det);
+
+	inverse[0][2] = (b * ty - d * tx) / det;
+	inverse[1][2] = (c * tx - a * ty) / det;
+
+	return 0;
+}
+
+/**
+ * @brief Draw a sprite into a context, applying a transformation matrix.
+ *
+ * Uses the affine transformaton matrix @p matrix to draw @p sprite into @p ctx.
+ */
+void draw_sprite_transform(gfx_context_t * ctx, const sprite_t * sprite, gfx_matrix_t matrix, float alpha) {
+	double inverse[2][3];
+
+	/* Calculate the inverse matrix for use in calculating sprite
+	 * coordinate from screen coordinate. */
+	gfx_matrix_invert(matrix, inverse);
+
+	/* Use primary matrix to obtain corners of the transformed
+	 * sprite in screen coordinates. */
+	double ul_x, ul_y;
+	double ll_x, ll_y;
+	double ur_x, ur_y;
+	double lr_x, lr_y;
+
+	apply_matrix(0, 0, matrix, &ul_x, &ul_y);
+	apply_matrix(0, sprite->height,  matrix, &ll_x, &ll_y);
+	apply_matrix(sprite->width, 0,  matrix, &ur_x, &ur_y);
+	apply_matrix(sprite->width, sprite->height,   matrix, &lr_x, &lr_y);
+
+	/* Use the corners to calculate bounds within the target context. */
+	int32_t _left   = clamp(fmin(fmin(ul_x, ll_x), fmin(ur_x, lr_x)), 0, ctx->width);
+	int32_t _top    = clamp(fmin(fmin(ul_y, ll_y), fmin(ur_y, lr_y)), 0, ctx->height);
+	int32_t _right  = clamp(fmax(fmax(ul_x+1, ll_x+1), fmax(ur_x+1, lr_x+1)), 0, ctx->width);
+	int32_t _bottom = clamp(fmax(fmax(ul_y+1, ll_y+1), fmax(ur_y+1, lr_y+1)), 0, ctx->height);
+
+	sprite_t * scanline = create_sprite(_right - _left, 1, ALPHA_EMBEDDED);
+	uint8_t alp = alpha * 255;
+
+	for (int32_t _y = _top; _y < _bottom; ++_y) {
+		if (!_is_in_clip(ctx, _y)) continue;
+		for (int32_t _x = _left; _x < _right; ++_x) {
+			double u, v;
+			apply_matrix(_x, _y, inverse, &u, &v);
+			SPRITE(scanline,_x - _left,0) = gfx_bilinear_interpolation(sprite, u, v);
+		}
+		apply_alpha_vector(scanline->bitmap, scanline->width, alp);
+		draw_sprite(ctx,scanline,_left,_y);
+	}
+
+	sprite_free(scanline);
+}
+
+void draw_sprite_rotate(gfx_context_t * ctx, const sprite_t * sprite, int32_t x, int32_t y, float rotation, float alpha) {
+	gfx_matrix_t m;
+	gfx_matrix_identity(m);
+	gfx_matrix_translate(m, x + sprite->width / 2, y + sprite->height / 2);
+	gfx_matrix_rotate(m, rotation);
+	gfx_matrix_translate(m, -sprite->width / 2, -sprite->height / 2);
+	draw_sprite_transform(ctx,sprite,m,alpha);
+}
+
+void draw_sprite_scaled(gfx_context_t * ctx, const sprite_t * sprite, int32_t x, int32_t y, uint16_t width, uint16_t height) {
+	gfx_matrix_t m;
+	gfx_matrix_identity(m);
+	gfx_matrix_translate(m, x, y);
+	gfx_matrix_scale(m, (double)width / (double)sprite->width, (double)height / (double)sprite->height);
+	draw_sprite_transform(ctx,sprite,m,1.0);
+}
+
+void draw_sprite_scaled_alpha(gfx_context_t * ctx, const sprite_t * sprite, int32_t x, int32_t y, uint16_t width, uint16_t height, float alpha) {
+	gfx_matrix_t m;
+	gfx_matrix_identity(m);
+	gfx_matrix_translate(m, x, y);
+	gfx_matrix_scale(m, (double)width / (double)sprite->width, (double)height / (double)sprite->height);
+	draw_sprite_transform(ctx,sprite,m,alpha);
+}
 
 uint32_t interp_colors(uint32_t bottom, uint32_t top, uint8_t interp) {
 	uint8_t red = (_RED(bottom) * (255 - interp) + _RED(top) * interp) / 255;
@@ -904,54 +1042,24 @@ void draw_rectangle_solid(gfx_context_t * ctx, int32_t x, int32_t y, uint16_t wi
 	}
 }
 
-void draw_rounded_rectangle(gfx_context_t * ctx, int32_t x, int32_t y, uint16_t width, uint16_t height, int radius, uint32_t color) {
-	/* Draw a rounded rectangle */
+uint32_t gfx_vertical_gradient_pattern(int32_t x, int32_t y, double alpha, void * extra) {
+	struct gradient_definition * gradient = extra;
+	int base_r = _RED(gradient->top), base_g = _GRE(gradient->top), base_b = _BLU(gradient->top);
+	int last_r = _RED(gradient->bottom), last_g = _GRE(gradient->bottom), last_b = _BLU(gradient->bottom);
+	double gradpoint = (double)(y - (gradient->y)) / (double)gradient->height;
 
-	if (radius > width / 2) {
-		radius = width / 2;
-	}
+	if (alpha > 1.0) alpha = 1.0;
+	if (alpha < 0.0) alpha = 0.0;
 
-	if (radius > height / 2) {
-		radius = height / 2;
-	}
+	return premultiply(rgba(
+		base_r * (1.0 - gradpoint) + last_r * (gradpoint),
+		base_g * (1.0 - gradpoint) + last_g * (gradpoint),
+		base_b * (1.0 - gradpoint) + last_b * (gradpoint),
+		alpha * 255));
+}
 
-	uint32_t c = premultiply(color);
-	for (int row = y; row < y + height; row++){
-		for (int col = x; col < x + width; col++) {
-			if ((col < x + radius || col > x + width - radius - 1) &&
-				(row < y + radius || row > y + height - radius - 1)) {
-				continue;
-			}
-			GFX(ctx, col, row) = alpha_blend_rgba(GFX(ctx, col, row), c);
-		}
-	}
-
-	/* draw the actual rounding */
-	for (int i = 0; i < radius; ++i) {
-		long r2 = radius * radius;
-		long i2 = i * i;
-		long j2 = r2 - i2;
-		double j_max = sqrt((double)j2);
-
-		for (int j = 0; j <= (int)j_max; ++j) {
-			int _x = x + width - radius + i;
-			int _y = y + height - radius + j;
-			int _z = y + radius - j - 1;
-
-			uint32_t c = color;
-			if (j == (int)j_max) {
-				c = premultiply(rgba(_RED(c),_GRE(c),_BLU(c),(int)((double)_ALP(c) * (j_max - (double)j))));
-			} else {
-				c = premultiply(c);
-			}
-
-			GFX(ctx, _x, _y) = alpha_blend_rgba(GFX(ctx, _x, _y), c);
-			GFX(ctx, _x, _z) = alpha_blend_rgba(GFX(ctx, _x, _z), c);
-			_x = x + radius - i - 1;
-			GFX(ctx, _x, _y) = alpha_blend_rgba(GFX(ctx, _x, _y), c);
-			GFX(ctx, _x, _z) = alpha_blend_rgba(GFX(ctx, _x, _z), c);
-		}
-	}
+float gfx_point_distance(const struct gfx_point * a, const struct gfx_point * b) {
+	return sqrt((a->x - b->x) * (a->x - b->x) + (a->y - b->y) * (a->y - b->y));
 }
 
 void draw_rounded_rectangle_pattern(gfx_context_t * ctx, int32_t x, int32_t y, uint16_t width, uint16_t height, int radius, uint32_t (*pattern)(int32_t x, int32_t y, double alpha, void * extra), void * extra) {
@@ -966,7 +1074,12 @@ void draw_rounded_rectangle_pattern(gfx_context_t * ctx, int32_t x, int32_t y, u
 	}
 
 	for (int row = y; row < y + height; row++){
+		if (row < 0) continue;
+		if (row >= ctx->height) break;
 		for (int col = x; col < x + width; col++) {
+			if (col < 0) continue;
+			if (col >= ctx->width) break;
+
 			if ((col < x + radius || col > x + width - radius - 1) &&
 				(row < y + radius || row > y + height - radius - 1)) {
 				continue;
@@ -975,54 +1088,59 @@ void draw_rounded_rectangle_pattern(gfx_context_t * ctx, int32_t x, int32_t y, u
 		}
 	}
 
-	/* draw the actual rounding */
-	for (int i = 0; i < radius; ++i) {
-		long r2 = radius * radius;
-		long i2 = i * i;
-		long j2 = r2 - i2;
-		double j_max = sqrt((double)j2);
+	struct gfx_point origin = {0.0,0.0};
 
-		for (int j = 0; j <= (int)j_max; ++j) {
-			int _x = x + width - radius + i;
-			int _y = y + height - radius + j;
-			int _z = y + radius - j - 1;
-
-			double alpha = (j_max - (double)j);
+	for (int py = 0; py < radius + 1; ++py) {
+		for (int px = 0; px < radius + 1; ++px) {
+			struct gfx_point this = {px,py};
+			float dist = gfx_point_distance(&origin,&this);
+			if (dist > (double)radius) continue;
+			float alpha = 1.0;
+			if (dist > (double)(radius-1)) {
+				alpha = 1.0 - (dist - (double)(radius-1));
+			}
+			int _x = clamp(x + width - radius + px, 0, ctx->width-1);
+			int _y = clamp(y + height - radius + py, 0, ctx->height-1);
+			int _z = clamp(y + radius - py - 1, 0, ctx->height-1);
 			GFX(ctx, _x, _y) = alpha_blend_rgba(GFX(ctx, _x, _y), pattern(_x,_y,alpha,extra));
 			GFX(ctx, _x, _z) = alpha_blend_rgba(GFX(ctx, _x, _z), pattern(_x,_z,alpha,extra));
-			_x = x + radius - i - 1;
+			_x = clamp(x + radius - px - 1, 0, ctx->width-1);
 			GFX(ctx, _x, _y) = alpha_blend_rgba(GFX(ctx, _x, _y), pattern(_x,_y,alpha,extra));
 			GFX(ctx, _x, _z) = alpha_blend_rgba(GFX(ctx, _x, _z), pattern(_x,_z,alpha,extra));
 		}
 	}
 }
 
-float gfx_point_distance(struct gfx_point * a, struct gfx_point * b) {
-	return sqrt((a->x - b->x) * (a->x - b->x) + (a->y - b->y) * (a->y - b->y));
+uint32_t gfx_fill_pattern(int32_t x, int32_t y, double alpha, void * extra) {
+	if (alpha > 1.0) alpha = 1.0;
+	if (alpha < 0.0) alpha = 0.0;
+	uint32_t c = *(uint32_t*)extra;
+	return premultiply(rgba(_RED(c),_GRE(c),_BLU(c),(int)((double)_ALP(c) * alpha)));
 }
 
-float gfx_point_distance_squared(struct gfx_point * a, struct gfx_point * b) {
+void draw_rounded_rectangle(gfx_context_t * ctx, int32_t x, int32_t y, uint16_t width, uint16_t height, int radius, uint32_t color) {
+	draw_rounded_rectangle_pattern(ctx,x,y,width,height,radius,gfx_fill_pattern,&color);
+}
+
+float gfx_point_distance_squared(const struct gfx_point * a, const struct gfx_point * b) {
 	return (a->x - b->x) * (a->x - b->x) + (a->y - b->y) * (a->y - b->y);
 }
 
-float gfx_point_dot(struct gfx_point * a, struct gfx_point * b) {
+float gfx_point_dot(const struct gfx_point * a, const struct gfx_point * b) {
 	return (a->x * b->x) + (a->y * b->y);
 }
 
-struct gfx_point gfx_point_sub(struct gfx_point * a, struct gfx_point * b) {
+struct gfx_point gfx_point_sub(const struct gfx_point * a, const struct gfx_point * b) {
 	struct gfx_point p = {a->x - b->x, a->y - b->y};
 	return p;
 }
 
-struct gfx_point gfx_point_add(struct gfx_point * a, struct gfx_point * b) {
+struct gfx_point gfx_point_add(const struct gfx_point * a, const struct gfx_point * b) {
 	struct gfx_point p = {a->x + b->x, a->y + b->y};
 	return p;
 }
 
-#define fmax(a,b) ((a) > (b) ? (a) : (b))
-#define fmin(a,b) ((a) < (b) ? (a) : (b))
-
-float gfx_line_distance(struct gfx_point * p, struct gfx_point * v, struct gfx_point * w) {
+float gfx_line_distance(const struct gfx_point * p, const struct gfx_point * v, const struct gfx_point * w) {
 	float lengthlength = gfx_point_distance_squared(v,w);
 
 	if (lengthlength == 0.0) return gfx_point_distance(p, v); /* point */
@@ -1045,92 +1163,33 @@ float gfx_line_distance(struct gfx_point * p, struct gfx_point * v, struct gfx_p
  *
  * Maybe acceptable for baked UI elements?
  */
-void draw_line_aa(gfx_context_t * ctx, int x_1, int x_2, int y_1, int y_2, uint32_t color, float thickness) {
-	struct gfx_point v = {(float)x_1, (float)y_1};
-	struct gfx_point w = {(float)x_2, (float)y_2};
+void draw_line_aa_points(gfx_context_t * ctx, struct gfx_point *v, struct gfx_point *w, uint32_t color, float thickness) {
 
-	for (int y = 0; y < ctx->height; ++y) {
-		for (int x = 0; x < ctx->width; ++x) {
+	/* Calculate viable bounds */
+	int x_0 = max(min(v->x - thickness - 1, w->x - thickness - 1), 0);
+	int x_1 = min(max(v->x + thickness + 1, w->x + thickness + 1), ctx->width);
+	int y_0 = max(min(v->y - thickness - 1, w->y - thickness - 1), 0);
+	int y_1 = min(max(v->y + thickness + 1, w->y + thickness + 1), ctx->height);
+
+	for (int y = y_0; y < y_1; ++y) {
+		for (int x = x_0; x < x_1; ++x) {
 			struct gfx_point p = {x,y};
-			float d = gfx_line_distance(&p,&v,&w);
+			float d = gfx_line_distance(&p,v,w);
 			if (d < thickness + 0.5) {
 				if (d < thickness - 0.5) {
-					GFX(ctx,x,y) = color;
+					GFX(ctx,x,y) = alpha_blend_rgba(GFX(ctx,x,y), color);
 				} else {
-					uint32_t f_color = rgb(255 * (1.0 - (d - thickness + 0.5)), 0, 0);
-					GFX(ctx,x,y) = alpha_blend(GFX(ctx,x,y), color, f_color);
+					float alpha = 1.0 - (d - thickness + 0.5);
+					GFX(ctx,x,y) = alpha_blend_rgba(GFX(ctx,x,y), premultiply(rgba(_RED(color),_GRE(color),_BLU(color),(int)((double)_ALP(color) * alpha))));
 				}
 			}
 		}
 	}
 }
 
-static void calc_rotation(double x, double y, double px, double py, double s, double c, double * u, double * v) {
-	/* Translate to pivot */
-	x -= px;
-	y -= py;
-
-	*u = (x * c - y * s) + px;
-	*v = (x * s + y * c) + py;
-}
-
-void draw_sprite_rotate(gfx_context_t * ctx, sprite_t * sprite, int32_t x, int32_t y, float rotation, float alpha) {
-
-	double originx = (double)sprite->width / 2.0;
-	double originy = (double)sprite->height / 2.0;
-
-	/* Calculate corners */
-	double ul_x, ul_y;
-	double ll_x, ll_y;
-	double ur_x, ur_y;
-	double lr_x, lr_y;
-
-	double _s = sin(rotation);
-	double _c = cos(rotation);
-	calc_rotation(-sprite->width/2, -sprite->height/2, 0, 0, _s, _c, &ul_x, &ul_y);
-	calc_rotation(-sprite->width/2, sprite->height/2,  0, 0, _s, _c, &ll_x, &ll_y);
-	calc_rotation(sprite->width/2, -sprite->height/2,  0, 0, _s, _c, &ur_x, &ur_y);
-	calc_rotation(sprite->width/2, sprite->height/2,   0, 0, _s, _c, &lr_x, &lr_y);
-
-	_s = sin(-rotation);
-	_c = cos(-rotation);
-
-	/* Calculate bounds */
-	int32_t _left   = min(min(ul_x, ll_x), min(ur_x, lr_x));
-	int32_t _top    = min(min(ul_y, ll_y), min(ur_y, lr_y));
-	int32_t _right  = max(max(ul_x, ll_x), max(ur_x, lr_x));
-	int32_t _bottom = max(max(ul_y, ll_y), max(ur_y, lr_y));
-
-	for (int32_t _y = _top; _y < _bottom; ++_y) {
-		if (_y + y < 0) continue;
-		if (_y + y  >= ctx->height) break;
-		if (!_is_in_clip(ctx, y + _y)) continue;
-		for (int32_t _x = _left; _x < _right; ++_x) {
-			if (_x + x < 0) continue;
-			if (_x + x >= ctx->width) break;
-			double u, v;
-			calc_rotation(_x + originx, _y + originy, originx, originy, _s, _c, &u, &v);
-			uint32_t n_color = getBilinearFilteredPixelColor(sprite, u / (double)sprite->width, v/(double)sprite->height);
-			uint32_t f_color = premultiply((n_color & 0xFFFFFF) | ((uint32_t)(255 * alpha) << 24));
-			f_color = (f_color & 0xFFFFFF) | ((uint32_t)(alpha * _ALP(n_color)) << 24);
-			GFX(ctx, x + _x, y + _y) = alpha_blend_rgba(GFX(ctx, x + _x, y + _y), f_color);
-		}
-	}
-}
-
-uint32_t gfx_vertical_gradient_pattern(int32_t x, int32_t y, double alpha, void * extra) {
-	struct gradient_definition * gradient = extra;
-	int base_r = _RED(gradient->top), base_g = _GRE(gradient->top), base_b = _BLU(gradient->top);
-	int last_r = _RED(gradient->bottom), last_g = _GRE(gradient->bottom), last_b = _BLU(gradient->bottom);
-	double gradpoint = (double)(y - (gradient->y)) / (double)gradient->height;
-
-	if (alpha > 1.0) alpha = 1.0;
-	if (alpha < 0.0) alpha = 0.0;
-
-	return premultiply(rgba(
-		base_r * (1.0 - gradpoint) + last_r * (gradpoint),
-		base_g * (1.0 - gradpoint) + last_g * (gradpoint),
-		base_b * (1.0 - gradpoint) + last_b * (gradpoint),
-		alpha * 255));
+void draw_line_aa(gfx_context_t * ctx, int x_1, int x_2, int y_1, int y_2, uint32_t color, float thickness) {
+	struct gfx_point v = {(float)x_1, (float)y_1};
+	struct gfx_point w = {(float)x_2, (float)y_2};
+	draw_line_aa_points(ctx,&v,&w,color,thickness);
 }
 

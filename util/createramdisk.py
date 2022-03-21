@@ -10,6 +10,7 @@ import tarfile
 users = {
     'root': 0,
     'local': 1000,
+    'guest': 1001,
 }
 
 restricted_files = {
@@ -34,17 +35,20 @@ def file_filter(tarinfo):
     elif tarinfo.name in restricted_files:
         tarinfo.mode = restricted_files[tarinfo.name]
 
+    if tarinfo.name.startswith('usr/include/kuroko') and tarinfo.type == tarfile.SYMTYPE:
+        return None
+
     if tarinfo.name.startswith('src'):
         # Let local own the files here
         tarinfo.uid = users.get('local')
         tarinfo.gid = tarinfo.uid
         # Skip object files
-        if tarinfo.name.endswith('.so') or tarinfo.name.endswith('.o'):
+        if tarinfo.name.endswith('.so') or tarinfo.name.endswith('.o') or tarinfo.name.endswith('.sys'):
             return None
 
     return tarinfo
 
-with tarfile.open('fatbase/ramdisk.img','w') as ramdisk:
+with tarfile.open('ramdisk.igz','w:gz') as ramdisk:
     ramdisk.add('base',arcname='/',filter=file_filter)
 
     ramdisk.add('.',arcname='/src',filter=file_filter,recursive=False) # Add a src directory
@@ -58,6 +62,7 @@ with tarfile.open('fatbase/ramdisk.img','w') as ramdisk:
     ramdisk.add('kuroko/src',arcname='/src/kuroko',filter=file_filter)
     if os.path.exists('tags'):
         ramdisk.add('tags',arcname='/src/tags',filter=file_filter)
-    ramdisk.add('util/build-the-world.py',arcname='/usr/bin/build-the-world.py',filter=file_filter)
+    ramdisk.add('util/auto-dep.krk',arcname='/bin/auto-dep.krk',filter=file_filter)
+    ramdisk.add('kuroko/src/kuroko',arcname='/usr/include/kuroko',filter=file_filter)
 
 

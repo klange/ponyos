@@ -1,32 +1,70 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
+/**
+ * @file kernel/net/e1000.c
+ * @brief Intel Gigabit Ethernet device driver
+ * @package x86_64
+ *
+ * @copyright
  * This file is part of ToaruOS and is released under the terms
  * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2017-2018 K. Lange
+ * Copyright (C) 2017-2021 K. Lange
+ *
+ * @ref https://www.intel.com/content/dam/www/public/us/en/documents/manuals/pcie-gbe-controllers-open-source-manual.pdf
  */
-#include <kernel/module.h>
-#include <kernel/logging.h>
+#include <kernel/types.h>
+#include <kernel/string.h>
 #include <kernel/printf.h>
+#include <kernel/process.h>
 #include <kernel/pci.h>
-#include <kernel/mem.h>
+#include <kernel/mmu.h>
 #include <kernel/pipe.h>
-#include <kernel/ipv4.h>
+#include <kernel/list.h>
+#include <kernel/spinlock.h>
+#include <kernel/time.h>
+#include <kernel/vfs.h>
 #include <kernel/mod/net.h>
+#include <kernel/net/netif.h>
+#include <kernel/net/eth.h>
+#include <kernel/module.h>
+#include <errno.h>
 
-#include <toaru/list.h>
+#include <kernel/arch/x86_64/irq.h>
+#include <kernel/net/e1000.h>
 
-#define E1000_LOG_LEVEL NOTICE
+#include <sys/socket.h>
+#include <net/if.h>
 
-static uint32_t e1000_device_pci = 0x00000000;
-static int e1000_irq = 0;
-static uintptr_t mem_base = 0;
-static int has_eeprom = 0;
-static uint8_t mac[6];
-static int rx_index = 0;
-static int tx_index = 0;
+#define INTS (ICR_LSC | ICR_RXO | ICR_RXT0 | ICR_TXQE | ICR_TXDW | ICR_ACK | ICR_RXDMT0 | ICR_SRPD)
 
-static list_t * net_queue = NULL;
-static spin_lock_t net_queue_lock = { 0 };
-static list_t * rx_wait;
+struct e1000_nic {
+	struct EthernetDevice eth;
+	uint32_t pci_device;
+	uint16_t deviceid;
+	uintptr_t mmio_addr;
+	int irq_number;
+
+	int has_eeprom;
+	int rx_index;
+	int tx_index;
+	int link_status;
+
+	spin_lock_t tx_lock;
+
+	uint8_t * rx_virt[E1000_NUM_RX_DESC];
+	uint8_t * tx_virt[E1000_NUM_TX_DESC];
+	struct e1000_rx_desc * rx;
+	struct e1000_tx_desc * tx;
+	uintptr_t rx_phys;
+	uintptr_t tx_phys;
+
+	int configured;
+	process_t * queuer;
+	process_t * processor;
+
+	netif_counters_t counts;
+};
+
+static int device_count = 0;
+static struct e1000_nic * devices[32] = {NULL};
 
 static uint32_t mmio_read32(uintptr_t addr) {
 	return *((volatile uint32_t*)(addr));
@@ -35,446 +73,487 @@ static void mmio_write32(uintptr_t addr, uint32_t val) {
 	(*((volatile uint32_t*)(addr))) = val;
 }
 
-static void write_command(uint16_t addr, uint32_t val) {
-	mmio_write32(mem_base + addr, val);
+static void write_command(struct e1000_nic * device, uint16_t addr, uint32_t val) {
+	mmio_write32(device->mmio_addr + addr, val);
 }
 
-static uint32_t read_command(uint16_t addr) {
-	return mmio_read32(mem_base + addr);
+static uint32_t read_command(struct e1000_nic * device, uint16_t addr) {
+	return mmio_read32(device->mmio_addr + addr);
 }
 
-#define E1000_NUM_RX_DESC 32
-#define E1000_NUM_TX_DESC 8
-
-struct rx_desc {
-	volatile uint64_t addr;
-	volatile uint16_t length;
-	volatile uint16_t checksum;
-	volatile uint8_t  status;
-	volatile uint8_t  errors;
-	volatile uint16_t special;
-} __attribute__((packed)); /* this looks like it should pack fine as-is */
-
-struct tx_desc {
-	volatile uint64_t addr;
-	volatile uint16_t length;
-	volatile uint8_t  cso;
-	volatile uint8_t  cmd;
-	volatile uint8_t  status;
-	volatile uint8_t  css;
-	volatile uint16_t special;
-} __attribute__((packed));
-
-static uint8_t * rx_virt[E1000_NUM_RX_DESC];
-static uint8_t * tx_virt[E1000_NUM_TX_DESC];
-static struct rx_desc * rx;
-static struct tx_desc * tx;
-static uintptr_t rx_phys;
-static uintptr_t tx_phys;
-
-static void enqueue_packet(void * buffer) {
-	spin_lock(net_queue_lock);
-	list_insert(net_queue, buffer);
-	spin_unlock(net_queue_lock);
+static void delay_yield(size_t subticks) {
+	unsigned long s, ss;
+	relative_time(0, subticks, &s, &ss);
+	sleep_until((process_t *)this_core->current_process, s, ss);
+	switch_task(0);
 }
 
-static struct ethernet_packet * dequeue_packet(void) {
-	while (!net_queue->length) {
-		sleep_on(rx_wait);
-	}
+static int eeprom_detect(struct e1000_nic * device) {
 
-	spin_lock(net_queue_lock);
-	node_t * n = list_dequeue(net_queue);
-	void* value = n->value;
-	free(n);
-	spin_unlock(net_queue_lock);
+	/* Definitely not */
+	if (device->deviceid == 0x10d3) return 0;
 
-	return value;
-}
+	write_command(device, E1000_REG_EEPROM, 1);
 
-static uint8_t* get_mac() {
-	return mac;
-}
-
-#define E1000_REG_CTRL       0x0000
-#define E1000_REG_STATUS     0x0008
-#define E1000_REG_EEPROM     0x0014
-#define E1000_REG_CTRL_EXT   0x0018
-
-#define E1000_REG_RCTRL      0x0100
-#define E1000_REG_RXDESCLO   0x2800
-#define E1000_REG_RXDESCHI   0x2804
-#define E1000_REG_RXDESCLEN  0x2808
-#define E1000_REG_RXDESCHEAD 0x2810
-#define E1000_REG_RXDESCTAIL 0x2818
-
-#define E1000_REG_TCTRL      0x0400
-#define E1000_REG_TXDESCLO   0x3800
-#define E1000_REG_TXDESCHI   0x3804
-#define E1000_REG_TXDESCLEN  0x3808
-#define E1000_REG_TXDESCHEAD 0x3810
-#define E1000_REG_TXDESCTAIL 0x3818
-
-#define E1000_REG_RXADDR     0x5400
-
-#define RCTL_EN                         (1 << 1)    /* Receiver Enable */
-#define RCTL_SBP                        (1 << 2)    /* Store Bad Packets */
-#define RCTL_UPE                        (1 << 3)    /* Unicast Promiscuous Enabled */
-#define RCTL_MPE                        (1 << 4)    /* Multicast Promiscuous Enabled */
-#define RCTL_LPE                        (1 << 5)    /* Long Packet Reception Enable */
-#define RCTL_LBM_NONE                   (0 << 6)    /* No Loopback */
-#define RCTL_LBM_PHY                    (3 << 6)    /* PHY or external SerDesc loopback */
-#define RTCL_RDMTS_HALF                 (0 << 8)    /* Free Buffer Threshold is 1/2 of RDLEN */
-#define RTCL_RDMTS_QUARTER              (1 << 8)    /* Free Buffer Threshold is 1/4 of RDLEN */
-#define RTCL_RDMTS_EIGHTH               (2 << 8)    /* Free Buffer Threshold is 1/8 of RDLEN */
-#define RCTL_MO_36                      (0 << 12)   /* Multicast Offset - bits 47:36 */
-#define RCTL_MO_35                      (1 << 12)   /* Multicast Offset - bits 46:35 */
-#define RCTL_MO_34                      (2 << 12)   /* Multicast Offset - bits 45:34 */
-#define RCTL_MO_32                      (3 << 12)   /* Multicast Offset - bits 43:32 */
-#define RCTL_BAM                        (1 << 15)   /* Broadcast Accept Mode */
-#define RCTL_VFE                        (1 << 18)   /* VLAN Filter Enable */
-#define RCTL_CFIEN                      (1 << 19)   /* Canonical Form Indicator Enable */
-#define RCTL_CFI                        (1 << 20)   /* Canonical Form Indicator Bit Value */
-#define RCTL_DPF                        (1 << 22)   /* Discard Pause Frames */
-#define RCTL_PMCF                       (1 << 23)   /* Pass MAC Control Frames */
-#define RCTL_SECRC                      (1 << 26)   /* Strip Ethernet CRC */
-
-#define RCTL_BSIZE_256                  (3 << 16)
-#define RCTL_BSIZE_512                  (2 << 16)
-#define RCTL_BSIZE_1024                 (1 << 16)
-#define RCTL_BSIZE_2048                 (0 << 16)
-#define RCTL_BSIZE_4096                 ((3 << 16) | (1 << 25))
-#define RCTL_BSIZE_8192                 ((2 << 16) | (1 << 25))
-#define RCTL_BSIZE_16384                ((1 << 16) | (1 << 25))
-
-#define TCTL_EN                         (1 << 1)    /* Transmit Enable */
-#define TCTL_PSP                        (1 << 3)    /* Pad Short Packets */
-#define TCTL_CT_SHIFT                   4           /* Collision Threshold */
-#define TCTL_COLD_SHIFT                 12          /* Collision Distance */
-#define TCTL_SWXOFF                     (1 << 22)   /* Software XOFF Transmission */
-#define TCTL_RTLC                       (1 << 24)   /* Re-transmit on Late Collision */
-
-#define CMD_EOP                         (1 << 0)    /* End of Packet */
-#define CMD_IFCS                        (1 << 1)    /* Insert FCS */
-#define CMD_IC                          (1 << 2)    /* Insert Checksum */
-#define CMD_RS                          (1 << 3)    /* Report Status */
-#define CMD_RPS                         (1 << 4)    /* Report Packet Sent */
-#define CMD_VLE                         (1 << 6)    /* VLAN Packet Enable */
-#define CMD_IDE                         (1 << 7)    /* Interrupt Delay Enable */
-
-static int eeprom_detect(void) {
-
-	write_command(E1000_REG_EEPROM, 1);
-
-	for (int i = 0; i < 100000 && !has_eeprom; ++i) {
-		uint32_t val = read_command(E1000_REG_EEPROM);
-		if (val & 0x10) has_eeprom = 1;
+	for (int i = 0; i < 10000 && !device->has_eeprom; ++i) {
+		uint32_t val = read_command(device, E1000_REG_EEPROM);
+		if (val & 0x10) device->has_eeprom = 1;
 	}
 
 	return 0;
 }
 
-static uint16_t eeprom_read(uint8_t addr) {
+static uint16_t eeprom_read(struct e1000_nic * device, uint8_t addr) {
 	uint32_t temp = 0;
-	write_command(E1000_REG_EEPROM, 1 | ((uint32_t)(addr) << 8));
-	while (!((temp = read_command(E1000_REG_EEPROM)) & (1 << 4)));
+	write_command(device, E1000_REG_EEPROM, 1 | ((uint32_t)(addr) << 8));
+	while (!((temp = read_command(device, E1000_REG_EEPROM)) & (1 << 4)));
 	return (uint16_t)((temp >> 16) & 0xFFFF);
 }
 
+static void write_mac(struct e1000_nic * device) {
+	uint32_t low, high;
+	memcpy(&low, &device->eth.mac[0], 4);
+	memcpy(&high,&device->eth.mac[4], 2);
+	memset((uint8_t *)&high + 2, 0, 2);
+	high |= 0x80000000;
+	write_command(device, E1000_REG_RXADDR + 0, low);
+	write_command(device, E1000_REG_RXADDR + 4, high);
+}
 
-static void find_e1000(uint32_t device, uint16_t vendorid, uint16_t deviceid, void * extra) {
-	if ((vendorid == 0x8086) && (deviceid == 0x100e || deviceid == 0x1004 || deviceid == 0x100f || deviceid == 0x10ea)) {
-		*((uint32_t *)extra) = device;
+static void read_mac(struct e1000_nic * device) {
+	if (device->has_eeprom) {
+		uint32_t t;
+		t = eeprom_read(device, 0);
+		device->eth.mac[0] = t & 0xFF;
+		device->eth.mac[1] = t >> 8;
+		t = eeprom_read(device, 1);
+		device->eth.mac[2] = t & 0xFF;
+		device->eth.mac[3] = t >> 8;
+		t = eeprom_read(device, 2);
+		device->eth.mac[4] = t & 0xFF;
+		device->eth.mac[5] = t >> 8;
+	} else {
+		uint32_t mac_addr_low  = *(uint32_t *)(device->mmio_addr + E1000_REG_RXADDR);
+		uint32_t mac_addr_high = *(uint32_t *)(device->mmio_addr + E1000_REG_RXADDR + 4);
+		device->eth.mac[0] = (mac_addr_low >> 0 ) & 0xFF;
+		device->eth.mac[1] = (mac_addr_low >> 8 ) & 0xFF;
+		device->eth.mac[2] = (mac_addr_low >> 16) & 0xFF;
+		device->eth.mac[3] = (mac_addr_low >> 24) & 0xFF;
+		device->eth.mac[4] = (mac_addr_high>> 0 ) & 0xFF;
+		device->eth.mac[5] = (mac_addr_high>> 8 ) & 0xFF;
 	}
 }
 
-static void write_mac(void) {
+static void e1000_handle(struct e1000_nic * nic, uint32_t status) {
+	write_command(nic, E1000_REG_ICR, status);
 
-	uint32_t low;
-	uint32_t high;
+	if (!nic->configured) {
+		return;
+	}
 
-	memcpy(&low, &mac[0], 4);
-	memcpy(&high,&mac[4], 2);
-	memset((uint8_t *)&high + 2, 0, 2);
-	high |= 0x80000000;
+	if (status & ICR_LSC) {
+		nic->link_status= (read_command(nic, E1000_REG_STATUS) & (1 << 1));
+	}
 
-	write_command(E1000_REG_RXADDR + 0, low);
-	write_command(E1000_REG_RXADDR + 4, high);
+	make_process_ready(nic->queuer);
 }
 
-static void read_mac(void) {
-	if (has_eeprom) {
-		uint32_t t;
-		t = eeprom_read(0);
-		mac[0] = t & 0xFF;
-		mac[1] = t >> 8;
-		t = eeprom_read(1);
-		mac[2] = t & 0xFF;
-		mac[3] = t >> 8;
-		t = eeprom_read(2);
-		mac[4] = t & 0xFF;
-		mac[5] = t >> 8;
-	} else {
-		uint8_t * mac_addr = (uint8_t *)(mem_base + E1000_REG_RXADDR);
-		for (int i = 0; i < 6; ++i) {
-			mac[i] = mac_addr[i];
+static void e1000_queuer(void * data) {
+	struct e1000_nic * nic = data;
+
+	int head = read_command(nic, E1000_REG_RXDESCHEAD);
+	int budget = 8;
+
+	while (1) {
+		int processed = 0;
+		if (head == nic->rx_index) {
+			head = read_command(nic, E1000_REG_RXDESCHEAD);
+		}
+		if (head != nic->rx_index) {
+			while ((nic->rx[nic->rx_index].status & 0x01) && (processed < budget)) {
+				int i = nic->rx_index;
+				if (!(nic->rx[i].errors & (0x97))) {
+					nic->counts.rx_count++;
+					nic->counts.rx_bytes += nic->rx[i].length;
+					net_eth_handle((void*)nic->rx_virt[i], nic->eth.device_node, nic->rx[i].length);
+				} else {
+					printf("error bits set in packet: %x\n", nic->rx[i].errors);
+				}
+				processed++;
+				nic->rx[i].status = 0;
+				if (++nic->rx_index == E1000_NUM_RX_DESC) {
+					nic->rx_index = 0;
+				}
+				if (nic->rx_index == head) {
+					head = read_command(nic, E1000_REG_RXDESCHEAD);
+					if (nic->rx_index == head) break;
+				}
+				write_command(nic, E1000_REG_RXDESCTAIL, nic->rx_index);
+				read_command(nic, E1000_REG_STATUS);
+			}
+		}
+		if (processed == 0) {
+			switch_task(0);
+		} else {
+			if (this_core->cpu_id == 0) switch_task(0);
 		}
 	}
 }
 
 static int irq_handler(struct regs *r) {
+	int irq = r->int_no - 32;
+	int handled = 0;
 
-	uint32_t status = read_command(0xc0);
-
-	if (!status) {
-		return 0;
-	}
-
-	irq_ack(e1000_irq);
-
-	if (status & 0x04) {
-		/* Start link */
-		debug_print(E1000_LOG_LEVEL, "start link");
-	} else if (status & 0x10) {
-		/* ?? */
-	} else if (status & ((1 << 6) | (1 << 7))) {
-		/* receive packet */
-		do {
-			rx_index = read_command(E1000_REG_RXDESCTAIL);
-			if (rx_index == (int)read_command(E1000_REG_RXDESCHEAD)) return 1;
-			rx_index = (rx_index + 1) % E1000_NUM_RX_DESC;
-			if (rx[rx_index].status & 0x01) {
-				uint8_t * pbuf = (uint8_t *)rx_virt[rx_index];
-				uint16_t  plen = rx[rx_index].length;
-
-				void * packet = malloc(plen);
-				memcpy(packet, pbuf, plen);
-
-				rx[rx_index].status = 0;
-
-				enqueue_packet(packet);
-
-				write_command(E1000_REG_RXDESCTAIL, rx_index);
-			} else {
-				break;
+	for (int i = 0; i < device_count; ++i) {
+		if (devices[i]->irq_number == irq) {
+			uint32_t status = read_command(devices[i], E1000_REG_ICR);
+			if (status) {
+				e1000_handle(devices[i], status);
+				if (!handled) {
+					handled = 1;
+					irq_ack(irq);
+				}
 			}
-		} while (1);
-		wakeup_queue(rx_wait);
+		}
 	}
 
-	return 1;
+	return handled;
 }
 
-static void send_packet(uint8_t* payload, size_t payload_size) {
-	tx_index = read_command(E1000_REG_TXDESCTAIL);
-	debug_print(E1000_LOG_LEVEL,"sending packet 0x%x, %d desc[%d]", payload, payload_size, tx_index);
-
-	memcpy(tx_virt[tx_index], payload, payload_size);
-	tx[tx_index].length = payload_size;
-	tx[tx_index].cmd = CMD_EOP | CMD_IFCS | CMD_RS; //| CMD_RPS;
-	tx[tx_index].status = 0;
-
-	tx_index = (tx_index + 1) % E1000_NUM_TX_DESC;
-	write_command(E1000_REG_TXDESCTAIL, tx_index);
+static int tx_full(struct e1000_nic * device, int tx_tail, int tx_head) {
+	if (tx_tail == tx_head) return 0;
+	if (device->tx_index == tx_head) return 1;
+	if (((device->tx_index + 1) & E1000_NUM_TX_DESC) == tx_head) return 1;
+	return 0;
 }
 
-static void init_rx(void) {
+static void send_packet(struct e1000_nic * device, uint8_t* payload, size_t payload_size) {
+	spin_lock(device->tx_lock);
+	int tx_tail = read_command(device, E1000_REG_TXDESCTAIL);
+	int tx_head = read_command(device, E1000_REG_TXDESCHEAD);
 
-	write_command(E1000_REG_RXDESCLO, rx_phys);
-	write_command(E1000_REG_RXDESCHI, 0);
+	if (tx_full(device, tx_tail, tx_head)) {
+		int timeout = 1000;
+		do {
+			spin_unlock(device->tx_lock);
+			delay_yield(10000);
+			timeout--;
+			if (timeout == 0) {
+				printf("e1000: wait for tx timed out, giving up\n");
+				return;
+			}
+			spin_lock(device->tx_lock);
+			tx_tail = read_command(device, E1000_REG_TXDESCTAIL);
+			tx_head = read_command(device, E1000_REG_TXDESCHEAD);
+		} while (tx_full(device, tx_tail, tx_head));
+	}
 
-	write_command(E1000_REG_RXDESCLEN, E1000_NUM_RX_DESC * sizeof(struct rx_desc));
+	memcpy(device->tx_virt[device->tx_index], payload, payload_size);
+	device->tx[device->tx_index].length = payload_size;
+	device->tx[device->tx_index].cmd = CMD_EOP | CMD_IFCS | CMD_RS; //| CMD_RPS;
+	device->tx[device->tx_index].status = 0;
 
-	write_command(E1000_REG_RXDESCHEAD, 0);
-	write_command(E1000_REG_RXDESCTAIL, E1000_NUM_RX_DESC - 1);
+	device->counts.tx_count++;
+	device->counts.tx_bytes += payload_size;
 
-	rx_index = 0;
+	if (++device->tx_index == E1000_NUM_TX_DESC) {
+		device->tx_index = 0;
+	}
+	write_command(device, E1000_REG_TXDESCTAIL, device->tx_index);
+	read_command(device, E1000_REG_STATUS);
 
-	write_command(E1000_REG_RCTRL,
+	spin_unlock(device->tx_lock);
+}
+
+static void init_rx(struct e1000_nic * device) {
+	write_command(device, E1000_REG_RXDESCLO, device->rx_phys);
+	write_command(device, E1000_REG_RXDESCHI, 0);
+	write_command(device, E1000_REG_RXDESCLEN, E1000_NUM_RX_DESC * sizeof(struct e1000_rx_desc));
+	write_command(device, E1000_REG_RXDESCHEAD, 0);
+	write_command(device, E1000_REG_RXDESCTAIL, E1000_NUM_RX_DESC - 1);
+
+	device->rx_index = 0;
+
+	write_command(device, E1000_REG_RCTRL,
 		RCTL_EN  |
-		(read_command(E1000_REG_RCTRL) & (~((1 << 17) | (1 << 16)))));
-
+		(1 << 2) | /* store bad packets */
+		(1 << 4) | /* multicast promiscuous */
+		(1 << 15) | /* broadcast accept */
+		(1 << 25) | /* Extended size... */
+		(3 << 16) | /*   4096 */
+		(1 << 26) /* strip CRC */
+	);
 }
 
-static void init_tx(void) {
+static void init_tx(struct e1000_nic * device) {
+	write_command(device, E1000_REG_TXDESCLO, device->tx_phys);
+	write_command(device, E1000_REG_TXDESCHI, 0);
+	write_command(device, E1000_REG_TXDESCLEN, E1000_NUM_TX_DESC * sizeof(struct e1000_tx_desc));
+	write_command(device, E1000_REG_TXDESCHEAD, 0);
+	write_command(device, E1000_REG_TXDESCTAIL, 0);
 
+	device->tx_index = 0;
 
-	write_command(E1000_REG_TXDESCLO, tx_phys);
-	write_command(E1000_REG_TXDESCHI, 0);
+	uint32_t tctl = read_command(device, E1000_REG_TCTRL);
 
-	write_command(E1000_REG_TXDESCLEN, E1000_NUM_TX_DESC * sizeof(struct tx_desc));
+	/* Collision threshold */
+	tctl &= ~(0xFF << 4);
+	tctl |= (15 << 4);
 
-	write_command(E1000_REG_TXDESCHEAD, 0);
-	write_command(E1000_REG_TXDESCTAIL, 0);
+	/* Turn it on */
+	tctl |= TCTL_EN;
+	tctl |= TCTL_PSP;
+	tctl |= (1 << 24); /* retransmit on late collision */
 
-	tx_index = 0;
-
-	write_command(E1000_REG_TCTRL,
-		TCTL_EN |
-		TCTL_PSP |
-		read_command(E1000_REG_TCTRL));
+	write_command(device, E1000_REG_TCTRL, tctl);
 }
 
+#define privileged() do { if (this_core->current_process->user != USER_ROOT_UID) { return -EPERM; } } while (0)
 
-static void e1000_init(void * data, char * name) {
+static int ioctl_e1000(fs_node_t * node, unsigned long request, void * argp) {
+	struct e1000_nic * nic = node->device;
 
-	debug_print(E1000_LOG_LEVEL, "enabling bus mastering");
+	switch (request) {
+		case SIOCGIFHWADDR:
+			/* fill argp with mac */
+			memcpy(argp, nic->eth.mac, 6);
+			return 0;
+
+		case SIOCGIFADDR:
+			if (nic->eth.ipv4_addr == 0) return -ENOENT;
+			memcpy(argp, &nic->eth.ipv4_addr, sizeof(nic->eth.ipv4_addr));
+			return 0;
+		case SIOCSIFADDR:
+			privileged();
+			memcpy(&nic->eth.ipv4_addr, argp, sizeof(nic->eth.ipv4_addr));
+			return 0;
+		case SIOCGIFNETMASK:
+			if (nic->eth.ipv4_subnet == 0) return -ENOENT;
+			memcpy(argp, &nic->eth.ipv4_subnet, sizeof(nic->eth.ipv4_subnet));
+			return 0;
+		case SIOCSIFNETMASK:
+			privileged();
+			memcpy(&nic->eth.ipv4_subnet, argp, sizeof(nic->eth.ipv4_subnet));
+			return 0;
+		case SIOCGIFGATEWAY:
+			if (nic->eth.ipv4_subnet == 0) return -ENOENT;
+			memcpy(argp, &nic->eth.ipv4_gateway, sizeof(nic->eth.ipv4_gateway));
+			return 0;
+		case SIOCSIFGATEWAY:
+			privileged();
+			memcpy(&nic->eth.ipv4_gateway, argp, sizeof(nic->eth.ipv4_gateway));
+			net_arp_ask(nic->eth.ipv4_gateway, node);
+			return 0;
+
+		case SIOCGIFADDR6:
+			return -ENOENT;
+		case SIOCSIFADDR6:
+			privileged();
+			memcpy(&nic->eth.ipv6_addr, argp, sizeof(nic->eth.ipv6_addr));
+			return 0;
+
+		case SIOCGIFFLAGS: {
+			uint32_t * flags = argp;
+			*flags = IFF_RUNNING;
+			if (nic->link_status) *flags |= IFF_UP;
+			/* We turn these on in our init_tx */
+			*flags |= IFF_BROADCAST;
+			*flags |= IFF_MULTICAST;
+			return 0;
+		}
+
+		case SIOCGIFMTU: {
+			uint32_t * mtu = argp;
+			*mtu = nic->eth.mtu;
+			return 0;
+		}
+
+		case SIOCGIFCOUNTS: {
+			memcpy(argp, &nic->counts, sizeof(netif_counters_t));
+			return 0;
+		}
+
+		default:
+			return -EINVAL;
+	}
+}
+
+static ssize_t write_e1000(fs_node_t *node, off_t offset, size_t size, uint8_t *buffer) {
+	struct e1000_nic * nic = node->device;
+	/* write packet */
+	send_packet(nic, buffer, size);
+	return size;
+}
+
+static void ints_off(struct e1000_nic * nic) {
+	write_command(nic, E1000_REG_IMC, 0xFFFFFFFF);
+	write_command(nic, E1000_REG_ICR, 0xFFFFFFFF);
+	read_command(nic, E1000_REG_STATUS);
+}
+
+static void e1000_init(struct e1000_nic * nic) {
+	uint32_t e1000_device_pci = nic->pci_device;
+
+	nic->rx_phys = mmu_allocate_n_frames(2) << 12;
+	nic->rx = mmu_map_mmio_region(nic->rx_phys, 8192);
+
+	nic->tx_phys = mmu_allocate_n_frames(2) << 12;
+	nic->tx = mmu_map_mmio_region(nic->tx_phys, 8192);
+
+	memset(nic->rx, 0, sizeof(struct e1000_rx_desc) * E1000_NUM_RX_DESC);
+	memset(nic->tx, 0, sizeof(struct e1000_tx_desc) * E1000_NUM_TX_DESC);
+
+	/* Allocate buffers */
+	for (int i = 0; i < E1000_NUM_RX_DESC; ++i) {
+		nic->rx[i].addr = mmu_allocate_a_frame() << 12;
+		nic->rx_virt[i] = mmu_map_mmio_region(nic->rx[i].addr, 4096);
+		mmu_frame_map_address(mmu_get_page((uintptr_t)nic->rx_virt[i],0),MMU_FLAG_KERNEL|MMU_FLAG_WRITABLE|MMU_FLAG_WC,nic->rx[i].addr);
+		nic->rx[i].status = 0;
+	}
+
+	for (int i = 0; i < E1000_NUM_TX_DESC; ++i) {
+		nic->tx[i].addr = mmu_allocate_a_frame() << 12;
+		nic->tx_virt[i] = mmu_map_mmio_region(nic->tx[i].addr, 4096);
+		mmu_frame_allocate(mmu_get_page((uintptr_t)nic->tx_virt[i],0),MMU_FLAG_KERNEL|MMU_FLAG_WRITABLE|MMU_FLAG_WC);
+		memset(nic->tx_virt[i], 0, 4096);
+		nic->tx[i].status = 0;
+		nic->tx[i].cmd = (1 << 0);
+	}
+
 	uint16_t command_reg = pci_read_field(e1000_device_pci, PCI_COMMAND, 2);
 	command_reg |= (1 << 2);
 	command_reg |= (1 << 0);
 	pci_write_field(e1000_device_pci, PCI_COMMAND, 2, command_reg);
 
-	debug_print(E1000_LOG_LEVEL, "mem base: 0x%x", mem_base);
+	delay_yield(10000);
 
-	eeprom_detect();
-	debug_print(E1000_LOG_LEVEL, "has_eeprom = %d", has_eeprom);
-	read_mac();
-	write_mac();
+	/* Is this size enough? */
+	uint32_t initial_bar = pci_read_field(e1000_device_pci, PCI_BAR0, 4);
+	nic->mmio_addr = (uintptr_t)mmu_map_mmio_region(initial_bar, 0x8000);
 
-	debug_print(E1000_LOG_LEVEL, "device mac %2x:%2x:%2x:%2x:%2x:%2x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-	unsigned long s, ss;
+	eeprom_detect(nic);
+	read_mac(nic);
+	write_mac(nic);
 
-	uint32_t ctrl = read_command(E1000_REG_CTRL);
-	/* reset phy */
-	write_command(E1000_REG_CTRL, ctrl | (0x80000000));
-	read_command(E1000_REG_STATUS);
-	relative_time(0, 10, &s, &ss);
-	sleep_until((process_t *)current_process, s, ss);
-	switch_task(0);
+	#define CTRL_PHY_RST (1UL << 31UL)
+	#define CTRL_RST     (1UL << 26UL)
+	#define CTRL_SLU     (1UL << 6UL)
+	#define CTRL_LRST    (1UL << 3UL)
 
-	/* reset mac */
-	write_command(E1000_REG_CTRL, ctrl | (0x04000000));
-	read_command(E1000_REG_STATUS);
-	relative_time(0, 10, &s, &ss);
-	sleep_until((process_t *)current_process, s, ss);
-	switch_task(0);
+	nic->irq_number = pci_get_interrupt(e1000_device_pci);
+	irq_install_handler(nic->irq_number, irq_handler, nic->eth.if_name);
 
-	/* Reload EEPROM */
-	write_command(E1000_REG_CTRL, ctrl | (0x00002000));
-	read_command(E1000_REG_STATUS);
-	relative_time(0, 20, &s, &ss);
-	sleep_until((process_t *)current_process, s, ss);
-	switch_task(0);
+	/* Disable interrupts */
+	ints_off(nic);
 
+	/* Turn off receive + transmit */
+	write_command(nic, E1000_REG_RCTRL, 0);
+	write_command(nic, E1000_REG_TCTRL, TCTL_PSP);
+	read_command(nic, E1000_REG_STATUS);
+	delay_yield(10000);
 
-	/* initialize */
-	write_command(E1000_REG_CTRL, ctrl | (1 << 26));
+	/* Reset everything */
+	uint32_t ctrl = read_command(nic, E1000_REG_CTRL);
+	ctrl |= CTRL_RST;
+	write_command(nic, E1000_REG_CTRL, ctrl);
+	delay_yield(20000);
 
-	/* wait */
-	relative_time(0, 10, &s, &ss);
-	sleep_until((process_t *)current_process, s, ss);
-	switch_task(0);
-	debug_print(E1000_LOG_LEVEL, "back from sleep");
+	/* Turn off interrupts _again_ */
+	ints_off(nic);
 
-	uint32_t status = read_command(E1000_REG_CTRL);
-	status |= (1 << 5);   /* set auto speed detection */
-	status |= (1 << 6);   /* set link up */
-	status &= ~(1 << 3);  /* unset link reset */
-	status &= ~(1UL << 31UL); /* unset phy reset */
-	status &= ~(1 << 7);  /* unset invert loss-of-signal */
-	write_command(E1000_REG_CTRL, status);
+	/* Recommended flow control settings? */
+	write_command(nic, 0x0028, 0x002C8001);
+	write_command(nic, 0x002c, 0x0100);
+	write_command(nic, 0x0030, 0x8808);
+	write_command(nic, 0x0170, 0xFFFF);
 
-	/* Disables flow control */
-	write_command(0x0028, 0);
-	write_command(0x002c, 0);
-	write_command(0x0030, 0);
-	write_command(0x0170, 0);
+	/* Link up */
+	uint32_t status = read_command(nic, E1000_REG_CTRL);
+	status |= CTRL_SLU;
+	status |= (2 << 8); /* Speed to gigabit... */
+	status &= ~CTRL_LRST;
+	status &= ~CTRL_PHY_RST;
+	write_command(nic, E1000_REG_CTRL, status);
 
-	/* Unset flow control */
-	status = read_command(E1000_REG_CTRL);
-	status &= ~(1 << 30);
-	write_command(E1000_REG_CTRL, status);
-
-	relative_time(0, 10, &s, &ss);
-	sleep_until((process_t *)current_process, s, ss);
-	switch_task(0);
-
-	net_queue = list_create();
-	rx_wait = list_create();
-
-	e1000_irq = pci_get_interrupt(e1000_device_pci);
-
-	irq_install_handler(e1000_irq, irq_handler, "e1000");
-
-	debug_print(E1000_LOG_LEVEL, "Binding interrupt %d", e1000_irq);
-
+	/* Clear statistical counters */
 	for (int i = 0; i < 128; ++i) {
-		write_command(0x5200 + i * 4, 0);
+		write_command(nic, 0x5200 + i * 4, 0);
 	}
 
 	for (int i = 0; i < 64; ++i) {
-		write_command(0x4000 + i * 4, 0);
+		read_command(nic, 0x4000 + i * 4);
 	}
 
-#if 0
-	/* This would rewrite the MAC address... */
-	write_command(0x5400, *(uint32_t*)(&mac[0]));
-	write_command(0x5404, *(uint16_t*)(&mac[4]));
-	write_command(0x5404, read_command(0x5404) | (1 << 31));
-#endif
+	init_rx(nic);
+	init_tx(nic);
 
-	write_command(E1000_REG_RCTRL, (1 << 4));
+	write_command(nic, E1000_REG_RDTR, 0);
+	write_command(nic, E1000_REG_ITR, 500);
+	read_command(nic, E1000_REG_STATUS);
 
-	init_rx();
-	init_tx();
+	nic->link_status = (read_command(nic, E1000_REG_STATUS) & (1 << 1));
+
+	nic->eth.device_node = calloc(sizeof(fs_node_t),1);
+	snprintf(nic->eth.device_node->name, 100, "%s", nic->eth.if_name);
+	nic->eth.device_node->flags = FS_BLOCKDEVICE; /* NETDEVICE? */
+	nic->eth.device_node->mask  = 0644; /* temporary; shouldn't be doing this with these device files */
+	nic->eth.device_node->ioctl = ioctl_e1000;
+	nic->eth.device_node->write = write_e1000;
+	nic->eth.device_node->device = nic;
+
+	nic->eth.mtu = 1500; /* guess */
+
+	net_add_interface(nic->eth.if_name, nic->eth.device_node);
+
+	char worker_name[34];
+	snprintf(worker_name, 33, "[%s]", nic->eth.if_name);
+	nic->queuer = spawn_worker_thread(e1000_queuer, worker_name, nic);
+
+	nic->configured = 1;
 
 	/* Twiddle interrupts */
-	write_command(0x00D0, 0xFF);
-	write_command(0x00D8, 0xFF);
-	write_command(0x00D0,(1 << 2) | (1 << 6) | (1 << 7) | (1 << 1) | (1 << 0));
-
-	relative_time(0, 10, &s, &ss);
-	sleep_until((process_t *)current_process, s, ss);
-	switch_task(0);
-
-	int link_is_up = (read_command(E1000_REG_STATUS) & (1 << 1));
-	debug_print(E1000_LOG_LEVEL,"e1000 done. has_eeprom = %d, link is up = %d, irq=%d", has_eeprom, link_is_up, e1000_irq);
-
-	init_netif_funcs(get_mac, dequeue_packet, send_packet, "Intel E1000");
+	write_command(nic, E1000_REG_IMS, INTS);
+	delay_yield(10000);
 }
 
-static int init(void) {
-	pci_scan(&find_e1000, -1, &e1000_device_pci);
+static void find_e1000(uint32_t device, uint16_t vendorid, uint16_t deviceid, void * found) {
+	if ((vendorid == 0x8086) && (deviceid == 0x100e || deviceid == 0x1004 || deviceid == 0x100f || deviceid == 0x10ea || deviceid == 0x10d3)) {
+		/* Allocate a device */
+		struct e1000_nic * nic = calloc(1,sizeof(struct e1000_nic));
+		nic->pci_device = device;
+		nic->deviceid   = deviceid;
+		devices[device_count++] = nic;
 
-	if (!e1000_device_pci) {
-		debug_print(E1000_LOG_LEVEL, "No e1000 device found.");
-		return 1;
+		snprintf(nic->eth.if_name, 31,
+			"enp%ds%d",
+			(int)pci_extract_bus(device),
+			(int)pci_extract_slot(device));
+
+		e1000_init(nic);
+		*(int*)found = 1;
 	}
+}
 
-	/* This seems to always be memory mapped on important devices. */
-	mem_base  = pci_read_field(e1000_device_pci, PCI_BAR0, 4) & 0xFFFFFFF0;
+static int e1000_install(int argc, char * argv[]) {
+	uint32_t found = 0;
+	pci_scan(&find_e1000, -1, &found);
 
-	for (size_t x = 0; x < 0x10000; x += 0x1000) {
-		uintptr_t addr = (mem_base & 0xFFFFF000) + x;
-		dma_frame(get_page(addr, 1, kernel_directory), 1, 1, addr);
+	if (!found) {
+		/* TODO: Clean up? Remove ourselves? */
+		return -ENODEV;
 	}
-
-	rx = (void*)kvmalloc_p(sizeof(struct rx_desc) * E1000_NUM_RX_DESC + 16, &rx_phys);
-
-	for (int i = 0; i < E1000_NUM_RX_DESC; ++i) {
-		rx_virt[i] = (void*)kvmalloc_p(8192 + 16, (uint32_t *)&rx[i].addr);
-		debug_print(E1000_LOG_LEVEL, "rx[%d] 0x%x → 0x%x", i, rx_virt[i], (uint32_t)rx[i].addr);
-		rx[i].status = 0;
-	}
-
-	tx = (void*)kvmalloc_p(sizeof(struct tx_desc) * E1000_NUM_TX_DESC + 16, &tx_phys);
-
-	for (int i = 0; i < E1000_NUM_TX_DESC; ++i) {
-		tx_virt[i] = (void*)kvmalloc_p(8192+16, (uint32_t *)&tx[i].addr);
-		debug_print(E1000_LOG_LEVEL, "tx[%d] 0x%x → 0x%x", i, tx_virt[i], (uint32_t)tx[i].addr);
-		tx[i].status = 0;
-		tx[i].cmd = (1 << 0);
-	}
-
-
-	create_kernel_tasklet(e1000_init, "[e1000]", NULL);
 
 	return 0;
 }
 
 static int fini(void) {
+	/* TODO: Uninstall device */
 	return 0;
 }
 
-MODULE_DEF(e1000, init, fini);
-MODULE_DEPENDS(net);
+struct Module metadata = {
+	.name = "e1000",
+	.init = e1000_install,
+	.fini = fini,
+};
+

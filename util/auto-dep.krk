@@ -1,0 +1,185 @@
+#!/bin/kuroko
+import os, kuroko, fileio
+
+let cflags = "-O2 -g -I. -Iapps -fplan9-extensions -Wall -Wextra -Wno-unused-parameter"
+
+def basename(path: str) -> str:
+    return path.strip('/').split('/')[-1]
+
+class Classifier:
+    dependency_hints = {
+        # Toaru Standard Library
+        '<toaru/kbd.h>':         (None, '-ltoaru_kbd',         []),
+        '<toaru/list.h>':        (None, '-ltoaru_list',        []),
+        '<toaru/hashmap.h>':     (None, '-ltoaru_hashmap',     ['<toaru/list.h>']),
+        '<toaru/tree.h>':        (None, '-ltoaru_tree',        ['<toaru/list.h>']),
+        '<toaru/pex.h>':         (None, '-ltoaru_pex',         []),
+        '<toaru/auth.h>':        (None, '-ltoaru_auth',        []),
+        '<toaru/graphics.h>':    (None, '-ltoaru_graphics',    []),
+        '<toaru/inflate.h>':     (None, '-ltoaru_inflate',     []),
+        '<toaru/drawstring.h>':  (None, '-ltoaru_drawstring',  ['<toaru/graphics.h>']),
+        '<toaru/jpeg.h>':        (None, '-ltoaru_jpeg',        ['<toaru/graphics.h>']),
+        '<toaru/png.h>':         (None, '-ltoaru_png',         ['<toaru/graphics.h>','<toaru/inflate.h>']),
+        '<toaru/rline.h>':       (None, '-ltoaru_rline',       ['<toaru/kbd.h>']),
+        '<toaru/confreader.h>':  (None, '-ltoaru_confreader',  ['<toaru/hashmap.h>']),
+        '<toaru/markup.h>':      (None, '-ltoaru_markup',      ['<toaru/hashmap.h>']),
+        '<toaru/json.h>':        (None, '-ltoaru_json',        ['<toaru/hashmap.h>']),
+        '<toaru/yutani.h>':      (None, '-ltoaru_yutani',      ['<toaru/kbd.h>', '<toaru/list.h>', '<toaru/pex.h>', '<toaru/graphics.h>', '<toaru/hashmap.h>']),
+        '<toaru/decorations.h>': (None, '-ltoaru_decorations', ['<toaru/menu.h>', '<toaru/text.h>', '<toaru/graphics.h>', '<toaru/yutani.h>']),
+        '<toaru/termemu.h>':     (None, '-ltoaru_termemu',     ['<toaru/graphics.h>']),
+        '<toaru/icon_cache.h>':  (None, '-ltoaru_icon_cache',  ['<toaru/graphics.h>', '<toaru/hashmap.h>']),
+        '<toaru/menu.h>':        (None, '-ltoaru_menu',        ['<toaru/yutani.h>', '<toaru/icon_cache.h>', '<toaru/graphics.h>', '<toaru/hashmap.h>']),
+        '<toaru/button.h>':      (None, '-ltoaru_button',      ['<toaru/graphics.h>','<toaru/text.h>', '<toaru/icon_cache.h>']),
+        '<toaru/text.h>':        (None, '-ltoaru_text',        ['<toaru/graphics.h>', '<toaru/hashmap.h>']),
+        '<toaru/markup_text.h>': (None, '-ltoaru_markup_text', ['<toaru/graphics.h>', '<toaru/markup.h>', '<toaru/text.h>']),
+        # Kuroko
+        '<kuroko/kuroko.h>':     ('../../../kuroko/src', '-lkuroko', []),
+    }
+
+    def __init__(self, filename: str):
+        self.export_dynamic_hint = False
+        self.filename  = filename
+        self.includes, self.libs = self._depends()
+
+    def _calculate(self, depends, new):
+        """Calculate all dependencies for the given set of new elements."""
+        for k in new:
+            if not k in depends:
+                depends.append(k)
+                let other = self.dependency_hints[k][2]
+                depends = self._calculate(depends, other)
+        return depends
+
+    def _sort(self, depends: list[str]) -> list[str]:
+        """Sort the list of dependencies so that elements appearing first depend on elements following."""
+        let satisfied = []
+        let a = depends[:]
+
+        while set(satisfied) != set(depends):
+            let b = []
+            for k in a:
+                if all(x in satisfied for x in self.dependency_hints[k][2]):
+                    satisfied.append(k)
+                else:
+                    b.append(k)
+            a = b[:]
+        return reversed(satisfied)
+
+    def _depends(self) -> (list[str],list[str]):
+        """Calculate include and library dependencies."""
+        let lines = []
+        let depends = []
+        with fileio.open(self.filename,'r') as f:
+            lines = f.readlines()
+        for l in lines:
+            if l.startswith('#include'):
+                depends.extend(k for k in list(self.dependency_hints.keys()) if l.startswith('#include ' + k))
+            elif l.startswith('/* auto-dep: export-dynamic */'):
+                self.export_dynamic_hint = True
+        depends = self._calculate([], depends)
+        depends = self._sort(depends)
+        let includes  = []
+        let libraries = []
+        for k in depends:
+            let dep = self.dependency_hints[k]
+            if dep[0]:
+                includes.append('-I' + 'base/usr/include/' + dep[0])
+            if dep[1]:
+                libraries.append(dep[1])
+        return includes, libraries
+
+
+def todep(name: str) -> (bool, str):
+    """Convert a library name to an archive path or object file name."""
+    if name.startswith("-l"):
+        name = name.replace("-l","",1)
+        if name.startswith('toaru'):
+            return (True, "{}/lib{}.so".format('base/lib', name))
+        elif name.startswith('kuroko'):
+            return (True, "{}/lib{}.so".format('base/lib', name))
+        else:
+            return (True, "{}/lib{}.so".format('base/usr/lib', name))
+    else:
+        return (False, name)
+
+def toheader(name: str) -> str:
+    if name.startswith('-ltoaru_'):
+        return name.replace('-ltoaru_','base/usr/include/toaru/') + '.h'
+    else:
+        return ''
+
+if __name__ == "__main__":
+    if len(kuroko.argv) < 3:
+        print("usage: util/auto-dep.krk command filename")
+        return 1
+    let command  = kuroko.argv[1]
+    let filename = kuroko.argv[2]
+    let c = Classifier(filename)
+
+    if command == "--cflags":
+        print(" ".join([x for x in c.includes]))
+    elif command == "--libs":
+        print(" ".join([x for x in c.libs]))
+    elif command == "--deps":
+        let results = [todep(x) for x in c.libs]
+        let normal = [x[1] for x in results if not x[0]]
+        let order_only = [x[1] for x in results if x[0]]
+        print(" ".join(normal) + " | " + " ".join(order_only))
+    elif command == "--build":
+        os.system("gcc {cflags} {extra} {includes} -o {app} {source} {libraries}".format(
+            cflags=cflags,
+            app=basename(filename).replace('.c++','').replace(".c",""),
+            source=filename,
+            headers=" ".join([toheader(x) for x in c.libs]),
+            libraries=" ".join([x for x in c.libs]),
+            includes=" ".join([x for x in c.includes if x is not None]),
+            extra="-rdynamic" if c.export_dynamic_hint else "",
+            ))
+    elif command == "--buildlib":
+        let libname = basename(filename).replace('.c++','').replace(".c","")
+        let _libs = [x for x in c.libs if not x.startswith('-ltoaru_') or x.replace("-ltoaru_","") != libname]
+        os.system("gcc {cflags} {includes} -shared -fPIC -olibtoaru_{lib}.so {source} {libraries}".format(
+            cflags=cflags,
+            lib=libname,
+            source=filename,
+            headers=" ".join([toheader(x) for x in c.libs]),
+            libraryfiles=" ".join([todep(x)[1] for x in _libs]),
+            libraries=" ".join([x for x in _libs]),
+            includes=" ".join([x for x in c.includes if x is not None])
+            ))
+    elif command == "--make":
+        print("base/bin/{app}: {source} {headers} util/auto-dep.krk | {libraryfiles} $(LC)\n\t{comp} {extra} {includes} -o $@ $< {libraries}".format(
+            app=basename(filename).replace('.c++','').replace(".c",""),
+            source=filename,
+            headers=" ".join([toheader(x) for x in c.libs]),
+            libraryfiles=" ".join([todep(x)[1] for x in c.libs]),
+            libraries=" ".join([x for x in c.libs]),
+            includes=" ".join([x for x in c.includes if x is not None]),
+            comp="$(CC) $(CFLAGS)" if '.c++' not in filename else "$(CXX) $(CXXFLAGS)",
+            extra="-rdynamic" if c.export_dynamic_hint else ""
+            ))
+    elif command == "--makelib":
+        let libname = basename(filename).replace('.c++','').replace(".c","")
+        let _libs = [x for x in c.libs if not x.startswith('-ltoaru_') or x.replace("-ltoaru_","") != libname]
+        print("base/lib/libtoaru_{lib}.so: {source} {headers} util/auto-dep.krk | {libraryfiles} $(LC)\n\t{comp} {includes} -shared -fPIC -o $@ $< {libraries}".format(
+            lib=libname,
+            source=filename,
+            headers=" ".join([toheader(x) for x in c.libs]),
+            libraryfiles=" ".join([todep(x)[1] for x in _libs]),
+            libraries=" ".join([x for x in _libs]),
+            includes=" ".join([x for x in c.includes if x is not None]),
+            comp="$(CC) $(CFLAGS)" if '.c++' not in filename else "$(CXX) $(CXXFLAGS)",
+            ))
+    elif command == "--makekurokomod":
+        let libname = basename(filename).replace('.c++','').replace(".c","").replace("module_","")
+        let _libs = [x for x in c.libs if not x.startswith('-ltoaru_') or x.replace("-ltoaru_","") != libname]
+        print("base/lib/kuroko/{lib}.so: {source} {headers} util/auto-dep.krk | {libraryfiles} $(LC)\n\t$(CC) $(CFLAGS) {includes} -shared -fPIC -o $@ $< {libraries}".format(
+            lib=libname,
+            source=filename,
+            headers=" ".join([toheader(x) for x in c.libs]),
+            libraryfiles=" ".join([todep(x)[1] for x in _libs]),
+            libraries=" ".join([x for x in _libs]),
+            includes=" ".join([x for x in c.includes if x is not None])
+            ))
+
+

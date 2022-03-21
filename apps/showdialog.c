@@ -1,16 +1,17 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
+/**
+ * @brief showdialog - show a window with a dialog prompt with buttons
+ *
+ * @copyright
  * This file is part of ToaruOS and is released under the terms
  * of the NCSA / University of Illinois License - see LICENSE.md
  * Copyright (C) 2018 K. Lange
- *
- * showdialog - show a window with a dialog prompt with buttons
  */
 #include <toaru/yutani.h>
 #include <toaru/graphics.h>
 #include <toaru/decorations.h>
-#include <toaru/sdf.h>
 #include <toaru/menu.h>
 #include <toaru/button.h>
+#include <toaru/text.h>
 
 #include <sys/utsname.h>
 
@@ -30,12 +31,15 @@ static char * icon_path;
 static char * title_str;
 static char * copyright_str[20] = {NULL};
 
-static void draw_string(int y, const char * string, int font, uint32_t color) {
+static struct TT_Font * _tt_font = NULL;
+
+static void draw_string(int y, const char * string, uint32_t color) {
 
 	struct decor_bounds bounds;
 	decor_get_bounds(window, &bounds);
 
-	draw_sdf_string(ctx, bounds.left_width + 80, bounds.top_height + 30 + y, string, 16, color, font);
+	tt_set_size(_tt_font, 13);
+	tt_draw_string(ctx, _tt_font, bounds.left_width + 80, bounds.top_height + 30 + y + 13, string, color);
 }
 
 struct TTKButton _ok = {0};
@@ -54,10 +58,10 @@ static void redraw(void) {
 		if (**copy_str == '-') {
 			offset += 10;
 		} else if (**copy_str == '%') {
-			draw_string(offset, *copy_str+1, SDF_FONT_THIN, rgb(0,0,255));
+			draw_string(offset, *copy_str+1, rgb(0,0,255));
 			offset += 20;
 		} else {
-			draw_string(offset, *copy_str, SDF_FONT_THIN, rgb(0,0,0));
+			draw_string(offset, *copy_str, rgb(0,0,0));
 			offset += 20;
 		}
 	}
@@ -142,6 +146,8 @@ int main(int argc, char * argv[]) {
 	struct decor_bounds bounds;
 	decor_get_bounds(NULL, &bounds);
 
+	_tt_font = tt_font_from_shm("sans-serif");
+
 	window = yutani_window_create_flags(yctx, width + bounds.width, height + bounds.height, YUTANI_WINDOW_FLAG_DIALOG_ANIMATION);
 	req_center_x = yctx->display_width / 2;
 	req_center_y = yctx->display_height / 2;
@@ -208,7 +214,7 @@ int main(int argc, char * argv[]) {
 				case YUTANI_MSG_WINDOW_FOCUS_CHANGE:
 					{
 						struct yutani_msg_window_focus_change * wf = (void*)m->data;
-						yutani_window_t * win = hashmap_get(yctx->windows, (void*)wf->wid);
+						yutani_window_t * win = hashmap_get(yctx->windows, (void*)(uintptr_t)wf->wid);
 						if (win) {
 							win->focused = wf->focused;
 							redraw();

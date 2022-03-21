@@ -1,9 +1,6 @@
-/* vim: ts=4 sw=4 noexpandtab
- * This file is part of ToaruOS and is released under the terms
- * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2016-2018 Kevin Lange
- *
- * ELF Dynamic Linker/Loader
+/**
+ * @file linker/linker.c
+ * @brief ELF Dynamic Linker/Loader
  *
  * Loads ELF executables and links them at runtime to their
  * shared library dependencies.
@@ -18,6 +15,11 @@
  *
  * However, it's sufficient for our purposes, and works well enough
  * to load Python C modules.
+ *
+ * @copyright
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2016-2021 K. Lange
  */
 #include <stdlib.h>
 #include <stdint.h>
@@ -28,6 +30,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/sysfunc.h>
+#include <syscall.h>
 
 #include <kernel/elf.h>
 
@@ -76,7 +79,7 @@ static hashmap_t * dumb_symbol_table;
 static hashmap_t * glob_dat;
 static hashmap_t * objects_map;
 static hashmap_t * tls_map;
-static size_t current_tls_offset = 0;
+static size_t current_tls_offset = 16;
 
 /* Used for dlerror */
 static char * last_error = NULL;
@@ -87,16 +90,16 @@ typedef struct elf_object {
 	FILE * file;
 
 	/* Full copy of the header. */
-	Elf32_Header header;
+	Elf64_Header header;
 
 	char * dyn_string_table;
 	size_t dyn_string_table_size;
 
-	Elf32_Sym * dyn_symbol_table;
+	Elf64_Sym * dyn_symbol_table;
 	size_t dyn_symbol_table_size;
 
-	Elf32_Dyn * dynamic;
-	Elf32_Word * dyn_hash;
+	Elf64_Dyn * dynamic;
+	Elf64_Word * dyn_hash;
 
 	void (*init)(void);
 	void (**init_array)(void);
@@ -111,6 +114,11 @@ typedef struct elf_object {
 } elf_t;
 
 static elf_t * _main_obj = NULL;
+
+static void clear_cache(uintptr_t start, uintptr_t end) {
+	char * data[] = {(char*)start,(char*)end};
+	sysfunc(42, data);
+}
 
 /* Locate library for LD_LIBRARY PATH */
 static char * find_lib(const char * file) {
@@ -204,7 +212,7 @@ static elf_t * open_object(const char * path) {
 	object->file = f;
 
 	/* Read the header */
-	size_t r = fread(&object->header, sizeof(Elf32_Header), 1, object->file);
+	size_t r = fread(&object->header, sizeof(Elf64_Header), 1, object->file);
 
 	/* Header failed to read? */
 	if (!r) {
@@ -233,11 +241,11 @@ static elf_t * open_object(const char * path) {
 /* Calculate the size of an object file by examining its phdrs */
 static size_t object_calculate_size(elf_t * object) {
 
-	uintptr_t base_addr = 0xFFFFFFFF;
+	uintptr_t base_addr = (uintptr_t)-1;
 	uintptr_t end_addr  = 0x0;
 	size_t headers = 0;
 	while (headers < object->header.e_phnum) {
-		Elf32_Phdr phdr;
+		Elf64_Phdr phdr;
 
 		/* Read the phdr */
 		fseek(object->file, object->header.e_phoff + object->header.e_phentsize * headers, SEEK_SET);
@@ -266,7 +274,7 @@ static size_t object_calculate_size(elf_t * object) {
 	}
 
 	/* If base_addr is still -1, then no valid phdrs were found, and the object has no loaded size. */
-	if (base_addr == 0xFFFFFFFF) return 0;
+	if (base_addr == (uintptr_t)-1) return 0;
 	return end_addr - base_addr;
 }
 
@@ -279,7 +287,7 @@ static uintptr_t object_load(elf_t * object, uintptr_t base) {
 
 	size_t headers = 0;
 	while (headers < object->header.e_phnum) {
-		Elf32_Phdr phdr;
+		Elf64_Phdr phdr;
 
 		/* Read the phdr */
 		fseek(object->file, object->header.e_phoff + object->header.e_phentsize * headers, SEEK_SET);
@@ -295,6 +303,7 @@ static uintptr_t object_load(elf_t * object, uintptr_t base) {
 					/* Copy the code into memory */
 					fseek(object->file, phdr.p_offset, SEEK_SET);
 					fread((void *)(base + phdr.p_vaddr), phdr.p_filesz, 1, object->file);
+					clear_cache(base + phdr.p_vaddr, base + phdr.p_vaddr + phdr.p_filesz);
 
 					/* Zero the remaining area */
 					size_t r = phdr.p_filesz;
@@ -312,7 +321,7 @@ static uintptr_t object_load(elf_t * object, uintptr_t base) {
 			case PT_DYNAMIC:
 				{
 					/* Keep a reference to the dynamic section, which is actually loaded by a PT_LOAD normally. */
-					object->dynamic = (Elf32_Dyn *)(base + phdr.p_vaddr);
+					object->dynamic = (Elf64_Dyn *)(base + phdr.p_vaddr);
 				}
 				break;
 			default:
@@ -330,32 +339,32 @@ static int object_postload(elf_t * object) {
 
 	/* If there is a dynamic table, parse it. */
 	if (object->dynamic) {
-		Elf32_Dyn * table;
+		Elf64_Dyn * table;
 
 		/* Locate string tables */
 		table = object->dynamic;
 		while (table->d_tag) {
 			switch (table->d_tag) {
-				case 4:
-					object->dyn_hash = (Elf32_Word *)(object->base + table->d_un.d_ptr);
+				case DT_HASH:
+					object->dyn_hash = (Elf64_Word *)(object->base + table->d_un.d_ptr);
 					object->dyn_symbol_table_size = object->dyn_hash[1];
 					break;
-				case 5: /* Dynamic String Table */
+				case DT_STRTAB:
 					object->dyn_string_table = (char *)(object->base + table->d_un.d_ptr);
 					break;
-				case 6: /* Dynamic Symbol Table */
-					object->dyn_symbol_table = (Elf32_Sym *)(object->base + table->d_un.d_ptr);
+				case DT_SYMTAB:
+					object->dyn_symbol_table = (Elf64_Sym *)(object->base + table->d_un.d_ptr);
 					break;
-				case 10: /* Size of string table */
+				case DT_STRSZ: /* Size of string table */
 					object->dyn_string_table_size = table->d_un.d_val;
 					break;
-				case 12: /* DT_INIT - initialization function */
+				case DT_INIT: /* DT_INIT - initialization function */
 					object->init = (void (*)(void))(table->d_un.d_ptr + object->base);
 					break;
-				case 25: /* DT_INIT_ARRAY - array of constructors */
+				case DT_INIT_ARRAY: /* DT_INIT_ARRAY - array of constructors */
 					object->init_array = (void (**)(void))(table->d_un.d_ptr + object->base);
 					break;
-				case 27: /* DT_INIT_ARRAYSZ - size of the table of constructors */
+				case DT_INIT_ARRAYSZ: /* DT_INIT_ARRAYSZ - size of the table of constructors */
 					object->init_array_size = table->d_un.d_val / sizeof(uintptr_t);
 					break;
 			}
@@ -383,18 +392,33 @@ static int object_postload(elf_t * object) {
 }
 
 /* Whether symbol addresses is needed for a relocation type */
-static int need_symbol_for_type(unsigned char type) {
+static int need_symbol_for_type(unsigned int type) {
+#ifdef __x86_64__
 	switch(type) {
-		case 1:
-		case 2:
-		case 5:
-		case 6:
-		case 7:
-		case 14:
+		case R_X86_64_64:
+		case R_X86_64_PC32:
+		case R_X86_64_COPY:
+		case R_X86_64_GLOB_DAT:
+		case R_X86_64_JUMP_SLOT:
+		case R_X86_64_8:
+		case R_X86_64_TPOFF64:
 			return 1;
 		default:
 			return 0;
 	}
+#else
+	switch(type) {
+		case 1024:
+		case 1025:
+		case 1026:
+		case 1030:
+		case 257:
+			return 1;
+		default:
+			return 0;
+	}
+
+#endif
 }
 
 /* Apply ELF relocations */
@@ -402,15 +426,26 @@ static int object_relocate(elf_t * object) {
 
 	/* If there is a dynamic symbol table, load symbols */
 	if (object->dyn_symbol_table) {
-		Elf32_Sym * table = object->dyn_symbol_table;
+		Elf64_Sym * table = object->dyn_symbol_table;
 		size_t i = 0;
 		while (i < object->dyn_symbol_table_size) {
 			char * symname = (char *)((uintptr_t)object->dyn_string_table + table->st_name);
 
+			int is_tls = (table->st_info & 0xF) == 6;
+
 			/* If we haven't added this symbol to our symbol table, do so now. */
-			if (!hashmap_has(dumb_symbol_table, symname)) {
-				if (table->st_shndx) {
-					hashmap_set(dumb_symbol_table, symname, (void*)(table->st_value + object->base));
+			if (table->st_shndx) {
+				if (!hashmap_has(dumb_symbol_table, symname)) {
+					hashmap_set(dumb_symbol_table, symname, (void*)(table->st_value + (is_tls ? 0 : object->base)));
+					table->st_value = table->st_value + (is_tls ? 0 : object->base);
+				} else {
+					table->st_value = (uintptr_t)hashmap_get(dumb_symbol_table, symname);
+				}
+			} else {
+				if (hashmap_has(dumb_symbol_table, symname)) {
+					table->st_value = (uintptr_t)hashmap_get(dumb_symbol_table, symname);
+				} else {
+					table->st_value = table->st_value + (is_tls ? 0 : object->base);
 				}
 			}
 
@@ -421,22 +456,24 @@ static int object_relocate(elf_t * object) {
 
 	/* Find relocation table */
 	for (uintptr_t x = 0; x < object->header.e_shentsize * object->header.e_shnum; x += object->header.e_shentsize) {
-		Elf32_Shdr shdr;
+		Elf64_Shdr shdr;
 		/* Load section header */
 		fseek(object->file, object->header.e_shoff + x, SEEK_SET);
 		fread(&shdr, object->header.e_shentsize, 1, object->file);
 
 		/* Relocation table found */
-		if (shdr.sh_type == 9) {
-			Elf32_Rel * table = (Elf32_Rel *)(shdr.sh_addr + object->base);
+		if (shdr.sh_type == SHT_REL) {
+			TRACE_LD("Found a REL section, this is not handled.");
+		} else if (shdr.sh_type == SHT_RELA) {
+			Elf64_Rela * table = (Elf64_Rela *)(shdr.sh_addr + object->base);
 			while ((uintptr_t)table - ((uintptr_t)shdr.sh_addr + object->base) < shdr.sh_size) {
-				unsigned int  symbol = ELF32_R_SYM(table->r_info);
-				unsigned char type = ELF32_R_TYPE(table->r_info);
-				Elf32_Sym * sym = &object->dyn_symbol_table[symbol];
+				unsigned int symbol = ELF64_R_SYM(table->r_info);
+				unsigned int type = ELF64_R_TYPE(table->r_info);
+				Elf64_Sym * sym = &object->dyn_symbol_table[symbol];
 
 				/* If we need symbol for this, get it. */
 				char * symname = NULL;
-				uintptr_t x = sym->st_value + object->base;
+				uintptr_t x = sym->st_value;
 				if (need_symbol_for_type(type) || (type == 5)) {
 					symname = (char *)((uintptr_t)object->dyn_string_table + sym->st_name);
 					if (symname && hashmap_has(dumb_symbol_table, symname)) {
@@ -450,6 +487,85 @@ static int object_relocate(elf_t * object) {
 
 				/* Relocations, symbol lookups, etc. */
 				switch (type) {
+#if defined(__x86_64__)
+					case R_X86_64_GLOB_DAT: /* 6 */
+						if (symname && hashmap_has(glob_dat, symname)) {
+							x = (uintptr_t)hashmap_get(glob_dat, symname);
+						} /* fallthrough */
+					case R_X86_64_JUMP_SLOT: /* 7 */
+						memcpy((void*)(table->r_offset + object->base), &x, sizeof(uintptr_t));
+						break;
+					case R_X86_64_RELATIVE: /* 8*/
+						x = object->base;
+						x += table->r_addend;
+						//*((ssize_t *)(table->r_offset + object->base));
+						memcpy((void*)(table->r_offset + object->base), &x, sizeof(uintptr_t));
+						break;
+					case R_X86_64_64: /* 1 */
+						x += table->r_addend;
+						memcpy((void*)(table->r_offset + object->base), &x, sizeof(uintptr_t));
+						break;
+					case R_X86_64_COPY: /* 5 */
+						memcpy((void *)(table->r_offset + object->base), (void *)x, sym->st_size);
+						break;
+					case R_X86_64_TPOFF64:
+						x += *((ssize_t *)(table->r_offset + object->base));
+						if (!hashmap_has(tls_map, symname)) {
+							if (!sym->st_size) {
+								fprintf(stderr, "Haven't placed %s in static TLS yet but don't know its size?\n", symname);
+							}
+							x += current_tls_offset;
+							hashmap_set(tls_map, symname, (void*)(current_tls_offset));
+							current_tls_offset += sym->st_size; /* TODO alignment restrictions */
+						} else {
+							x += (size_t)hashmap_get(tls_map, symname);
+						}
+						memcpy((void *)(table->r_offset + object->base), &x, sizeof(uintptr_t));
+						break;
+					case R_X86_64_DTPMOD64:
+						break;
+					case R_X86_64_DTPOFF64:
+						break;
+#elif defined(__aarch64__)
+					case 1024: /* COPY */
+						memcpy((void *)(table->r_offset + object->base), (void *)x, sym->st_size);
+						break;
+					case 1025: /* GLOB_DAT */
+						if (symname && hashmap_has(glob_dat, symname)) {
+							x = (uintptr_t)hashmap_get(glob_dat, symname);
+						} /* fallthrough */
+					case 1026: /* JUMP_SLOT */
+						memcpy((void*)(table->r_offset + object->base), &x, sizeof(uintptr_t));
+						break;
+					case 1027: /* RELATIVE */
+						x = object->base;
+						x += table->r_addend;
+						memcpy((void*)(table->r_offset + object->base), &x, sizeof(uintptr_t));
+						break;
+					case 257: /* ABS64 */
+						x += table->r_addend;
+						memcpy((void*)(table->r_offset + object->base), &x, sizeof(uintptr_t));
+						break;
+					case 1030: /* TLS_TPREL64 TPREL(S+A) */
+						x += *((ssize_t *)(table->r_offset + object->base)); /* A */
+						if (!hashmap_has(tls_map, symname)) {
+							if (!sym->st_size) {
+								fprintf(stderr, "Haven't placed %s in static TLS yet but don't know its size?\n", symname);
+							}
+							x += current_tls_offset;
+							hashmap_set(tls_map, symname, (void*)(current_tls_offset));
+							current_tls_offset += sym->st_size; /* TODO alignment restrictions */
+						} else {
+							size_t val = (size_t)hashmap_get(tls_map, symname);
+							TRACE_LD("add %#zx to %zx\n", val, x);
+							x += val;
+						}
+						memcpy((void *)(table->r_offset + object->base), &x, sizeof(uintptr_t));
+						break;
+#else
+# error "unsupported"
+#endif
+#if 0
 					case 6: /* GLOB_DAT */
 						if (symname && hashmap_has(glob_dat, symname)) {
 							x = (uintptr_t)hashmap_get(glob_dat, symname);
@@ -488,8 +604,16 @@ static int object_relocate(elf_t * object) {
 						}
 						memcpy((void *)(table->r_offset + object->base), &x, sizeof(uintptr_t));
 						break;
+#endif
 					default:
+						{
+							char msg[200];
+							snprintf(msg, 200, "Unimplemented relocation (%d) requested, bailing.\n", type);
+							sysfunc(TOARU_SYS_FUNC_LOGHERE, (char**)msg);
+							exit(1);
+						}
 						TRACE_LD("Unknown relocation type: %d", type);
+						break;
 				}
 
 				table++;
@@ -504,18 +628,43 @@ static int object_relocate(elf_t * object) {
 static void object_find_copy_relocations(elf_t * object) {
 
 	for (uintptr_t x = 0; x < object->header.e_shentsize * object->header.e_shnum; x += object->header.e_shentsize) {
-		Elf32_Shdr shdr;
+		Elf64_Shdr shdr;
 		fseek(object->file, object->header.e_shoff + x, SEEK_SET);
 		fread(&shdr, object->header.e_shentsize, 1, object->file);
 
 		/* Relocation table found */
-		if (shdr.sh_type == 9) {
-			Elf32_Rel * table = (Elf32_Rel *)(shdr.sh_addr + object->base);
+		if (shdr.sh_type == SHT_REL) {
+			Elf64_Rel * table = (Elf64_Rel *)(shdr.sh_addr + object->base);
 			while ((uintptr_t)table - ((uintptr_t)shdr.sh_addr + object->base) < shdr.sh_size) {
-				unsigned char type = ELF32_R_TYPE(table->r_info);
-				if (type == 5) {
-					unsigned int  symbol = ELF32_R_SYM(table->r_info);
-					Elf32_Sym * sym = &object->dyn_symbol_table[symbol];
+				unsigned int type = ELF64_R_TYPE(table->r_info);
+#if defined(__x86_64__)
+				if (type == R_X86_64_COPY) {
+#elif defined(__aarch64__)
+				if (type == R_AARCH64_COPY) {
+#else
+# error "Unsupported"
+#endif
+					unsigned int  symbol = ELF64_R_SYM(table->r_info);
+					Elf64_Sym * sym = &object->dyn_symbol_table[symbol];
+					char * symname = (char *)((uintptr_t)object->dyn_string_table + sym->st_name);
+					hashmap_set(glob_dat, symname, (void *)table->r_offset);
+				}
+				table++;
+			}
+		}
+		if (shdr.sh_type == SHT_RELA) {
+			Elf64_Rela * table = (Elf64_Rela *)(shdr.sh_addr + object->base);
+			while ((uintptr_t)table - ((uintptr_t)shdr.sh_addr + object->base) < shdr.sh_size) {
+				unsigned int type = ELF64_R_TYPE(table->r_info);
+#if defined(__x86_64__)
+				if (type == R_X86_64_COPY) {
+#elif defined(__aarch64__)
+				if (type == R_AARCH64_COPY) {
+#else
+# error "Unsupported"
+#endif
+					unsigned int  symbol = ELF64_R_SYM(table->r_info);
+					Elf64_Sym * sym = &object->dyn_symbol_table[symbol];
 					char * symname = (char *)((uintptr_t)object->dyn_string_table + sym->st_name);
 					hashmap_set(glob_dat, symname, (void *)table->r_offset);
 				}
@@ -533,11 +682,11 @@ static void * object_find_symbol(elf_t * object, const char * symbol_name) {
 		return NULL;
 	}
 
-	Elf32_Sym * table = object->dyn_symbol_table;
+	Elf64_Sym * table = object->dyn_symbol_table;
 	size_t i = 0;
 	while (i < object->dyn_symbol_table_size) {
 		if (!strcmp(symbol_name, (char *)((uintptr_t)object->dyn_string_table + table->st_name))) {
-			return (void *)(table->st_value + object->base);
+			return (void *)(table->st_value);
 		}
 		table++;
 		i++;
@@ -569,7 +718,7 @@ static void * do_actual_load(const char * filename, elf_t * lib, int flags) {
 	 * This is where we should really be loading things into COW
 	 * but we don't have the functionality available.
 	 */
-	uintptr_t load_addr = (uintptr_t)malloc(lib_size);
+	uintptr_t load_addr = (uintptr_t)valloc(lib_size);
 	object_load(lib, load_addr);
 
 	/* Perform cleanup steps */
@@ -646,12 +795,10 @@ static elf_t * preload(hashmap_t * libs, list_t * load_libs, char * lib_name) {
 	/* Mark this library available */
 	hashmap_set(libs, lib_name, lib);
 
-	TRACE_LD("Loading %s at 0x%x", lib_name, end_addr);
-
 	/* Adjust dumb allocator */
-	while (end_addr & 0xFFF) {
-		end_addr++;
-	}
+	end_addr = (end_addr + 0xFFF) & ~(0xFFFUL);
+
+	TRACE_LD("Loading %s at 0x%x", lib_name, end_addr);
 
 	/* Load PHDRs */
 	end_addr = object_load(lib, end_addr);
@@ -721,6 +868,14 @@ static char * argv_value(void) {
 	return _argv_value;
 }
 
+static uintptr_t dl_symbol_table_ptr_addr(void) {
+	return (uintptr_t)&dumb_symbol_table;
+}
+
+static uintptr_t dl_objects_table_ptr_addr(void) {
+	return (uintptr_t)&objects_map;
+}
+
 /* Exported methods (dlfcn) */
 typedef struct {
 	char * name;
@@ -732,11 +887,12 @@ ld_exports_t ld_builtin_exports[] = {
 	{"dlclose", dlclose_ld},
 	{"dlerror", dlerror_ld},
 	{"__get_argv", argv_value},
+	{"__ld_symbol_table", dl_symbol_table_ptr_addr},
+	{"__ld_objects_table", dl_objects_table_ptr_addr},
 	{NULL, NULL},
 };
 
 int main(int argc, char * argv[]) {
-
 	if (argc < 2) {
 		fprintf(stderr,
 				"ld.so - dynamic binary loader\n"
@@ -760,12 +916,12 @@ int main(int argc, char * argv[]) {
 
 	/* Enable tracing if requested */
 	char * trace_ld_env = getenv("LD_DEBUG");
-	if ((trace_ld_env && (!strcmp(trace_ld_env,"1") || !strcmp(trace_ld_env,"yes")))) {
+	if (trace_ld_env && (!strcmp(trace_ld_env,"1") || !strcmp(trace_ld_env,"yes"))) {
 		__trace_ld = 1;
 	}
 
 	/* Initialize hashmaps for symbols, GLOB_DATs, and objects */
-	dumb_symbol_table = hashmap_create(10);
+	dumb_symbol_table = hashmap_create(100);
 	glob_dat = hashmap_create(10);
 	objects_map = hashmap_create(10);
 	tls_map = hashmap_create(10);
@@ -864,6 +1020,12 @@ nope:
 		end_addr++;
 	}
 
+	/* Move heap start (kind of like a weird sbrk) */
+	{
+		char * args[] = {(char*)end_addr};
+		sysfunc(TOARU_SYS_FUNC_SETHEAP, args);
+	}
+
 	/* Call constructors for loaded dependencies */
 	char * ld_no_ctors = getenv("LD_DISABLE_CTORS");
 	if (ld_no_ctors && (!strcmp(ld_no_ctors,"1") || !strcmp(ld_no_ctors,"yes"))) {
@@ -900,19 +1062,13 @@ nope:
 
 	main_obj->loaded = 1;
 
-	/* Move heap start (kind of like a weird sbrk) */
-	{
-		char * args[] = {(char*)end_addr};
-		sysfunc(TOARU_SYS_FUNC_SETHEAP, args);
-	}
-
 	/* Set heap functions for later usage */
 	if (hashmap_has(dumb_symbol_table, "malloc")) _malloc = hashmap_get(dumb_symbol_table, "malloc");
 	if (hashmap_has(dumb_symbol_table, "free")) _free = hashmap_get(dumb_symbol_table, "free");
 	_malloc_minimum = 0x40000000;
 
 	/* Jump to the entry for the main object */
-	TRACE_LD("Jumping to entry point");
+	TRACE_LD("Jumping to entry point 0x%lx", main_obj->header.e_entry);
 	entry_point_t entry = (entry_point_t)main_obj->header.e_entry;
 	entry(argc-arg_offset,argv+arg_offset,environ);
 

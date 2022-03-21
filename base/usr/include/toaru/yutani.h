@@ -1,11 +1,12 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
- * This file is part of ToaruOS and is released under the terms
- * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2014-2018 K. Lange
- *
- * Yutani Client Library
+/**
+ * @brief Yutani Client Library
  *
  * Client library for the compositing window system.
+ *
+ * @copyright
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2014-2021 K. Lange
  */
 #pragma once
 
@@ -79,6 +80,8 @@ typedef struct yutani_window {
 
 	/* Server context that owns this window */
 	yutani_t * ctx;
+
+	int32_t mouse_state;
 } yutani_window_t;
 
 typedef struct yutani_message {
@@ -121,6 +124,13 @@ struct yutani_msg_window_init {
 
 struct yutani_msg_window_move {
 	yutani_wid_t wid;
+	int32_t x;
+	int32_t y;
+};
+
+struct yutani_msg_window_move_relative {
+	yutani_wid_t wid_to_move;
+	yutani_wid_t wid_base;
 	int32_t x;
 	int32_t y;
 };
@@ -177,7 +187,10 @@ struct yutani_msg_window_resize {
 struct yutani_msg_window_advertise {
 	yutani_wid_t wid;
 	uint32_t flags; /* Types, focused, etc. */
-	uint16_t offsets[5]; /* Name, Icon, and three reserved slots */
+	uint32_t icon;  /* Icon offset in strings[] */
+	uint32_t bufid;
+	uint32_t width;
+	uint32_t height;
 	uint32_t size;
 	char strings[];
 };
@@ -268,6 +281,8 @@ struct yutani_msg_clipboard {
 #define YUTANI_MSG_RESIZE_BUFID        0x00000013
 #define YUTANI_MSG_RESIZE_DONE         0x00000014
 
+#define YUTANI_MSG_WINDOW_MOVE_RELATIVE 0x00000015
+
 /* Some session management / de stuff */
 #define YUTANI_MSG_WINDOW_ADVERTISE    0x00000020
 #define YUTANI_MSG_SUBSCRIBE           0x00000021
@@ -302,9 +317,11 @@ struct yutani_msg_clipboard {
  *
  * Specifies which stack set a window should appear in.
  */
-#define YUTANI_ZORDER_MAX    0xFFFF
-#define YUTANI_ZORDER_TOP    0xFFFF
-#define YUTANI_ZORDER_BOTTOM 0x0000
+#define YUTANI_ZORDER_MAX     0xFFFF
+#define YUTANI_ZORDER_TOP     0xFFFF
+#define YUTANI_ZORDER_MENU    0xFFFE
+#define YUTANI_ZORDER_OVERLAY 0xFFED
+#define YUTANI_ZORDER_BOTTOM  0x0000
 
 /*
  * YUTANI_MOUSE_BUTTON
@@ -448,6 +465,8 @@ struct yutani_msg_clipboard {
 #define YUTANI_CURSOR_TYPE_RESIZE_HORIZONTAL 4
 #define YUTANI_CURSOR_TYPE_RESIZE_UP_DOWN    5
 #define YUTANI_CURSOR_TYPE_RESIZE_DOWN_UP    6
+#define YUTANI_CURSOR_TYPE_POINT             7
+#define YUTANI_CURSOR_TYPE_IBEAM             8
 
 /*
  * YUTANI_WINDOW_FLAG
@@ -460,6 +479,7 @@ struct yutani_msg_clipboard {
 #define YUTANI_WINDOW_FLAG_DISALLOW_RESIZE  (1 << 2)
 #define YUTANI_WINDOW_FLAG_ALT_ANIMATION    (1 << 3)
 #define YUTANI_WINDOW_FLAG_DIALOG_ANIMATION (1 << 4)
+#define YUTANI_WINDOW_FLAG_NO_ANIMATION     (1 << 5)
 
 /* YUTANI_SPECIAL_REQUEST
  *
@@ -504,6 +524,7 @@ extern yutani_window_t * yutani_window_create(yutani_t * y, int width, int heigh
 extern yutani_window_t * yutani_window_create_flags(yutani_t * y, int width, int height, uint32_t flags);
 extern void yutani_flip(yutani_t * y, yutani_window_t * win);
 extern void yutani_window_move(yutani_t * yctx, yutani_window_t * window, int x, int y);
+extern void yutani_window_move_relative(yutani_t * yctx, yutani_window_t * window, yutani_window_t * base, int x, int y);
 extern void yutani_close(yutani_t * y, yutani_window_t * win);
 extern void yutani_set_stack(yutani_t *, yutani_window_t *, int);
 extern void yutani_flip_region(yutani_t *, yutani_window_t * win, int32_t x, int32_t y, int32_t width, int32_t height);

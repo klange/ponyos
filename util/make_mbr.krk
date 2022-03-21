@@ -1,0 +1,8 @@
+#!/usr/bin/env kuroko
+from util import ISO
+
+let image = ISO('image.iso')
+let cdfile = image.get_file('/boot.sys')
+
+print(f'--defsym BOOT_FILE_SIZE={cdfile.extent_length_lsb} --defsym BOOT_FILE_OFFSET={cdfile.extent_start_lsb * 2048}')
+

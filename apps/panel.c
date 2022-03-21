@@ -1,76 +1,54 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
+/**
+ * @file apps/panel.c
+ * @brief Panel with widgets. Main desktop interface.
+ *
+ * Provides the panel shown at the top of the screen, which
+ * presents application windows, useful widgets, and a menu
+ * for launching new apps.
+ *
+ * Also provides Alt-Tab app switching and a few other goodies.
+ *
+ * @copyright
  * This file is part of ToaruOS and is released under the terms
  * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2013-2018 K. Lange
- *
- * Yutani Panel
- *
- * Provides an applications menu, a window list, status widgets,
- * and a clock, manages the user session, and provides alt-tab
- * window switching and alt-f2 app runner.
- *
+ * Copyright (C) 2013-2021 K. Lange
  */
 #include <stdlib.h>
 #include <assert.h>
 #include <limits.h>
 #include <math.h>
 #include <time.h>
-#include <fcntl.h>
 #include <unistd.h>
 #include <signal.h>
+#include <pthread.h>
 #include <sys/time.h>
-#include <sys/utsname.h>
 #include <sys/wait.h>
-#include <sys/stat.h>
-#include <sys/ioctl.h>
 #include <sys/fswait.h>
+#include <sys/shm.h>
+
+/* auto-dep: export-dynamic */
+#include <dlfcn.h>
 
 #include <toaru/yutani.h>
+#include <toaru/yutani-internal.h>
 #include <toaru/graphics.h>
 #include <toaru/hashmap.h>
-#include <toaru/spinlock.h>
-#include <toaru/sdf.h>
 #include <toaru/icon_cache.h>
 #include <toaru/menu.h>
-#include <kernel/mod/sound.h>
+#include <toaru/text.h>
 
-#define PANEL_HEIGHT 28
-#define FONT_SIZE 14
-#define TIME_LEFT 108
-#define DATE_WIDTH 70
+/* Several theming defines are in here */
+#include <toaru/panel.h>
 
-#define GRADIENT_HEIGHT 24
-#define APP_OFFSET 140
-#define TEXT_Y_OFFSET 2
-#define ICON_PADDING 2
-#define MAX_TEXT_WIDTH 180
-#define MIN_TEXT_WIDTH 50
-
-#define HILIGHT_COLOR rgb(251,123,250)
-#define FOCUS_COLOR   rgb(255,255,255)
-#define TEXT_COLOR    rgb(230,230,230)
-#define ICON_COLOR    rgb(230,230,230)
-
-#define GRADIENT_AT(y) premultiply(rgba(255, 72, 254, ((24-(y))*160)/24))
-
+/* These are local to the core panel, so we don't need to put them in the header */
 #define ALTTAB_WIDTH  250
-#define ALTTAB_HEIGHT 100
+#define ALTTAB_HEIGHT 200
 #define ALTTAB_BACKGROUND premultiply(rgba(0,0,0,150))
 #define ALTTAB_OFFSET 10
+#define ALTTAB_WIN_SIZE 140
 
 #define ALTF2_WIDTH 400
 #define ALTF2_HEIGHT 200
-
-#define MAX_WINDOW_COUNT 100
-
-#define TOTAL_CELL_WIDTH (title_width)
-#define LEFT_BOUND (width - TIME_LEFT - DATE_WIDTH - ICON_PADDING - widgets_width)
-
-#define WIDGET_WIDTH 24
-#define WIDGET_RIGHT (width - TIME_LEFT - DATE_WIDTH)
-#define WIDGET_POSITION(i) (WIDGET_RIGHT - WIDGET_WIDTH * (i+1))
-
-static yutani_t * yctx;
 
 static gfx_context_t * ctx = NULL;
 static yutani_window_t * panel = NULL;
@@ -81,42 +59,54 @@ static yutani_window_t * alttab = NULL;
 static gfx_context_t * a2ctx = NULL;
 static yutani_window_t * alt_f2 = NULL;
 
-static list_t * window_list = NULL;
-static volatile int lock = 0;
-static volatile int drawlock = 0;
-
 static size_t bg_size;
 static char * bg_blob;
 
-static int width;
-static int height;
+/* External interface for widgets */
+list_t * window_list = NULL;
+yutani_t * yctx;
+int width;
+int height;
 
-static int widgets_width = 0;
-static int widgets_volume_enabled = 0;
-static int widgets_network_enabled = 0;
-static int widgets_weather_enabled = 0;
+struct TT_Font * font = NULL;
+struct TT_Font * font_bold = NULL;
+struct TT_Font * font_mono = NULL;
+struct TT_Font * font_mono_bold = NULL;
 
-static int network_status = 0;
+list_t * widgets_enabled = NULL;
 
-static sprite_t * sprite_panel;
-static sprite_t * sprite_logout;
+/* Windows, indexed by z-order */
+struct window_ad * ads_by_z[MAX_WINDOW_COUNT+1] = {NULL};
 
-static sprite_t * sprite_volume_mute;
-static sprite_t * sprite_volume_low;
-static sprite_t * sprite_volume_med;
-static sprite_t * sprite_volume_high;
+int focused_app = -1;
+int active_window = -1;
 
-static sprite_t * sprite_net_active;
-static sprite_t * sprite_net_disabled;
+static int was_tabbing = 0;
+static int new_focused = -1;
 
-struct MenuList * appmenu;
-struct MenuList * window_menu;
-struct MenuList * logout_menu;
-struct MenuList * netstat;
-struct MenuList * calmenu;
-struct MenuList * clockmenu;
-struct MenuList * weather;
-static yutani_wid_t _window_menu_wid = 0;
+static void widgets_layout(void);
+
+/**
+ * Clip text and add ellipsis to fit a specified display width.
+ */
+char * ellipsify(char * input, int font_size, struct TT_Font * font, int max_width, int * out_width) {
+	int len = strlen(input);
+	char * out = malloc(len + 4);
+	memcpy(out, input, len + 1);
+	int width;
+	tt_set_size(font, font_size);
+	while ((width = tt_string_width(font, out)) > max_width) {
+		len--;
+		out[len+0] = '.';
+		out[len+1] = '.';
+		out[len+2] = '.';
+		out[len+3] = '\0';
+	}
+
+	if (out_width) *out_width = width;
+
+	return out;
+}
 
 static int _close_enough(struct yutani_msg_window_mouse_event * me) {
 	if (me->command == YUTANI_MOUSE_EVENT_RAISE && sqrt(pow(me->new_x - me->old_x, 2) + pow(me->new_y - me->old_y, 2)) < 10) {
@@ -124,7 +114,6 @@ static int _close_enough(struct yutani_msg_window_mouse_event * me) {
 	}
 	return 0;
 }
-
 
 static int center_x(int x) {
 	return (width - x) / 2;
@@ -135,43 +124,14 @@ static int center_y(int y) {
 }
 
 static int center_x_a(int x) {
-	return (ALTTAB_WIDTH - x) / 2;
+	return (alttab->width - x) / 2;
 }
 
 static int center_x_a2(int x) {
 	return (ALTF2_WIDTH - x) / 2;
 }
 
-static void redraw(void);
-
 static volatile int _continue = 1;
-
-struct window_ad {
-	yutani_wid_t wid;
-	uint32_t flags;
-	char * name;
-	char * icon;
-	char * strings;
-	int left;
-};
-
-typedef struct {
-	char * icon;
-	char * appname;
-	char * title;
-} application_t;
-
-/* Windows, indexed by list order */
-static struct window_ad * ads_by_l[MAX_WINDOW_COUNT+1] = {NULL};
-/* Windows, indexed by z-order */
-static struct window_ad * ads_by_z[MAX_WINDOW_COUNT+1] = {NULL};
-
-static int focused_app = -1;
-static int active_window = -1;
-static int was_tabbing = 0;
-static int new_focused = -1;
-
-static int title_width = 0;
 
 static void toggle_hide_panel(void) {
 	static int panel_hidden = 0;
@@ -180,14 +140,14 @@ static void toggle_hide_panel(void) {
 		/* Unhide the panel */
 		for (int i = PANEL_HEIGHT-1; i >= 0; i--) {
 			yutani_window_move(yctx, panel, 0, -i);
-			usleep(10000);
+			usleep(3000);
 		}
 		panel_hidden = 0;
 	} else {
 		/* Hide the panel */
 		for (int i = 1; i <= PANEL_HEIGHT-1; i++) {
 			yutani_window_move(yctx, panel, 0, -i);
-			usleep(10000);
+			usleep(3000);
 		}
 		panel_hidden = 1;
 	}
@@ -200,7 +160,7 @@ static void sig_int(int sig) {
 	signal(SIGINT, sig_int);
 }
 
-static void launch_application(char * app) {
+void launch_application(char * app) {
 	if (!fork()) {
 		printf("Starting %s\n", app);
 		char * args[] = {"/bin/sh", "-c", app, NULL};
@@ -209,560 +169,46 @@ static void launch_application(char * app) {
 	}
 }
 
-/* Update the hover-focus window */
-static void set_focused(int i) {
-	if (focused_app != i) {
-		focused_app = i;
-		redraw();
-	}
-}
-
-static void _window_menu_start_move(struct MenuEntry * self) {
-	if (!_window_menu_wid)
-		return;
-	yutani_focus_window(yctx, _window_menu_wid);
-	yutani_window_drag_start_wid(yctx, _window_menu_wid);
-}
-
-static void _window_menu_start_maximize(struct MenuEntry * self) {
-	if (!_window_menu_wid)
-		return;
-	yutani_special_request_wid(yctx, _window_menu_wid, YUTANI_SPECIAL_REQUEST_MAXIMIZE);
-	yutani_focus_window(yctx, _window_menu_wid);
-}
-
-static void _window_menu_close(struct MenuEntry * self) {
-	if (!_window_menu_wid)
-		return;
-	yutani_focus_window(yctx, _window_menu_wid);
-	yutani_special_request_wid(yctx, _window_menu_wid, YUTANI_SPECIAL_REQUEST_PLEASE_CLOSE);
-}
-
-static void window_show_menu(yutani_wid_t wid, int y, int x) {
-	if (window_menu->window) return;
-	_window_menu_wid = wid;
-	menu_show(window_menu, yctx);
-	yutani_window_move(yctx, window_menu->window, y, x);
-}
-
-
-#define VOLUME_DEVICE_ID 0
-#define VOLUME_KNOB_ID   0
-static uint32_t volume_level = 0;
-static int mixer = -1;
-static void update_volume_level(void) {
-	if (mixer == -1) {
-		mixer = open("/dev/mixer", O_RDONLY);
-	}
-
-	snd_knob_value_t value = {0};
-	value.device = VOLUME_DEVICE_ID; /* TODO configure this somewhere */
-	value.id     = VOLUME_KNOB_ID;   /* TODO this too */
-
-	ioctl(mixer, SND_MIXER_READ_KNOB, &value);
-	volume_level = value.val;
-}
-static void volume_raise(void) {
-	if (volume_level > 0xE0000000) volume_level = 0xF0000000;
-	else volume_level += 0x10000000;
-
-	snd_knob_value_t value = {0};
-	value.device = VOLUME_DEVICE_ID; /* TODO configure this somewhere */
-	value.id     = VOLUME_KNOB_ID;   /* TODO this too */
-	value.val    = volume_level;
-
-	ioctl(mixer, SND_MIXER_WRITE_KNOB, &value);
-	redraw();
-}
-static void volume_lower(void) {
-	if (volume_level < 0x20000000) volume_level = 0x0;
-	else volume_level -= 0x10000000;
-
-	snd_knob_value_t value = {0};
-	value.device = VOLUME_DEVICE_ID; /* TODO configure this somewhere */
-	value.id     = VOLUME_KNOB_ID;   /* TODO this too */
-	value.val    = volume_level;
-
-	ioctl(mixer, SND_MIXER_WRITE_KNOB, &value);
-	redraw();
-}
-
-static int weather_left = 0;
-static struct MenuEntry_Normal * weather_title_entry;
-static struct MenuEntry_Normal * weather_updated_entry;
-static struct MenuEntry_Normal * weather_conditions_entry;
-static struct MenuEntry_Normal * weather_humidity_entry;
-static struct MenuEntry_Normal * weather_clouds_entry;
-static char * weather_title_str;
-static char * weather_updated_str;
-static char * weather_conditions_str;
-static char * weather_humidity_str;
-static char * weather_clouds_str;
-static char * weather_temp_str;
-static int weather_status_valid = 0;
-static hashmap_t * weather_icons = NULL;
-static sprite_t * weather_icon = NULL;
-
-static void update_weather_status(void) {
-	FILE * f = fopen("/tmp/weather-parsed.conf","r");
-	if (!f) {
-		weather_status_valid = 0;
-		if (widgets_weather_enabled) {
-			widgets_weather_enabled = 0;
-			/* Unshow */
-			widgets_width -= 2*WIDGET_WIDTH;
-		}
-		return;
-	}
-
-	weather_status_valid = 1;
-	if (!widgets_weather_enabled) {
-		widgets_weather_enabled = 1;
-		widgets_width += 2*WIDGET_WIDTH;
-	}
-
-	if (weather_title_str) free(weather_title_str);
-	if (weather_updated_str) free(weather_updated_str);
-	if (weather_conditions_str) free(weather_conditions_str);
-	if (weather_humidity_str) free(weather_humidity_str);
-	if (weather_clouds_str) free(weather_clouds_str);
-	if (weather_temp_str) free(weather_temp_str);
-
-	/* read the entire status file */
-	fseek(f, 0, SEEK_END);
-	size_t size = ftell(f);
-	fseek(f, 0, SEEK_SET);
-	char * data = malloc(size + 1);
-	fread(data, size, 1, f);
-	data[size] = 0;
-	fclose(f);
-
-	/* Find relevant pieces */
-	char * t = data;
-	char * temp = t;
-	t = strstr(t, "\n"); *t = '\0'; t++;
-	char * temp_r = t;
-	t = strstr(t, "\n"); *t = '\0'; t++;
-	char * conditions = t;
-	t = strstr(t, "\n"); *t = '\0'; t++;
-	char * icon = t;
-	t = strstr(t, "\n"); *t = '\0'; t++;
-	char * humidity = t;
-	t = strstr(t, "\n"); *t = '\0'; t++;
-	char * clouds = t;
-	t = strstr(t, "\n"); *t = '\0'; t++;
-	char * city = t;
-	t = strstr(t, "\n"); *t = '\0'; t++;
-	char * updated = t;
-
-	if (!weather_icons) {
-		weather_icons = hashmap_create(10);
-	}
-
-	if (!hashmap_has(weather_icons, icon)) {
-		sprite_t * tmp = malloc(sizeof(sprite_t));
-		char path[512];
-		sprintf(path,"/usr/share/icons/weather/%s.png", icon);
-		load_sprite(tmp, path);
-		hashmap_set(weather_icons, icon, tmp);
-	}
-
-	weather_icon = hashmap_get(weather_icons, icon);
-
-	char tmp[300];
-	sprintf(tmp, "Weather for %s", city);
-	weather_title_str = strdup(tmp);
-	sprintf(tmp, "%s", updated);
-	weather_updated_str = strdup(tmp);
-	sprintf(tmp, "%s° - %s", temp, conditions);
-	weather_conditions_str = strdup(tmp);
-	sprintf(tmp, "Humidity: %s%%", humidity);
-	weather_humidity_str = strdup(tmp);
-	sprintf(tmp, "Clouds: %s%%", clouds);
-	weather_clouds_str = strdup(tmp);
-
-	sprintf(tmp, "%s°", temp_r);
-	weather_temp_str = strdup(tmp);
-
-	free(data);
-}
-
-static int netstat_left = 0;
-
-static struct MenuEntry_Normal * netstat_ip_entry;
-static char * netstat_ip = NULL;
-static struct MenuEntry_Normal * netstat_device_entry;
-static char * netstat_device = NULL;
-static struct MenuEntry_Normal * netstat_gateway_entry;
-static char * netstat_gateway = NULL;
-static struct MenuEntry_Normal * netstat_dns_entry;
-static char * netstat_dns = NULL;
-static struct MenuEntry_Normal * netstat_mac_entry;
-static char * netstat_mac = NULL;
-
-static void update_network_status(void) {
-	FILE * net = fopen("/proc/netif","r");
-
-	if (!net) return;
-
-	char line[256];
-
-	do {
-		memset(line, 0, 256);
-		fgets(line, 256, net);
-		if (!*line) break;
-		if (strstr(line,"no network") != NULL) {
-			network_status = 0;
-			break;
-		} else if (strstr(line,"ip:") != NULL) {
-			network_status = 1;
-			if (netstat_ip) {
-				free(netstat_ip);
-			}
-			char tmp[512];
-			sprintf(tmp, "IP: %s", &line[strlen("ip: ")]);
-			char * lf = strstr(tmp,"\n");
-			if (lf) *lf = '\0';
-			netstat_ip = strdup(tmp);
-		} else if (strstr(line,"device:") != NULL) {
-			network_status = 1;
-			if (netstat_device) {
-				free(netstat_device);
-			}
-			char tmp[512];
-			sprintf(tmp, "Device: %s", &line[strlen("device: ")]);
-			char * lf = strstr(tmp,"\n");
-			if (lf) *lf = '\0';
-			netstat_device = strdup(tmp);
-		} else if (strstr(line,"gateway:") != NULL) {
-			network_status = 1;
-			if (netstat_gateway) {
-				free(netstat_gateway);
-			}
-			char tmp[512];
-			sprintf(tmp, "Gateway: %s", &line[strlen("gateway: ")]);
-			char * lf = strstr(tmp,"\n");
-			if (lf) *lf = '\0';
-			netstat_gateway = strdup(tmp);
-		} else if (strstr(line,"dns:") != NULL) {
-			network_status = 1;
-			if (netstat_dns) {
-				free(netstat_dns);
-			}
-			char tmp[512];
-			sprintf(tmp, "Primary DNS: %s", &line[strlen("dns: ")]);
-			char * lf = strstr(tmp,"\n");
-			if (lf) *lf = '\0';
-			netstat_dns = strdup(tmp);
-		} else if (strstr(line,"mac:") != NULL) {
-			network_status = 1;
-			if (netstat_mac) {
-				free(netstat_mac);
-			}
-			char tmp[512];
-			sprintf(tmp, "MAC: %s", &line[strlen("mac: ")]);
-			char * lf = strstr(tmp,"\n");
-			if (lf) *lf = '\0';
-			netstat_mac = strdup(tmp);
-		}
-	} while (1);
-
-	fclose(net);
-}
-
-static void show_logout_menu(void) {
-	if (!logout_menu->window) {
-		menu_show(logout_menu, yctx);
-		if (logout_menu->window) {
-			yutani_window_move(yctx, logout_menu->window, width - logout_menu->window->width, PANEL_HEIGHT);
-		}
-	}
-}
-
-static void show_app_menu(void) {
-	if (!appmenu->window) {
-		menu_show(appmenu, yctx);
-		if (appmenu->window) {
-			yutani_window_move(yctx, appmenu->window, 0, PANEL_HEIGHT);
-		}
-	}
-}
-
-static void show_cal_menu(void) {
-	if (!calmenu->window) {
-		menu_show(calmenu, yctx);
-		if (calmenu->window) {
-			yutani_window_move(yctx, calmenu->window, width - 24 - calmenu->window->width, PANEL_HEIGHT);
-		}
-	}
-}
-
-static void show_clock_menu(void) {
-	if (!clockmenu->window) {
-		menu_show(clockmenu, yctx);
-		if (clockmenu->window) {
-			yutani_window_move(yctx, clockmenu->window, width - 24 - clockmenu->window->width, PANEL_HEIGHT);
-		}
-	}
-}
-
-static void weather_refresh(struct MenuEntry * self) {
-	(void)self;
-	system("weather-tool &");
-}
-
-static void weather_configure(struct MenuEntry * self) {
-	(void)self;
-	system("terminal sh -c \"sudo weather-configurator; weather-tool\" &");
-}
-
-static void show_weather_status(void) {
-	if (!weather) {
-		weather = menu_create();
-		weather_title_entry = (struct MenuEntry_Normal *)menu_create_normal(NULL, NULL, "", NULL);
-		menu_insert(weather, weather_title_entry);
-		weather_updated_entry = (struct MenuEntry_Normal *)menu_create_normal(NULL, NULL, "", NULL);
-		menu_insert(weather, weather_updated_entry);
-		menu_insert(weather, menu_create_separator());
-		weather_conditions_entry = (struct MenuEntry_Normal *)menu_create_normal(NULL, NULL, "", NULL);
-		menu_insert(weather, weather_conditions_entry);
-		weather_humidity_entry = (struct MenuEntry_Normal *)menu_create_normal(NULL, NULL, "", NULL);
-		menu_insert(weather, weather_humidity_entry);
-		weather_clouds_entry = (struct MenuEntry_Normal *)menu_create_normal(NULL, NULL, "", NULL);
-		menu_insert(weather, weather_clouds_entry);
-		menu_insert(weather, menu_create_separator());
-		menu_insert(weather, menu_create_normal("refresh", NULL, "Refresh...", weather_refresh));
-		menu_insert(weather, menu_create_normal("config", NULL, "Configure...", weather_configure));
-		menu_insert(weather, menu_create_separator());
-		menu_insert(weather, menu_create_normal(NULL, NULL, "Weather data provided by", NULL));
-		menu_insert(weather, menu_create_normal(NULL, NULL, "OpenWeatherMap.org", NULL));
-	}
-	if (weather_status_valid) {
-		menu_update_title(weather_title_entry, weather_title_str);
-		menu_update_title(weather_updated_entry, weather_updated_str);
-		menu_update_title(weather_conditions_entry, weather_conditions_str);
-		menu_update_title(weather_humidity_entry, weather_humidity_str);
-		menu_update_title(weather_clouds_entry, weather_clouds_str);
-	}
-	if (!weather->window) {
-		menu_show(weather, yctx);
-		if (weather->window) {
-			if (weather_left + weather->window->width > (unsigned int)width) {
-				yutani_window_move(yctx, weather->window, width - weather->window->width, PANEL_HEIGHT);
-			} else {
-				yutani_window_move(yctx, weather->window, weather_left, PANEL_HEIGHT);
-			}
-		}
-	}
-}
-
-static void show_network_status(void) {
-	if (!netstat) {
-		netstat = menu_create();
-		menu_insert(netstat, menu_create_normal(NULL, NULL, "Network Status", NULL));
-		menu_insert(netstat, menu_create_separator());
-		netstat_ip_entry = (struct MenuEntry_Normal *)menu_create_normal(NULL, NULL, "", NULL);
-		menu_insert(netstat, netstat_ip_entry);
-		netstat_dns_entry = (struct MenuEntry_Normal *)menu_create_normal(NULL, NULL, "", NULL);
-		menu_insert(netstat, netstat_dns_entry);
-		netstat_gateway_entry = (struct MenuEntry_Normal *)menu_create_normal(NULL, NULL, "", NULL);
-		menu_insert(netstat, netstat_gateway_entry);
-		netstat_mac_entry = (struct MenuEntry_Normal *)menu_create_normal(NULL, NULL, "", NULL);
-		menu_insert(netstat, netstat_mac_entry);
-		netstat_device_entry = (struct MenuEntry_Normal *)menu_create_normal(NULL, NULL, "", NULL);
-		menu_insert(netstat, netstat_device_entry);
-	}
-	if (network_status) {
-		menu_update_title(netstat_ip_entry, netstat_ip);
-		menu_update_title(netstat_device_entry, netstat_device ? netstat_device : "(?)");
-		menu_update_title(netstat_dns_entry, netstat_dns ? netstat_dns : "(?)");
-		menu_update_title(netstat_gateway_entry, netstat_gateway ? netstat_gateway : "(?)");
-		menu_update_title(netstat_mac_entry, netstat_mac ? netstat_mac : "(?)");
-	} else {
-		menu_update_title(netstat_ip_entry, "No network.");
-		menu_update_title(netstat_device_entry, "");
-		menu_update_title(netstat_dns_entry, "");
-		menu_update_title(netstat_gateway_entry, "");
-		menu_update_title(netstat_mac_entry, "");
-	}
-	if (!netstat->window) {
-		menu_show(netstat, yctx);
-		if (netstat->window) {
-			if (netstat_left + netstat->window->width > (unsigned int)width) {
-				yutani_window_move(yctx, netstat->window, width - netstat->window->width, PANEL_HEIGHT);
-			} else {
-				yutani_window_move(yctx, netstat->window, netstat_left, PANEL_HEIGHT);
-			}
-		}
-	}
-}
-
 /* Callback for mouse events */
 static void panel_check_click(struct yutani_msg_window_mouse_event * evt) {
+	static struct PanelWidget * old_target = NULL;
+
 	if (evt->wid == panel->wid) {
-		if (evt->command == YUTANI_MOUSE_EVENT_CLICK || _close_enough(evt)) {
-			/* Up-down click */
-			if (evt->new_x >= width - 24 ) {
-				show_logout_menu();
-			} else if (evt->new_x < APP_OFFSET) {
-				show_app_menu();
-			} else if (evt->new_x >= width - TIME_LEFT) {
-				show_clock_menu();
-			} else if (evt->new_x >= width - TIME_LEFT - DATE_WIDTH) {
-				show_cal_menu();
-			} else if (evt->new_x >= APP_OFFSET && evt->new_x < LEFT_BOUND) {
-				for (int i = 0; i < MAX_WINDOW_COUNT; ++i) {
-					if (ads_by_l[i] == NULL) break;
-					if (evt->new_x >= ads_by_l[i]->left && evt->new_x < ads_by_l[i]->left + TOTAL_CELL_WIDTH) {
-						yutani_focus_window(yctx, ads_by_l[i]->wid);
-						break;
-					}
-				}
-			}
-			int widget = 0;
-			if (widgets_weather_enabled) {
-				if (evt->new_x > WIDGET_POSITION(widget+1) && evt->new_x < WIDGET_POSITION(widget-1)) {
-					weather_left = WIDGET_POSITION(widget);
-					show_weather_status();
-				}
-				widget += 2;
-			}
-			if (widgets_network_enabled) {
-				if (evt->new_x > WIDGET_POSITION(widget) && evt->new_x < WIDGET_POSITION(widget-1)) {
-					netstat_left = WIDGET_POSITION(widget);
-					show_network_status();
-				}
-				widget++;
-			}
-			if (widgets_volume_enabled) {
-				if (evt->new_x > WIDGET_POSITION(widget) && evt->new_x < WIDGET_POSITION(widget-1)) {
-					/* TODO: Show the volume manager */
-				}
-				widget++;
-			}
-		} else if (evt->buttons & YUTANI_MOUSE_BUTTON_RIGHT) {
-			if (evt->new_x >= APP_OFFSET && evt->new_x < LEFT_BOUND) {
-				for (int i = 0; i < MAX_WINDOW_COUNT; ++i) {
-					if (ads_by_l[i] == NULL) break;
-					if (evt->new_x >= ads_by_l[i]->left && evt->new_x < ads_by_l[i]->left + TOTAL_CELL_WIDTH) {
-						window_show_menu(ads_by_l[i]->wid, evt->new_x, PANEL_HEIGHT);
-					}
-				}
-			}
-		} else if (evt->command == YUTANI_MOUSE_EVENT_MOVE || evt->command == YUTANI_MOUSE_EVENT_ENTER) {
-			/* Movement, or mouse entered window */
-			if (evt->new_y < PANEL_HEIGHT) {
-				for (int i = 0; i < MAX_WINDOW_COUNT; ++i) {
-					if (ads_by_l[i] == NULL) {
-						set_focused(-1);
-						break;
-					}
-					if (evt->new_x >= ads_by_l[i]->left && evt->new_x < ads_by_l[i]->left + TOTAL_CELL_WIDTH) {
-						set_focused(i);
-						break;
-					}
-				}
-			} else {
-				set_focused(-1);
-			}
 
-			int scroll_direction = 0;
-			if (evt->buttons & YUTANI_MOUSE_SCROLL_UP) scroll_direction = -1;
-			else if (evt->buttons & YUTANI_MOUSE_SCROLL_DOWN) scroll_direction = 1;
-
-			if (scroll_direction) {
-				int widget = 0;
-				if (widgets_weather_enabled) {
-					if (evt->new_x > WIDGET_POSITION(widget+1) && evt->new_x < WIDGET_POSITION(widget-1)) {
-						/* Ignore */
-					}
-					widget += 2;
-				}
-				if (widgets_network_enabled) {
-					if (evt->new_x > WIDGET_POSITION(widget) && evt->new_x < WIDGET_POSITION(widget-1)) {
-						/* Ignore */
-					}
-					widget++;
-				}
-				if (widgets_volume_enabled) {
-					if (evt->new_x > WIDGET_POSITION(widget) && evt->new_x < WIDGET_POSITION(widget-1)) {
-						if (scroll_direction == 1) {
-							volume_lower();
-						} else if (scroll_direction == -1) {
-							volume_raise();
-						}
-					}
-					widget++;
-				}
-				if (evt->new_x >= APP_OFFSET && evt->new_x < LEFT_BOUND) {
-					if (scroll_direction != 0) {
-						struct window_ad * last = window_list->tail ? window_list->tail->value : NULL;
-						int focus_next = 0;
-						foreach(node, window_list) {
-							struct window_ad * ad = node->value;
-							if (focus_next) {
-								yutani_focus_window(yctx, ad->wid);
-								return;
-							}
-							if (ad->flags & 1) {
-								if (scroll_direction == -1) {
-									yutani_focus_window(yctx, last->wid);
-									return;
-								}
-								if (scroll_direction == 1) {
-									focus_next = 1;
-								}
-							}
-							last = ad;
-						}
-						if (focus_next && window_list->head) {
-							struct window_ad * ad = window_list->head->value;
-							yutani_focus_window(yctx, ad->wid);
-							return;
-						}
-					}
+		/* Figure out what widget this belongs to */
+		struct PanelWidget * target = NULL;
+		if (evt->new_y >= Y_PAD && evt->new_y < PANEL_HEIGHT - Y_PAD) {
+			foreach(widget_node, widgets_enabled) {
+				struct PanelWidget * widget = widget_node->value;
+				if (evt->new_x >= widget->left && evt->new_x < widget->left + widget->width) {
+					target = widget;
+					break;
 				}
 			}
-		} else if (evt->command == YUTANI_MOUSE_EVENT_LEAVE) {
-			/* Mouse left panel window */
-			set_focused(-1);
 		}
+
+		int needs_redraw = 0;
+
+		if (evt->command == YUTANI_MOUSE_EVENT_CLICK || _close_enough(evt)) {
+			if (target) needs_redraw |= target->click(target, evt);
+		} else if (evt->buttons & YUTANI_MOUSE_BUTTON_RIGHT) {
+			if (target) needs_redraw |= target->right_click(target, evt);
+		} else if (evt->command == YUTANI_MOUSE_EVENT_MOVE || evt->command == YUTANI_MOUSE_EVENT_ENTER) {
+			if (old_target && target != old_target) needs_redraw |= old_target->leave(old_target, evt);
+			if (target && target != old_target) needs_redraw |= target->enter(target, evt);
+			if (target) needs_redraw |= target->move(target, evt);
+			old_target = target;
+		} else if (evt->command == YUTANI_MOUSE_EVENT_LEAVE) {
+			if (old_target) needs_redraw |= old_target->leave(old_target, evt);
+			old_target = NULL;
+		}
+
+		if (needs_redraw) redraw();
 	}
 }
 
 static char altf2_buffer[1024] = {0};
 static unsigned int altf2_collected = 0;
-
-#if 0
-static list_t * altf2_apps = NULL;
-
-struct altf2_app {
-	char * name;
-	sprite_t * icon;
-};
-
-static sprite_t * find_icon(char * name) {
-	struct {
-		char * name;
-		char * icon;
-	} special[] = {
-		{"about", "star"},
-		{"help-browser", "help"},
-		{"terminal", "utilities-terminal"},
-		{NULL,NULL},
-	};
-
-	int i = 0;
-	while (special[i].name) {
-		if (!strcmp(special[i].name, name)) {
-			return icon_get_48(special[i].icon);
-		}
-		i++;
-	}
-
-	return icon_get_48(name);
-}
-#endif
 
 static void close_altf2(void) {
 	free(a2ctx->backbuffer);
@@ -776,70 +222,167 @@ static void close_altf2(void) {
 }
 
 static void redraw_altf2(void) {
-
-#if 0
-	if (!altf2_apps) {
-		/* initialize */
-
-	}
-#endif
-
 	draw_fill(a2ctx, 0);
-	draw_rounded_rectangle(a2ctx,0,0, ALTF2_WIDTH, ALTF2_HEIGHT, 10, ALTTAB_BACKGROUND);
+	draw_rounded_rectangle(a2ctx,0,0, ALTF2_WIDTH, ALTF2_HEIGHT, 11, premultiply(rgba(120,120,120,150)));
+	draw_rounded_rectangle(a2ctx,1,1, ALTF2_WIDTH-2, ALTF2_HEIGHT-2, 10, ALTTAB_BACKGROUND);
 
-	int t = draw_sdf_string_width(altf2_buffer, 22, SDF_FONT_THIN);
-	draw_sdf_string(a2ctx, center_x_a2(t), 60, altf2_buffer, 22, rgb(255,255,255), SDF_FONT_THIN);
+	tt_set_size(font, 20);
+	int t = tt_string_width(font, altf2_buffer);
+	tt_draw_string(a2ctx, font, center_x_a2(t), 80, altf2_buffer, rgb(255,255,255));
 
 	flip(a2ctx);
 	yutani_flip(yctx, alt_f2);
 }
 
 static void redraw_alttab(void) {
+	if (!actx) return;
+	while (new_focused > -1 && !ads_by_z[new_focused]) {
+		new_focused--;
+	}
+	if (new_focused == -1) {
+		/* Stop tabbing */
+		was_tabbing = 0;
+		free(actx->backbuffer);
+		free(actx);
+		actx = NULL;
+		yutani_close(yctx, alttab);
+		return;
+	}
+
+	/* How many windows do we have? */
+	unsigned int window_count = 0;
+	while (ads_by_z[window_count]) window_count++;
+
+#define ALTTAB_COLUMNS 5
+
+	/* How many rows should that be? */
+	int rows = (window_count - 1) / ALTTAB_COLUMNS + 1;
+
+	/* How many columns? */
+	int columns = (rows == 1) ? window_count : ALTTAB_COLUMNS;
+
+	/* How much padding on the last row? */
+	int last_row = (window_count % columns) ? ((ALTTAB_WIN_SIZE + 20) * (columns - (window_count % columns))) / 2  : 0;
+
+	/* Is the window the right size? */
+	unsigned int expected_width = columns * (ALTTAB_WIN_SIZE + 20) + 40;
+	unsigned int expected_height = rows * (ALTTAB_WIN_SIZE + 20) + 60;
+
+	if (alttab->width != expected_width || alttab->height != expected_height) {
+		yutani_window_resize(yctx, alttab, expected_width, expected_height);
+		return;
+	}
+
 	/* Draw the background, right now just a dark semi-transparent box */
 	draw_fill(actx, 0);
-	draw_rounded_rectangle(actx,0,0, ALTTAB_WIDTH, ALTTAB_HEIGHT, 10, ALTTAB_BACKGROUND);
+	draw_rounded_rectangle(actx,0,0, alttab->width, alttab->height, 11, premultiply(rgba(120,120,120,150)));
+	draw_rounded_rectangle(actx,1,1, alttab->width-2, alttab->height-2, 10, ALTTAB_BACKGROUND);
 
-	if (ads_by_z[new_focused]) {
-		struct window_ad * ad = ads_by_z[new_focused];
+	for (unsigned int i = 0; i < window_count; ++i) {
+		if (!ads_by_z[i]) continue;
+		struct window_ad * ad = ads_by_z[i];
 
-		sprite_t * icon = icon_get_48(ad->icon);
+		/* Figure out grid alignment for this element */
+		int pos_x = ((window_count - i - 1) % ALTTAB_COLUMNS) * (ALTTAB_WIN_SIZE + 20) + 20;
+		int pos_y = ((window_count - i - 1) / ALTTAB_COLUMNS) * (ALTTAB_WIN_SIZE + 20) + 20;
 
-		/* Draw it, scaled if necessary */
-		if (icon->width == 48) {
-			draw_sprite(actx, icon, center_x_a(48), ALTTAB_OFFSET);
-		} else {
-			draw_sprite_scaled(actx, icon, center_x_a(48), ALTTAB_OFFSET, 48, 48);
+		if ((window_count - i - 1) / ALTTAB_COLUMNS == (unsigned int)rows - 1) {
+			pos_x += last_row;
 		}
 
-		int t = draw_sdf_string_width(ad->name, 18, SDF_FONT_THIN);
+		if (i == (unsigned int)new_focused) {
+			draw_rounded_rectangle(actx, pos_x, pos_y, ALTTAB_WIN_SIZE + 20, ALTTAB_WIN_SIZE + 20, 7, premultiply(rgba(170,170,170,150)));
+		}
 
-		draw_sdf_string(actx, center_x_a(t), 12+ALTTAB_OFFSET+40, ad->name, 18, rgb(255,255,255), SDF_FONT_THIN);
+		/* try very hard to get a window texture */
+		char key[1024];
+		YUTANI_SHMKEY_EXP(yctx->server_ident, key, 1024, ad->bufid);
+		size_t size;
+		uint32_t * buf =  shm_obtain(key, &size);
+
+		if (buf) {
+			sprite_t tmp;
+			tmp.width = ad->width;
+			tmp.height = ad->height;
+			tmp.bitmap = buf;
+
+			int ox = 0;
+			int oy = 0;
+			int sw, sh;
+			if (tmp.width > tmp.height) {
+				sw = ALTTAB_WIN_SIZE;
+				sh = tmp.height * ALTTAB_WIN_SIZE / tmp.width;
+				oy = (ALTTAB_WIN_SIZE - sh) / 2;
+			} else {
+				sh = ALTTAB_WIN_SIZE;
+				sw = tmp.width * ALTTAB_WIN_SIZE / tmp.height;
+				ox = (ALTTAB_WIN_SIZE - sw) / 2;
+			}
+			draw_sprite_scaled(actx, &tmp,
+				pos_x + ox + 10,
+				pos_y + oy + 10,
+				sw, sh);
+
+			shm_release(key);
+
+			sprite_t * icon = icon_get_48(ad->icon);
+			draw_sprite(actx, icon, pos_x + 10 + ALTTAB_WIN_SIZE - 50, pos_y + 10 + ALTTAB_WIN_SIZE - 50);
+		} else {
+			sprite_t * icon = icon_get_48(ad->icon);
+			draw_sprite(actx, icon, pos_x + 10 + (ALTTAB_WIN_SIZE - 48) / 2, pos_y + 10 + (ALTTAB_WIN_SIZE - 48) / 2);
+		}
+
+	}
+
+	{
+		struct window_ad * ad = ads_by_z[new_focused];
+		int t;
+		char * title = ellipsify(ad->name, 16, font, alttab->width - 20, &t);
+		tt_set_size(font, 16);
+		tt_draw_string(actx, font, center_x_a(t), rows * (ALTTAB_WIN_SIZE + 20) + 44, title, rgb(255,255,255));
+		free(title);
 	}
 
 	flip(actx);
+	yutani_window_move(yctx, alttab, center_x(alttab->width), center_y(alttab->height));
 	yutani_flip(yctx, alttab);
 }
 
-static void launch_application_menu(struct MenuEntry * self) {
+static pthread_t _waiter_thread;
+static void * logout_prompt_waiter(void * arg) {
+	if (system("showdialog \"Log Out\" /usr/share/icons/48/exit.png \"Are you sure you want to log out?\"") == 0) {
+		yutani_session_end(yctx);
+		_continue = 0;
+	}
+	return NULL;
+}
+
+void launch_application_menu(struct MenuEntry * self) {
 	struct MenuEntry_Normal * _self = (void *)self;
 
 	if (!strcmp((char *)_self->action,"log-out")) {
-		if (system("showdialog \"Log Out\" /usr/share/icons/48/exit.png \"Are you sure you want to log out?\"") == 0) {
-			yutani_session_end(yctx);
-			_continue = 0;
-		}
+		/* Spin off a thread for this */
+		pthread_create(&_waiter_thread, NULL, logout_prompt_waiter, NULL);
 	} else {
 		launch_application((char *)_self->action);
 	}
 }
 
 static void handle_key_event(struct yutani_msg_key_event * ke) {
+	/**
+	 * Is the Alt+F2 command entry window open?
+	 * Then we should capture all typing and use
+	 * direct it to the 'input box'.
+	 */
 	if (alt_f2 && ke->wid == alt_f2->wid) {
 		if (ke->event.action == KEY_ACTION_DOWN) {
+			/* Escape = cancel */
 			if (ke->event.keycode == KEY_ESCAPE) {
 				close_altf2();
 				return;
 			}
+
+			/* Backspace */
 			if (ke->event.key == '\b') {
 				if (altf2_collected) {
 					altf2_buffer[altf2_collected-1] = '\0';
@@ -848,12 +391,16 @@ static void handle_key_event(struct yutani_msg_key_event * ke) {
 				}
 				return;
 			}
+
+			/* Enter */
 			if (ke->event.key == '\n') {
 				/* execute */
 				launch_application(altf2_buffer);
 				close_altf2();
 				return;
 			}
+
+			/* Some other key */
 			if (!ke->event.key) {
 				return;
 			}
@@ -868,6 +415,7 @@ static void handle_key_event(struct yutani_msg_key_event * ke) {
 		}
 	}
 
+	/* Ctrl-Alt-T = Open a new terminal */
 	if ((ke->event.modifiers & KEY_MOD_LEFT_CTRL) &&
 		(ke->event.modifiers & KEY_MOD_LEFT_ALT) &&
 		(ke->event.keycode == 't') &&
@@ -877,6 +425,7 @@ static void handle_key_event(struct yutani_msg_key_event * ke) {
 		return;
 	}
 
+	/* Ctrl-F11 = Toggle visibility of the panel */
 	if ((ke->event.modifiers & KEY_MOD_LEFT_CTRL) &&
 		(ke->event.keycode == KEY_F11) &&
 		(ke->event.action == KEY_ACTION_DOWN)) {
@@ -886,13 +435,7 @@ static void handle_key_event(struct yutani_msg_key_event * ke) {
 		return;
 	}
 
-	if ((ke->event.modifiers & KEY_MOD_LEFT_ALT) &&
-		(ke->event.keycode == KEY_F1) &&
-		(ke->event.action == KEY_ACTION_DOWN)) {
-		/* show menu */
-		show_app_menu();
-	}
-
+	/* Alt-F2 = Show the command entry window */
 	if ((ke->event.modifiers & KEY_MOD_LEFT_ALT) &&
 		(ke->event.keycode == KEY_F2) &&
 		(ke->event.action == KEY_ACTION_DOWN)) {
@@ -905,17 +448,13 @@ static void handle_key_event(struct yutani_msg_key_event * ke) {
 		}
 	}
 
-	if ((ke->event.modifiers & KEY_MOD_LEFT_ALT) &&
-		(ke->event.keycode == KEY_F3) &&
-		(ke->event.action == KEY_ACTION_DOWN)) {
-		for (int i = 0; i < MAX_WINDOW_COUNT; ++i) {
-			if (ads_by_l[i] == NULL) break;
-			if (ads_by_l[i]->flags & 1) {
-				window_show_menu(ads_by_l[i]->wid, ads_by_l[i]->left, PANEL_HEIGHT);
-			}
-		}
+	/* Maybe a plugin wants to handle this key bind */
+	foreach(widget_node, widgets_enabled) {
+		struct PanelWidget * widget = widget_node->value;
+		widget->onkey(widget, ke);
 	}
 
+	/* Releasing Alt when the Alt-Tab switcher is visible */
 	if ((was_tabbing) && (ke->event.keycode == 0 || ke->event.keycode == KEY_LEFT_ALT) &&
 		(ke->event.modifiers == 0) && (ke->event.action == KEY_ACTION_UP)) {
 
@@ -931,34 +470,40 @@ static void handle_key_event(struct yutani_msg_key_event * ke) {
 
 		free(actx->backbuffer);
 		free(actx);
+		actx = NULL;
 
 		yutani_close(yctx, alttab);
 
 		return;
 	}
 
+	/* Alt-Tab = Switch windows */
 	if ((ke->event.modifiers & KEY_MOD_LEFT_ALT) &&
 		(ke->event.keycode == '\t') &&
 		(ke->event.action == KEY_ACTION_DOWN)) {
 
+		/* Alt-Tab and Alt-Shift-Tab should go in alternate directions */
 		int direction = (ke->event.modifiers & KEY_MOD_LEFT_SHIFT) ? 1 : -1;
 
+		/* Are there no windows to switch? */
 		if (window_list->length < 1) return;
 
+		/* Figure out the new focused window */
 		if (was_tabbing) {
 			new_focused = new_focused + direction;
 		} else {
 			new_focused = active_window + direction;
 			/* Create tab window */
-			alttab = yutani_window_create(yctx, ALTTAB_WIDTH, ALTTAB_HEIGHT);
+			alttab = yutani_window_create_flags(yctx, ALTTAB_WIDTH, ALTTAB_HEIGHT,
+				YUTANI_WINDOW_FLAG_NO_STEAL_FOCUS | YUTANI_WINDOW_FLAG_NO_ANIMATION);
 
-			/* Center window */
-			yutani_window_move(yctx, alttab, center_x(ALTTAB_WIDTH), center_y(ALTTAB_HEIGHT));
+			yutani_set_stack(yctx, alttab, YUTANI_ZORDER_OVERLAY);
 
 			/* Initialize graphics context against the window */
 			actx = init_graphics_yutani_double_buffer(alttab);
 		}
 
+		/* Handle wraparound */
 		if (new_focused < 0) {
 			new_focused = 0;
 			for (int i = 0; i < MAX_WINDOW_COUNT; i++) {
@@ -968,212 +513,39 @@ static void handle_key_event(struct yutani_msg_key_event * ke) {
 				}
 			}
 		} else if (ads_by_z[new_focused] == NULL) {
-			new_focused = 0;
+			if (ads_by_z[0]) {
+				new_focused = 0;
+			} else {
+				new_focused = -1;
+			}
 		}
 
 		was_tabbing = 1;
-
 		redraw_alttab();
 	}
-
 }
 
-static void redraw(void) {
-	spin_lock(&drawlock);
-
-	struct timeval now;
-	struct tm * timeinfo;
-	char   buffer[80];
-
-	uint32_t txt_color = TEXT_COLOR;
-	int t = 0;
-
-	/* Redraw the background */
+void redraw(void) {
 	memcpy(ctx->backbuffer, bg_blob, bg_size);
 
-	/* Get the current time for the clock */
-	gettimeofday(&now, NULL);
-	timeinfo = localtime((time_t *)&now.tv_sec);
-
-	/* Hours : Minutes : Seconds */
-	strftime(buffer, 80, "%H:%M:%S", timeinfo);
-	draw_sdf_string(ctx, width - TIME_LEFT, 3, buffer, 20, clockmenu->window ? HILIGHT_COLOR : txt_color, SDF_FONT_THIN);
-
-	/* Day-of-week */
-	strftime(buffer, 80, "%A", timeinfo);
-	t = draw_sdf_string_width(buffer, 12, SDF_FONT_THIN);
-	t = (DATE_WIDTH - t) / 2;
-	draw_sdf_string(ctx, width - TIME_LEFT - DATE_WIDTH + t, 2, buffer, 12, calmenu->window ? HILIGHT_COLOR : txt_color, SDF_FONT_THIN);
-
-	/* Month Day */
-	strftime(buffer, 80, "%h %e", timeinfo);
-	t = draw_sdf_string_width(buffer, 12, SDF_FONT_BOLD);
-	t = (DATE_WIDTH - t) / 2;
-	draw_sdf_string(ctx, width - TIME_LEFT - DATE_WIDTH + t, 12, buffer, 12, calmenu->window ? HILIGHT_COLOR : txt_color, SDF_FONT_BOLD);
-
-	/* Applications menu */
-	draw_sdf_string(ctx, 8, 3, "Applications", 20, appmenu->window ? HILIGHT_COLOR : txt_color, SDF_FONT_THIN);
-
-	/* Draw each widget */
-	int widget = 0;
-	/* Weather */
-	if (widgets_weather_enabled) {
-		uint32_t color = (weather && weather->window) ? HILIGHT_COLOR : ICON_COLOR;
-		int t = draw_sdf_string_width(weather_temp_str, 15, SDF_FONT_THIN);
-		draw_sdf_string(ctx, WIDGET_POSITION(widget) + (WIDGET_WIDTH - t) / 2, 5, weather_temp_str, 15, color, SDF_FONT_THIN);
-		draw_sprite_alpha_paint(ctx, weather_icon, WIDGET_POSITION(widget+1), 0, 1.0, color);
-		widget += 2;
+	foreach(widget_node, widgets_enabled) {
+		struct PanelWidget * widget = widget_node->value;
+		gfx_context_t * inner = init_graphics_subregion(ctx, widget->left, Y_PAD, widget->width, PANEL_HEIGHT - Y_PAD * 2);
+		widget->draw(widget, inner);
+		free(inner);
 	}
-	/* - Network */
-	if (widgets_network_enabled) {
-		uint32_t color = (netstat && netstat->window) ? HILIGHT_COLOR : ICON_COLOR;
-		if (network_status == 1) {
-			draw_sprite_alpha_paint(ctx, sprite_net_active, WIDGET_POSITION(widget), 0, 1.0, color);
-		} else {
-			draw_sprite_alpha_paint(ctx, sprite_net_disabled, WIDGET_POSITION(widget), 0, 1.0, color);
-		}
-		widget++;
-	}
-	/* - Volume */
-	if (widgets_volume_enabled) {
-		if (volume_level < 10) {
-			draw_sprite_alpha_paint(ctx, sprite_volume_mute, WIDGET_POSITION(widget), 0, 1.0, ICON_COLOR);
-		} else if (volume_level < 0x547ae147) {
-			draw_sprite_alpha_paint(ctx, sprite_volume_low, WIDGET_POSITION(widget), 0, 1.0, ICON_COLOR);
-		} else if (volume_level < 0xa8f5c28e) {
-			draw_sprite_alpha_paint(ctx, sprite_volume_med, WIDGET_POSITION(widget), 0, 1.0, ICON_COLOR);
-		} else {
-			draw_sprite_alpha_paint(ctx, sprite_volume_high, WIDGET_POSITION(widget), 0, 1.0, ICON_COLOR);
-		}
-		widget++;
-	}
-
-	/* Now draw the window list */
-	int i = 0, j = 0;
-	spin_lock(&lock);
-	if (window_list) {
-		foreach(node, window_list) {
-			struct window_ad * ad = node->value;
-			char * s = "";
-			char tmp_title[50];
-			int w = 0;
-
-			if (APP_OFFSET + i + w > LEFT_BOUND) {
-				break;
-			}
-
-			if (title_width > MIN_TEXT_WIDTH) {
-
-				memset(tmp_title, 0x0, 50);
-				int t_l = strlen(ad->name);
-				if (t_l > 45) {
-					t_l = 45;
-				}
-				for (int i = 0; i < t_l;  ++i) {
-					tmp_title[i] = ad->name[i];
-					if (!ad->name[i]) break;
-				}
-
-				while (draw_sdf_string_width(tmp_title, 16, SDF_FONT_THIN) > title_width - ICON_PADDING) {
-					t_l--;
-					tmp_title[t_l] = '.';
-					tmp_title[t_l+1] = '.';
-					tmp_title[t_l+2] = '.';
-					tmp_title[t_l+3] = '\0';
-				}
-				w += title_width;
-
-				s = tmp_title;
-			}
-
-			/* Hilight the focused window */
-			if (ad->flags & 1) {
-				/* This is the focused window */
-				for (int y = 0; y < GRADIENT_HEIGHT; ++y) {
-					for (int x = APP_OFFSET + i; x < APP_OFFSET + i + w; ++x) {
-						GFX(ctx, x, y) = alpha_blend_rgba(GFX(ctx, x, y), GRADIENT_AT(y));
-					}
-				}
-			}
-
-			/* Get the icon for this window */
-			sprite_t * icon = icon_get_48(ad->icon);
-
-			{
-				sprite_t * _tmp_s = create_sprite(48, PANEL_HEIGHT-2, ALPHA_EMBEDDED);
-				gfx_context_t * _tmp = init_graphics_sprite(_tmp_s);
-
-				draw_fill(_tmp, rgba(0,0,0,0));
-				/* Draw it, scaled if necessary */
-				if (icon->width == 48) {
-					draw_sprite(_tmp, icon, 0, 0);
-				} else {
-					draw_sprite_scaled(_tmp, icon, 0, 0, 48, 48);
-				}
-
-				free(_tmp);
-				draw_sprite_alpha(ctx, _tmp_s, APP_OFFSET + i + w - 48 - 2, 0, 0.7);
-				sprite_free(_tmp_s);
-			}
-
-
-			{
-				sprite_t * _tmp_s = create_sprite(w, PANEL_HEIGHT, ALPHA_EMBEDDED);
-				gfx_context_t * _tmp = init_graphics_sprite(_tmp_s);
-
-				draw_fill(_tmp, rgba(0,0,0,0));
-				draw_sdf_string(_tmp, 0, 0, s, 16, rgb(0,0,0), SDF_FONT_THIN);
-				blur_context_box(_tmp, 4);
-
-				free(_tmp);
-				draw_sprite(ctx, _tmp_s, APP_OFFSET + i + 2, TEXT_Y_OFFSET + 2);
-				sprite_free(_tmp_s);
-
-			}
-
-			if (title_width > MIN_TEXT_WIDTH) {
-				/* Then draw the window title, with appropriate color */
-				if (j == focused_app) {
-					/* Current hilighted - title should be a light blue */
-					draw_sdf_string(ctx, APP_OFFSET + i + 2, TEXT_Y_OFFSET + 2, s, 16, HILIGHT_COLOR, SDF_FONT_THIN);
-				} else {
-					if (ad->flags & 1) {
-						/* Top window should be white */
-						draw_sdf_string(ctx, APP_OFFSET + i + 2, TEXT_Y_OFFSET + 2, s, 16, FOCUS_COLOR, SDF_FONT_THIN);
-					} else {
-						/* Otherwise, off white */
-						draw_sdf_string(ctx, APP_OFFSET + i + 2, TEXT_Y_OFFSET + 2, s, 16, txt_color, SDF_FONT_THIN);
-					}
-				}
-			}
-
-			/* XXX This keeps track of how far left each window list item is
-			 * so we can map clicks up in the mouse callback. */
-			if (j < MAX_WINDOW_COUNT) {
-				if (ads_by_l[j]) {
-					ads_by_l[j]->left = APP_OFFSET + i;
-				}
-			}
-			j++;
-			i += w;
-		}
-	}
-	spin_unlock(&lock);
-
-	/* Draw the logout button; XXX This should probably have some sort of focus hilight */
-	draw_sprite_alpha_paint(ctx, sprite_logout, width - 23, 1, 1.0, (logout_menu->window ? HILIGHT_COLOR : ICON_COLOR)); /* Logout button */
 
 	/* Flip */
 	flip(ctx);
 	yutani_flip(yctx, panel);
-
-	spin_unlock(&drawlock);
 }
 
 static void update_window_list(void) {
 	yutani_query_windows(yctx);
 
 	list_t * new_window_list = list_create();
+
+	ads_by_z[0] = NULL;
 
 	int i = 0;
 	while (1) {
@@ -1192,11 +564,14 @@ static void update_window_list(void) {
 
 		char * s = malloc(wa->size);
 		memcpy(s, wa->strings, wa->size);
-		ad->name = &s[wa->offsets[0]];
-		ad->icon = &s[wa->offsets[1]];
+		ad->name = &s[0];
+		ad->icon = &s[wa->icon];
 		ad->strings = s;
 		ad->flags = wa->flags;
 		ad->wid = wa->wid;
+		ad->bufid = wa->bufid;
+		ad->width = wa->width;
+		ad->height = wa->height;
 
 		ads_by_z[i] = ad;
 		i++;
@@ -1223,40 +598,6 @@ static void update_window_list(void) {
 	}
 	active_window = i-1;
 
-	i = 0;
-	/*
-	 * Update each of the wid entries in our array so we can map
-	 * clicks to window focus events for each window
-	 */
-	foreach(node, new_window_list) {
-		struct window_ad * ad = node->value;
-		if (i < MAX_WINDOW_COUNT) {
-			ads_by_l[i] = ad;
-			ads_by_l[i+1] = NULL;
-		}
-		i++;
-	}
-
-	/* Then free up the old list and replace it with the new list */
-	spin_lock(&lock);
-
-	if (new_window_list->length) {
-		int tmp = LEFT_BOUND;
-		tmp -= APP_OFFSET;
-		if (tmp < 0) {
-			title_width = 0;
-		} else {
-			title_width = tmp / new_window_list->length;
-			if (title_width > MAX_TEXT_WIDTH) {
-				title_width = MAX_TEXT_WIDTH;
-			}
-			if (title_width < MIN_TEXT_WIDTH) {
-				title_width = 0;
-			}
-		}
-	} else {
-		title_width = 0;
-	}
 	if (window_list) {
 		foreach(node, window_list) {
 			struct window_ad * ad = (void*)node->value;
@@ -1267,10 +608,14 @@ static void update_window_list(void) {
 		free(window_list);
 	}
 	window_list = new_window_list;
-	spin_unlock(&lock);
 
 	/* And redraw the panel */
 	redraw();
+}
+
+static void redraw_panel_background(gfx_context_t * ctx, int width, int height) {
+	draw_fill(ctx, rgba(0,0,0,0));
+	draw_rounded_rectangle(ctx, X_PAD, Y_PAD, width - X_PAD * 2, panel->height - Y_PAD * 2, 14, rgba(0,0,0,200));
 }
 
 static void resize_finish(int xwidth, int xheight) {
@@ -1281,19 +626,15 @@ static void resize_finish(int xwidth, int xheight) {
 
 	width = xwidth;
 
-	/* Draw the background */
-	draw_fill(ctx, rgba(0,0,0,0));
-	for (int i = 0; i < xwidth; i += sprite_panel->width) {
-		draw_sprite(ctx, sprite_panel, i, 0);
-	}
+	redraw_panel_background(ctx, xwidth, xheight);
 
 	/* Copy the prerendered background so we can redraw it quickly */
 	bg_size = panel->width * panel->height * sizeof(uint32_t);
 	bg_blob = realloc(bg_blob, bg_size);
 	memcpy(bg_blob, ctx->backbuffer, bg_size);
 
+	widgets_layout();
 	update_window_list();
-	redraw();
 }
 
 static void bind_keys(void) {
@@ -1308,14 +649,8 @@ static void bind_keys(void) {
 	/* Ctrl-F11 = toggle panel visibility */
 	yutani_key_bind(yctx, KEY_F11, KEY_MOD_LEFT_CTRL, YUTANI_BIND_STEAL);
 
-	/* Alt+F1 = show menu */
-	yutani_key_bind(yctx, KEY_F1, KEY_MOD_LEFT_ALT, YUTANI_BIND_STEAL);
-
 	/* Alt+F2 = show app runner */
 	yutani_key_bind(yctx, KEY_F2, KEY_MOD_LEFT_ALT, YUTANI_BIND_STEAL);
-
-	/* Alt+F3 = window context menu */
-	yutani_key_bind(yctx, KEY_F3, KEY_MOD_LEFT_ALT, YUTANI_BIND_STEAL);
 
 	/* This lets us receive all just-modifier key releases */
 	yutani_key_bind(yctx, KEY_LEFT_ALT, 0, YUTANI_BIND_PASSTHROUGH);
@@ -1329,160 +664,126 @@ static void sig_usr2(int sig) {
 	signal(SIGUSR2, sig_usr2);
 }
 
-static sprite_t * watchface = NULL;
-
-static void watch_draw_line(gfx_context_t * ctx, int offset, double r, double a, double b, uint32_t color, float thickness) {
-	double theta = (a / b) * 2.0 * M_PI;
-	draw_line_aa(ctx,
-		70 + 4,
-		70 + 4 + sin(theta) * r,
-		70 + offset,
-		70 + offset - cos(theta) * r, color, thickness);
+static int mouse_event_ignore(struct PanelWidget * this, struct yutani_msg_window_mouse_event * evt) {
+	return 0;
 }
 
-void _menu_draw_MenuEntry_Clock(gfx_context_t * ctx, struct MenuEntry * self, int offset) {
-	self->offset = offset;
-
-	draw_sprite(ctx, watchface, 4, offset);
-
-	struct timeval now;
-	struct tm * timeinfo;
-	gettimeofday(&now, NULL);
-	timeinfo = localtime((time_t *)&now.tv_sec);
-
-	double sec = timeinfo->tm_sec + (double)now.tv_usec / 1000000.0;
-	double min = timeinfo->tm_min + sec / 60.0;
-	double hour = (timeinfo->tm_hour % 12) + min / 60.0;
-
-	watch_draw_line(ctx, offset, 40, hour, 12, rgb(0,0,0), 2.0);
-	watch_draw_line(ctx, offset, 60, min, 60, rgb(0,0,0), 1.5);
-	watch_draw_line(ctx, offset, 65, sec, 60, rgb(240,0,0), 1.0);
-
+static int widget_enter_generic(struct PanelWidget * this, struct yutani_msg_window_mouse_event * evt) {
+	this->highlighted = 1; /* Highlighted */
+	return 1;
 }
 
-struct MenuEntry * menu_create_clock(void) {
-	struct MenuEntry * out = menu_create_separator(); /* Steal some defaults */
+static int widget_leave_generic(struct PanelWidget * this, struct yutani_msg_window_mouse_event * evt) {
+	this->highlighted = 0; /* Not highlighted */
+	return 1;
+}
 
-	if (!watchface) {
-		watchface = malloc(sizeof(sprite_t));
-		load_sprite(watchface, "/usr/share/icons/watchface.png");
+static int widget_draw_generic(struct PanelWidget * this, gfx_context_t * ctx) {
+	draw_rounded_rectangle(
+		ctx, 0, 0, ctx->width, ctx->height, 7, premultiply(rgba(120,120,120,150)));
+	if (this->highlighted) {
+		draw_rounded_rectangle(
+			ctx, 1, 1, ctx->width-2, ctx->height-2, 6, premultiply(rgba(120,160,230,220)));
+	} else {
+		draw_rounded_rectangle(
+			ctx, 1, 1, ctx->width-2, ctx->height-2, 6, ALTTAB_BACKGROUND);
 	}
+	return 0;
+}
 
-	out->_type = -1; /* Special */
-	out->height = 140;
-	out->rwidth = 148;
-	out->renderer = _menu_draw_MenuEntry_Clock;
+static int widget_update_generic(struct PanelWidget * this) {
+	return 0;
+}
+
+static int widget_onkey_generic(struct PanelWidget * this, struct yutani_msg_key_event * evt) {
+	return 0;
+}
+
+struct PanelWidget * widget_new(void) {
+	struct PanelWidget * out = calloc(1, sizeof(struct PanelWidget));
+	out->draw = widget_draw_generic;
+	out->click = mouse_event_ignore; /* click_generic */
+	out->right_click = mouse_event_ignore; /* right_click_generic */
+	out->leave = widget_leave_generic;
+	out->enter = widget_enter_generic;
+	out->update = widget_update_generic;
+	out->onkey = widget_onkey_generic;
+	out->move = mouse_event_ignore; /* move_generic */
+	out->highlighted = 0;
+	out->fill = 0;
 	return out;
 }
 
-const char * month_names[] = {
-	"January",
-	"February",
-	"March",
-	"April",
-	"May",
-	"June",
-	"July",
-	"August",
-	"September",
-	"October",
-	"November",
-	"December",
-};
-
-int days_in_months[] = {
-	31, 0, 31, 30, 31, 30, 31,
-	31, 30, 31, 30, 31,
-};
-
-void _menu_draw_MenuEntry_Calendar(gfx_context_t * ctx, struct MenuEntry * self, int offset) {
-	self->offset = offset;
-
-	char lines[9][22];
-	memset(lines, 0, sizeof(lines));
-
-	struct timeval now;
-	gettimeofday(&now, NULL);
-
-	struct tm actual;
-	struct tm * timeinfo;
-	timeinfo = localtime((time_t *)&now.tv_sec);
-	memcpy(&actual, timeinfo, sizeof(struct tm));
-	timeinfo = &actual;
-
-	char month[20];
-	sprintf(month, "%s %d", month_names[timeinfo->tm_mon], timeinfo->tm_year + 1900);
-
-	int len = (20 - strlen(month)) / 2;
-	while (len > 0) {
-		strcat(lines[0]," ");
-		len--;
-	}
-	strcat(lines[0],month);
-
-	/* Days of week */
-	strcat(lines[1],"Su Mo Tu We Th Fr Sa");
-
-	int days_in_month = days_in_months[timeinfo->tm_mon];
-	if (days_in_month == 0) {
-		/* How many days in February? */
-		struct tm tmp;
-		memcpy(&tmp, timeinfo, sizeof(struct tm));
-		tmp.tm_mday = 29;
-		tmp.tm_hour = 12;
-		time_t tmp3 = mktime(&tmp);
-		struct tm * tmp2 = localtime(&tmp3);
-		if (tmp2->tm_mday == 29) {
-			days_in_month = 29;
+static void widgets_layout(void) {
+	int total_width = 0;
+	int flexible_widgets = 0;
+	foreach(node, widgets_enabled) {
+		struct PanelWidget * widget = node->value;
+		if (widget->fill) {
+			flexible_widgets++;
 		} else {
-			days_in_month = 28;
+			total_width += widget->width;
 		}
 	}
 
-	int mday = timeinfo->tm_mday;
-	int wday = timeinfo->tm_wday; /* 0 == sunday */
-
-	while (mday > 1) {
-		mday--;
-		wday = (wday + 6) % 7;
-	}
-
-	for (int i = 0; i < wday; ++i) {
-		strcat(lines[2],"   ");
-	}
-
-	int line = 2;
-	while (mday <= days_in_month) {
-		/* TODO Bold text? */
-		char tmp[5];
-		sprintf(tmp, "%2d ", mday);
-		strcat(lines[line], tmp);
-		if (wday == 6) line++;
-		mday++;
-		wday = (wday + 1) % 7;
-	}
-
-	self->height = 16 * (line+1) + 8;
-
-	/* Go through each and draw with monospace font */
-	for (int i = 0; i < 9; ++i) {
-		if (lines[i][0] != 0) {
-			draw_sdf_string(ctx, 10, 4 + i * 17, lines[i], 16, rgb(0,0,0), i == 0 ? SDF_FONT_MONO_BOLD : SDF_FONT_MONO);
+	/* Now lay out the widgets */
+	int x = 16;
+	int available = width - 32;
+	foreach(node, widgets_enabled) {
+		struct PanelWidget * widget = node->value;
+		widget->left = x;
+		if (widget->fill) {
+			widget->width = (available - total_width) / flexible_widgets;
 		}
+		x += widget->width;
 	}
 }
 
-/*
- * Special menu entry to display a calendar
- */
-struct MenuEntry * menu_create_calendar(void) {
-	struct MenuEntry * out = menu_create_separator(); /* Steal some defaults */
+static void update_periodic_widgets(void) {
+	int needs_layout = 0;
+	foreach(widget_node, widgets_enabled) {
+		struct PanelWidget * widget = widget_node->value;
+		needs_layout |= widget->update(widget);
+	}
+	if (needs_layout) widgets_layout();
+	redraw();
+}
 
-	out->_type = -1; /* Special */
-	out->height = 16 * 9 + 8;
-	out->rwidth = draw_sdf_string_width("XX XX XX XX XX XX XX", 16, SDF_FONT_MONO) + 20;
-	out->renderer = _menu_draw_MenuEntry_Calendar;
-	return out;
+int panel_menu_show_at(struct MenuList * menu, int x) {
+	int mwidth, mheight, offset;
+
+	/* Calculate the expected size of the menu window. */
+	menu_calculate_dimensions(menu, &mheight, &mwidth);
+
+	if (x - mwidth / 2 < X_PAD) {
+		offset = X_PAD;
+		menu->flags = (menu->flags & ~MENU_FLAG_BUBBLE) | MENU_FLAG_BUBBLE_LEFT;
+	} else if (x + mwidth / 2 > width - X_PAD) {
+		offset = width - X_PAD - mwidth;
+		menu->flags = (menu->flags & ~MENU_FLAG_BUBBLE) | MENU_FLAG_BUBBLE_RIGHT;
+	} else {
+		offset = x - mwidth / 2;
+		menu->flags = (menu->flags & ~MENU_FLAG_BUBBLE) | MENU_FLAG_BUBBLE_CENTER;
+	}
+
+	menu->flags |= MENU_FLAG_TAIL_POSITION;
+	menu->tail_offset = x - offset;
+
+	/* Prepare the menu, which creates the window. */
+	menu_prepare(menu, yctx);
+
+	/* If we succeeded, move it to the final offset and display it */
+	if (menu->window) {
+		yutani_window_move(yctx, menu->window, offset, DROPDOWN_OFFSET);
+		yutani_flip(yctx,menu->window);
+		return 0;
+	}
+
+	return 1;
+}
+
+int panel_menu_show(struct PanelWidget * this, struct MenuList * menu) {
+	return panel_menu_show_at(menu, this->left + this->width / 2);
 }
 
 int main (int argc, char ** argv) {
@@ -1500,62 +801,28 @@ int main (int argc, char ** argv) {
 	/* Connect to window server */
 	yctx = yutani_init();
 
+	/* Shared fonts */
+	font           = tt_font_from_shm("sans-serif");
+	font_bold      = tt_font_from_shm("sans-serif.bold");
+	font_mono      = tt_font_from_shm("monospace");
+	font_mono_bold = tt_font_from_shm("monospace.bold");
+
 	/* For convenience, store the display size */
 	width  = yctx->display_width;
 	height = yctx->display_height;
 
 	/* Create the panel window */
-	panel = yutani_window_create_flags(yctx, width, PANEL_HEIGHT, YUTANI_WINDOW_FLAG_NO_STEAL_FOCUS);
+	panel = yutani_window_create_flags(yctx, width, PANEL_HEIGHT, YUTANI_WINDOW_FLAG_NO_STEAL_FOCUS | YUTANI_WINDOW_FLAG_ALT_ANIMATION);
 
 	/* And move it to the top layer */
 	yutani_set_stack(yctx, panel, YUTANI_ZORDER_TOP);
+	yutani_window_update_shape(yctx, panel, YUTANI_SHAPE_THRESHOLD_CLEAR);
 
 	/* Initialize graphics context against the window */
 	ctx = init_graphics_yutani_double_buffer(panel);
 
-	/* Clear it out (the compositor should initialize it cleared anyway */
-	draw_fill(ctx, rgba(0,0,0,0));
-	flip(ctx);
-	yutani_flip(yctx, panel);
-
-	/* Load textures for the background and logout button */
-	sprite_panel  = malloc(sizeof(sprite_t));
-	sprite_logout = malloc(sizeof(sprite_t));
-
-	load_sprite(sprite_panel,  "/usr/share/panel.png");
-	load_sprite(sprite_logout, "/usr/share/icons/panel-shutdown.png");
-
-	struct stat stat_tmp;
-	if (!stat("/dev/dsp",&stat_tmp)) {
-		widgets_volume_enabled = 1;
-		widgets_width += WIDGET_WIDTH;
-		sprite_volume_mute = malloc(sizeof(sprite_t));
-		sprite_volume_low  = malloc(sizeof(sprite_t));
-		sprite_volume_med  = malloc(sizeof(sprite_t));
-		sprite_volume_high = malloc(sizeof(sprite_t));
-		load_sprite(sprite_volume_mute, "/usr/share/icons/24/volume-mute.png");
-		load_sprite(sprite_volume_low,  "/usr/share/icons/24/volume-low.png");
-		load_sprite(sprite_volume_med,  "/usr/share/icons/24/volume-medium.png");
-		load_sprite(sprite_volume_high, "/usr/share/icons/24/volume-full.png");
-		/* XXX store current volume */
-	}
-
-	{
-		widgets_network_enabled = 1;
-		widgets_width += WIDGET_WIDTH;
-		sprite_net_active = malloc(sizeof(sprite_t));
-		load_sprite(sprite_net_active, "/usr/share/icons/24/net-active.png");
-		sprite_net_disabled = malloc(sizeof(sprite_t));
-		load_sprite(sprite_net_disabled, "/usr/share/icons/24/net-disconnected.png");
-	}
-
-	/* TODO Probably should use the app launch shortcut */
-	system("sh -c \"sleep 4; weather-tool\" &");
-
 	/* Draw the background */
-	for (int i = 0; i < width; i += sprite_panel->width) {
-		draw_sprite(ctx, sprite_panel, i, 0);
-	}
+	redraw_panel_background(ctx, panel->width, panel->height);
 
 	/* Copy the prerendered background so we can redraw it quickly */
 	bg_size = panel->width * panel->height * sizeof(uint32_t);
@@ -1566,22 +833,44 @@ int main (int argc, char ** argv) {
 	signal(SIGINT, sig_int);
 	signal(SIGUSR2, sig_usr2);
 
-	appmenu = menu_set_get_root(menu_set_from_description("/etc/panel.menu", launch_application_menu));
+	widgets_enabled = list_create();
 
-	clockmenu = menu_create();
-	menu_insert(clockmenu, menu_create_clock());
+	/* Initialize requested widgets */
+	const char * widgets_to_load[] = {
+		"appmenu",
+		"windowlist",
+		"volume",
+		"network",
+		"weather",
+		"date",
+		"clock",
+		"logout",
+		NULL
+	};
 
-	calmenu = menu_create();
-	menu_insert(calmenu, menu_create_calendar());
+	for (const char ** widget = widgets_to_load; *widget; widget++) {
+		char lib_name[200];
+		char func_name[200];
 
-	window_menu = menu_create();
-	menu_insert(window_menu, menu_create_normal(NULL, NULL, "Maximize", _window_menu_start_maximize));
-	menu_insert(window_menu, menu_create_normal(NULL, NULL, "Move", _window_menu_start_move));
-	menu_insert(window_menu, menu_create_separator());
-	menu_insert(window_menu, menu_create_normal(NULL, NULL, "Close", _window_menu_close));
+		snprintf(lib_name, 200, "libtoaru_panel_%s.so", *widget);
+		snprintf(func_name, 200, "widget_init_%s", *widget);
 
-	logout_menu = menu_create();
-	menu_insert(logout_menu, menu_create_normal("exit", "log-out", "Log Out", launch_application_menu));
+		void * lib = dlopen(lib_name, 0);
+		if (!lib) {
+			fprintf(stderr, "panel: failed to load widget '%s'\n", *widget);
+		} else {
+			void (*widget_init)(void) = dlsym(lib, func_name);
+			if (!widget_init) {
+				fprintf(stderr, "panel: failed to initialize widget '%s'\n", *widget);
+			} else {
+				widget_init();
+			}
+		}
+	}
+
+	/* Lay out the widgets */
+	update_periodic_widgets();
+	widgets_layout();
 
 	/* Subscribe to window updates */
 	yutani_subscribe_windows(yctx);
@@ -1596,13 +885,11 @@ int main (int argc, char ** argv) {
 
 	int fds[1] = {fileno(yctx->sock)};
 
+	fprintf(stderr, "entering loop?\n");
+
 	while (_continue) {
 
-		int index = fswait2(1,fds,clockmenu->window ? 50 : 200);
-
-		if (clockmenu->window) {
-			menu_force_redraw(clockmenu);
-		}
+		int index = fswait2(1,fds,200);
 
 		if (index == 0) {
 			/* Respond to Yutani events */
@@ -1632,7 +919,14 @@ int main (int argc, char ** argv) {
 					case YUTANI_MSG_RESIZE_OFFER:
 						{
 							struct yutani_msg_window_resize * wr = (void*)m->data;
-							resize_finish(wr->width, wr->height);
+							if (wr->wid == panel->wid) {
+								resize_finish(wr->width, wr->height);
+							} else if (alttab && wr->wid == alttab->wid) {
+								yutani_window_resize_accept(yctx, alttab, wr->width, wr->height);
+								reinit_graphics_yutani(actx, alttab);
+								redraw_alttab();
+								yutani_window_resize_done(yctx, alttab);
+							}
 						}
 						break;
 					default:
@@ -1641,16 +935,16 @@ int main (int argc, char ** argv) {
 				free(m);
 				m = yutani_poll_async(yctx);
 			}
-		} else {
-			struct timeval now;
-			gettimeofday(&now, NULL);
-			if (now.tv_sec != last_tick) {
-				last_tick = now.tv_sec;
-				waitpid(-1, NULL, WNOHANG);
-				update_volume_level();
-				update_network_status();
-				update_weather_status();
-				redraw();
+		}
+
+		struct timeval now;
+		gettimeofday(&now, NULL);
+		if (now.tv_sec != last_tick) {
+			last_tick = now.tv_sec;
+			waitpid(-1, NULL, WNOHANG);
+			update_periodic_widgets();
+			if (was_tabbing) {
+				redraw_alttab();
 			}
 		}
 	}

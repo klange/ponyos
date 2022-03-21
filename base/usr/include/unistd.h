@@ -7,6 +7,8 @@
 
 _Begin_C_Header
 
+#define _POSIX_VERSION 200809L
+
 extern char **environ;
 
 extern pid_t getpid(void);
@@ -26,6 +28,7 @@ extern int execve(const char *name, char * const argv[], char * const envp[]);
 extern void _exit(int status);
 
 extern int setuid(uid_t uid);
+extern int setgid(gid_t gid);
 
 extern uid_t getuid(void);
 extern uid_t geteuid(void);
@@ -63,15 +66,12 @@ extern int optind, opterr, optopt;
 extern int unlink(const char * pathname);
 
 /* Unimplemented stubs */
-struct utimbuf {
-    time_t actime;
-    time_t modtime;
-};
-extern char * ttyname(int fd);
-extern int utime(const char *filename, const struct utimbuf *times);
 extern int rmdir(const char *pathname); /* TODO  rm probably just works */
 extern int chown(const char * pathname, uid_t owner, gid_t group);
+
 extern char * getlogin(void);
+extern char * ttyname(int fd);
+extern int ttyname_r(int fd, char * buf, size_t buflen);
 
 #define STDIN_FILENO 0
 #define STDOUT_FILENO 1
@@ -92,6 +92,7 @@ extern int sethostname(const char * name, size_t len);
 extern pid_t setsid(void);
 extern int setpgid(pid_t, pid_t);
 extern pid_t getpgid(pid_t);
+extern pid_t getpgrp(void);
 
 extern unsigned int alarm(unsigned int seconds);
 
@@ -99,5 +100,10 @@ extern void *sbrk(intptr_t increment);
 
 extern void sync(void);
 extern int truncate(const char *, off_t);
+
+#define _PC_PATH_MAX 1
+extern long pathconf(const char *path, int name);
+
+extern int getgroups(int size, gid_t list[]);
 
 _End_C_Header

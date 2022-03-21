@@ -1,9 +1,5 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
- * This file is part of ToaruOS and is released under the terms
- * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2013-2018 K. Lange
- *
- * E-Shell
+/**
+ * @brief E-Shell
  *
  * This is "experimental shell" - a vaguely-unix-like command
  * interface. It has a very rudimentary parser that understands
@@ -11,8 +7,12 @@
  * handful of built-in commands, including ones that implement
  * some more useful shell syntax such as loops and conditionals.
  * There is support for tab completion of filenames and commands.
+ *
+ * @copyright
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2013-2018 K. Lange
  */
-
 #define _XOPEN_SOURCE 500
 #define _POSIX_C_SOURCE 200112L
 #include <stdio.h>
@@ -30,6 +30,7 @@
 #include <ctype.h>
 
 #include <sys/time.h>
+#include <sys/times.h>
 #include <sys/wait.h>
 #include <sys/utsname.h>
 #include <sys/stat.h>
@@ -86,6 +87,7 @@ struct semaphore create_semaphore(void) {
 }
 
 void raise_semaphore(struct semaphore s){
+	write(s.fds[1],"x",1);
 	close(s.fds[0]);
 	close(s.fds[1]);
 }
@@ -420,13 +422,15 @@ void tab_complete_func(rline_context_t * c) {
 		command_adj += 1;
 	}
 
-	if (command_adj < argc && (!strcmp(argv[command_adj], "time"))) {
-		cursor_adj -= 1;
-		command_adj += 1;
-	}
-
-	/* sudo should shift commands */
-	if (command_adj < argc && (!strcmp(argv[command_adj], "sudo") || !strcmp(argv[command_adj], "gsudo"))) {
+	/* Various commands are generally prefixes */
+	if (command_adj < argc && (
+		!strcmp(argv[command_adj], "sudo") ||
+		!strcmp(argv[command_adj], "gsudo") ||
+		!strcmp(argv[command_adj], "time") ||
+		/* TODO: Both of these may take additional arguments... */
+		!strcmp(argv[command_adj], "strace") ||
+		!strcmp(argv[command_adj], "dbg")
+	)) {
 		cursor_adj -= 1;
 		command_adj += 1;
 	}
@@ -441,6 +445,10 @@ void tab_complete_func(rline_context_t * c) {
 	}
 
 	if (cursor_adj >= 1 && !strcmp(argv[command_adj], "msk")) {
+		complete_mode = COMPLETE_CUSTOM;
+	}
+
+	if (cursor_adj >= 1 && !strcmp(argv[command_adj], "ifconfig")) {
 		complete_mode = COMPLETE_CUSTOM;
 	}
 
@@ -542,6 +550,7 @@ void tab_complete_func(rline_context_t * c) {
 		char ** completions = none;
 		char * toggle_abs_mouse_completions[] = {"relative","absolute",NULL};
 		char * msk_commands[] = {"update","install","list","count","--version",NULL};
+		char * ifconfig_commands[] = {"inet","netmask","gateway",NULL};
 
 		if (!strcmp(argv[command_adj],"toggle-abs-mouse")) {
 			completions = toggle_abs_mouse_completions;
@@ -571,6 +580,32 @@ void tab_complete_func(rline_context_t * c) {
 					completions[i] = NULL;
 					list_free(packages);
 				}
+			}
+		} else if (!strcmp(argv[command_adj], "ifconfig")) {
+			if (cursor_adj == 1) {
+				/* interface names */
+				DIR * d = opendir("/dev/net");
+				if (d) {
+					free_matches = 1;
+					list_t * interfaces = list_create();
+
+					struct dirent * ent;
+					while ((ent = readdir(d))) {
+						if (ent->d_name[0] == '.') continue;
+						list_insert(interfaces, strdup(ent->d_name));
+					}
+					closedir(d);
+
+					completions = malloc(sizeof(char*) * (interfaces->length + 1));
+					size_t i = 0;
+					foreach(node, interfaces) {
+						completions[i++] = node->value;
+					}
+					completions[i] = NULL;
+					list_free(interfaces);
+				}
+			} else if (cursor_adj > 1) {
+				completions = ifconfig_commands;
 			}
 		}
 
@@ -726,7 +761,7 @@ struct alternative {
 
 #define ALT_BIM    "bim", "vi-like text editor"
 #define ALT_FETCH  "fetch", "URL downloader"
-#define ALT_NETIF  "cat /proc/netif", "to see network configuration"
+#define ALT_NETIF  "ifconfig", "to see network configuration"
 
 static struct alternative cmd_alternatives[] = {
 	/* Propose bim as an alternative for common text editors */
@@ -740,7 +775,6 @@ static struct alternative cmd_alternatives[] = {
 	{"wget",  ALT_FETCH},
 
 	/* We don't have ip or ifconfig commands, suggest cat /proc/netif */
-	{"ifconfig", ALT_NETIF},
 	{"ipconfig", ALT_NETIF},
 	{"ip", ALT_NETIF},
 
@@ -851,15 +885,19 @@ static void handle_status(int ret_code) {
 	}
 }
 
-int wait_for_child(int pgid, char * name) {
+int wait_for_child(int pgid, char * name, int retpid) {
 	int waitee = (shell_interactive == 1 && !is_subshell) ? -pgid : pgid;
 	int outpid;
 	int ret_code = 0;
+	int ret_code_real = 0;
 	int e;
 
 	do {
 		outpid = waitpid(waitee, &ret_code, WSTOPPED);
 		e = errno;
+		if (outpid == retpid) {
+			ret_code_real = ret_code;
+		}
 		if (WIFSTOPPED(ret_code)) {
 			suspended_pgid = pgid;
 			if (name) {
@@ -875,8 +913,8 @@ int wait_for_child(int pgid, char * name) {
 		}
 	} while (outpid != -1 || (outpid == -1 && e != ECHILD));
 	reset_pgrp();
-	handle_status(ret_code);
-	return WEXITSTATUS(ret_code);
+	handle_status(ret_code_real);
+	return WEXITSTATUS(ret_code_real);
 }
 
 int shell_exec(char * buffer, size_t size, FILE * file, char ** out_buffer) {
@@ -1109,6 +1147,7 @@ int shell_exec(char * buffer, size_t size, FILE * file, char ** out_buffer) {
 						*out_buffer = ++p;
 						goto _done;
 					}
+					goto _just_add;
 				case '#':
 					if (!quoted && !backtick) {
 						goto _done; /* Support comments; must not be part of an existing arg */
@@ -1375,19 +1414,16 @@ _nope:
 		int last_output[2];
 		pipe(last_output);
 
-		struct semaphore s = create_semaphore();
 		child_pid = fork();
 		if (!child_pid) {
 			set_pgid(0);
 			if (!nowait) set_pgrp(getpid());
-			raise_semaphore(s);
 			is_subshell = 1;
 			dup2(last_output[1], STDOUT_FILENO);
 			close(last_output[0]);
 			add_environment(extra_env);
 			run_cmd(arg_starts[0]);
 		}
-		wait_semaphore(s);
 
 		pgid = child_pid;
 
@@ -1410,10 +1446,12 @@ _nope:
 			last_output[1] = tmp_out[1];
 		}
 
+		struct semaphore s = create_semaphore();
 		last_child = fork();
 		if (!last_child) {
 			is_subshell = 1;
 			set_pgid(pgid);
+			raise_semaphore(s);
 			if (output_files[cmdi]) {
 				int fd = open(output_files[cmdi], file_args[cmdi], 0666);
 				if (fd < 0) {
@@ -1439,6 +1477,7 @@ _nope:
 		}
 		close(last_output[0]);
 		close(last_output[1]);
+		wait_semaphore(s);
 
 		/* Now execute the last piece and wait on all of them */
 	} else {
@@ -1522,7 +1561,7 @@ _nope:
 	}
 
 
-	int ret = wait_for_child(shell_interactive == 1 ? pgid : last_child, arg_starts[0][0]);
+	int ret = wait_for_child(shell_interactive == 1 ? pgid : last_child, arg_starts[0][0], last_child);
 
 	list_free(extra_env);
 	free(extra_env);
@@ -1782,7 +1821,7 @@ uint32_t shell_cmd_cd(int argc, char * argv[]) {
 				goto cd_error;
 			}
 		} else {
-			char home_path[512];
+			char home_path[1200];
 			sprintf(home_path, "/home/%s", username);
 			if (chdir(home_path)) {
 				goto cd_error;
@@ -2196,7 +2235,7 @@ uint32_t shell_cmd_fg(int argc, char * argv[]) {
 		return 1;
 	}
 
-	return wait_for_child(pid, NULL);
+	return wait_for_child(pid, NULL, pid);
 }
 
 uint32_t shell_cmd_bg(int argc, char * argv[]) {
@@ -2258,6 +2297,9 @@ uint32_t shell_cmd_time(int argc, char * argv[]) {
 	struct timeval start, end;
 	gettimeofday(&start, NULL);
 
+	struct tms timeBefore;
+	times(&timeBefore);
+
 	if (argc > 1) {
 		pid_t child_pid = fork();
 		if (!child_pid) {
@@ -2288,6 +2330,20 @@ uint32_t shell_cmd_time(int argc, char * argv[]) {
 	sec_diff = sec_diff % 60;
 
 	fprintf(shell_stderr, "\nreal\t%dm%d.%.03ds\n", minutes, (int)sec_diff, (int)(usec_diff / 1000));
+
+	/* User and system times from children */
+	struct tms timeBuf;
+	times(&timeBuf);
+
+	fprintf(shell_stderr, "user\t%dm%d.%.03ds\n",
+		(int)(((timeBuf.tms_cutime - timeBefore.tms_cutime) / (60 * CLOCKS_PER_SEC))),
+		(int)(((timeBuf.tms_cutime - timeBefore.tms_cutime) / (CLOCKS_PER_SEC)) % 60),
+		(int)(((timeBuf.tms_cutime - timeBefore.tms_cutime) / (CLOCKS_PER_SEC / 1000)) % 1000));
+
+	fprintf(shell_stderr, "sys\t%dm%d.%.03ds\n",
+		(int)(((timeBuf.tms_cstime - timeBefore.tms_cstime) / (60 * CLOCKS_PER_SEC))),
+		(int)(((timeBuf.tms_cstime - timeBefore.tms_cstime) / (CLOCKS_PER_SEC)) % 60),
+		(int)(((timeBuf.tms_cstime - timeBefore.tms_cstime) / (CLOCKS_PER_SEC / 1000)) % 1000));
 
 	return WEXITSTATUS(ret_code);
 }

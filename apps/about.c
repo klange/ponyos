@@ -1,19 +1,20 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
- * This file is part of ToaruOS and is released under the terms
- * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2018-2019 K. Lange
- *
- * about - Show an "About <Application>" dialog.
+/**
+ * @brief about - Show an "About <Application>" dialog.
  *
  * By default, shows "About ToaruOS", suitable for use as an application
  * menu entry. Optionally, takes arguments specifying another application
  * to describe, suitable for the "Help > About" menu bar entry.
+ *
+ * @copyright
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2018-2019 K. Lange
  */
 #include <toaru/yutani.h>
 #include <toaru/graphics.h>
 #include <toaru/decorations.h>
-#include <toaru/sdf.h>
 #include <toaru/menu.h>
+#include <toaru/text.h>
 
 #include <sys/utsname.h>
 
@@ -26,6 +27,9 @@ static int32_t width = 350;
 static int32_t height = 250;
 static char * version_str;
 
+static struct TT_Font * _tt_font_thin = NULL;
+static struct TT_Font * _tt_font_bold = NULL;
+
 static char * icon_path;
 static char * title_str;
 static char * version_str;
@@ -35,12 +39,13 @@ static int center_x(int x) {
 	return (width - x) / 2;
 }
 
-static void draw_string(int y, const char * string, int font, uint32_t color) {
+static void draw_string(int y, const char * string, struct TT_Font * font, uint32_t color) {
 
 	struct decor_bounds bounds;
 	decor_get_bounds(window, &bounds);
 
-	draw_sdf_string(ctx, bounds.left_width + center_x(draw_sdf_string_width(string, 16, font)), bounds.top_height + 10 + logo.height + 10 + y, string, 16, color, font);
+	tt_set_size(font, 13);
+	tt_draw_string(ctx, font, bounds.left_width + center_x(tt_string_width(font, string)), bounds.top_height + 10 + logo.height + 10 + y + 13, string, color);
 }
 
 static void redraw(void) {
@@ -51,7 +56,7 @@ static void redraw(void) {
 	draw_fill(ctx, rgb(204,204,204));
 	draw_sprite(ctx, &logo, bounds.left_width + center_x(logo.width), bounds.top_height + 10);
 
-	draw_string(0, version_str, SDF_FONT_BOLD, rgb(0,0,0));
+	draw_string(0, version_str, _tt_font_bold, rgb(0,0,0));
 
 	int offset = 20;
 
@@ -59,10 +64,10 @@ static void redraw(void) {
 		if (**copy_str == '-') {
 			offset += 10;
 		} else if (**copy_str == '%') {
-			draw_string(offset, *copy_str+1, SDF_FONT_THIN, rgb(0,0,255));
+			draw_string(offset, *copy_str+1, _tt_font_thin, rgb(0,0,255));
 			offset += 20;
 		} else {
-			draw_string(offset, *copy_str, SDF_FONT_THIN, rgb(0,0,0));
+			draw_string(offset, *copy_str, _tt_font_thin, rgb(0,0,0));
 			offset += 20;
 		}
 	}
@@ -89,14 +94,24 @@ static void init_default(void) {
 		sprintf(version_str, "PonyOS %s", u.release);
 	}
 
-	copyright_str[0] = "(C) 2011-2021 K. Lange, et al.";
+	copyright_str[0] = "© 2011-2022 K. Lange, et al.";
 	copyright_str[1] = "-";
 	copyright_str[2] = "PonyOS is free software released under the";
 	copyright_str[3] = "NCSA/University of Illinois license.";
 	copyright_str[4] = "-";
 	copyright_str[5] = "%https://ponyos.org";
 	copyright_str[6] = "%https://github.com/klange/ponyos";
+}
 
+void resize_finish(int w, int h) {
+	yutani_window_resize_accept(yctx, window, w, h);
+	reinit_graphics_yutani(ctx, window);
+	struct decor_bounds bounds;
+	decor_get_bounds(NULL, &bounds);
+	width  = w - bounds.width;
+	height = h - bounds.height;
+	redraw();
+	yutani_window_resize_done(yctx, window);
 }
 
 int main(int argc, char * argv[]) {
@@ -107,6 +122,9 @@ int main(int argc, char * argv[]) {
 		return 1;
 	}
 	init_decorations();
+
+	_tt_font_thin = tt_font_from_shm("sans-serif");
+	_tt_font_bold = tt_font_from_shm("sans-serif.bold");
 
 	struct decor_bounds bounds;
 	decor_get_bounds(NULL, &bounds);
@@ -171,21 +189,19 @@ int main(int argc, char * argv[]) {
 				case YUTANI_MSG_WINDOW_FOCUS_CHANGE:
 					{
 						struct yutani_msg_window_focus_change * wf = (void*)m->data;
-						yutani_window_t * win = hashmap_get(yctx->windows, (void*)wf->wid);
+						yutani_window_t * win = hashmap_get(yctx->windows, (void*)(uintptr_t)wf->wid);
 						if (win) {
 							win->focused = wf->focused;
 							redraw();
 						}
 					}
 					break;
-#if 0
 				case YUTANI_MSG_RESIZE_OFFER:
 					{
 						struct yutani_msg_window_resize * wr = (void*)m->data;
 						resize_finish(wr->width, wr->height);
 					}
 					break;
-#endif
 				case YUTANI_MSG_WINDOW_MOUSE_EVENT:
 					{
 						struct yutani_msg_window_mouse_event * me = (void*)m->data;

@@ -1,14 +1,16 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
+/**
+ * @brief Print a list of running processes.
+ *
+ * The listed processes are limited to ones owned by the current
+ * user and are listed in PID order. Various options allow for
+ * threads to be shown separately, extra information to be
+ * included in the output, etc.
+ *
+ * @copyright
  * This file is part of ToaruOS and is released under the terms
  * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2013-2018 K. Lange
- *
- * ps
- *
- * print a list of running processes
+ * Copyright (C) 2013-2021 K. Lange
  */
-
-
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <stdint.h>
@@ -20,6 +22,7 @@
 #include <pwd.h>
 
 #include <toaru/list.h>
+#include <toaru/hashmap.h>
 
 #define LINE_LEN 4096
 
@@ -27,9 +30,10 @@ static int show_all = 0;
 static int show_threads = 0;
 static int show_username = 0;
 static int show_mem = 0;
+static int show_cpu = 0;
 static int collect_commandline = 0;
 
-static int widths[] = {3,3,4,3,3,4};
+static int widths[] = {3,3,4,3,3,4,4};
 
 struct process {
 	int uid;
@@ -38,9 +42,12 @@ struct process {
 	int mem;
 	int vsz;
 	int shm;
+	int cpu;
 	char * process;
 	char * command_line;
 };
+
+static hashmap_t * process_ents = NULL;
 
 void print_username(int uid) {
 	struct passwd * p = getpwuid(uid);
@@ -54,12 +61,16 @@ void print_username(int uid) {
 	endpwent();
 }
 
+struct process * process_from_pid(pid_t pid) {
+	return hashmap_get(process_ents, (void*)(uintptr_t)pid);
+}
+
 struct process * process_entry(struct dirent *dent) {
-	char tmp[256];
+	char tmp[300];
 	FILE * f;
 	char line[LINE_LEN];
 
-	int pid = 0, uid = 0, tgid = 0, mem = 0, shm = 0, vsz = 0;
+	int pid = 0, uid = 0, tgid = 0, mem = 0, shm = 0, vsz = 0, cpu = 0;
 	char name[100];
 
 	sprintf(tmp, "/proc/%s/status", dent->d_name);
@@ -93,6 +104,8 @@ struct process * process_entry(struct dirent *dent) {
 			shm = atoi(tab);
 		} else if (strstr(line, "MemPermille:") == line) {
 			mem = atoi(tab);
+		} else if (strstr(line, "CpuPermille:") == line) {
+			cpu = atoi(tab);
 		}
 	}
 
@@ -104,7 +117,14 @@ struct process * process_entry(struct dirent *dent) {
 	}
 
 	if (!show_threads) {
-		if (tgid != pid) return NULL;
+		if (tgid != pid) {
+			/* Add this thread's CPU usage to the parent */
+			struct process * parent = process_from_pid(tgid);
+			if (parent) {
+				parent->cpu += cpu;
+			}
+			return NULL;
+		}
 	}
 
 	struct process * out = malloc(sizeof(struct process));
@@ -114,8 +134,11 @@ struct process * process_entry(struct dirent *dent) {
 	out->mem = mem;
 	out->shm = shm;
 	out->vsz = vsz;
+	out->cpu = cpu;
 	out->process = strdup(name);
 	out->command_line = NULL;
+
+	hashmap_set(process_ents, (void*)(uintptr_t)pid, out);
 
 	char garbage[1024];
 	int len;
@@ -125,6 +148,7 @@ struct process * process_entry(struct dirent *dent) {
 	if ((len = sprintf(garbage, "%d", out->vsz)) > widths[3]) widths[3] = len;
 	if ((len = sprintf(garbage, "%d", out->shm)) > widths[4]) widths[4] = len;
 	if ((len = sprintf(garbage, "%d.%01d", out->mem / 10, out->mem % 10)) > widths[5]) widths[5] = len;
+	if ((len = sprintf(garbage, "%d.%01d", out->cpu / 10, out->cpu % 10)) > widths[6]) widths[6] = len;
 
 	struct passwd * p = getpwuid(out->uid);
 	if (p) {
@@ -165,8 +189,11 @@ void print_header(void) {
 	if (show_threads) {
 		printf("%*s ", widths[1], "TID");
 	}
+	if (show_cpu) {
+		printf("%*s ", widths[6], "%CPU");
+	}
 	if (show_mem) {
-		printf("%*s ", widths[5], "MEM%");
+		printf("%*s ", widths[5], "%MEM");
 		printf("%*s ", widths[3], "VSZ");
 		printf("%*s ", widths[4], "SHM");
 	}
@@ -187,8 +214,13 @@ void print_entry(struct process * out) {
 	if (show_threads) {
 		printf("%*d ", widths[1], out->tid);
 	}
+	if (show_cpu) {
+		char tmp[10];
+		sprintf(tmp, "%*d.%01d", widths[6]-2, out->cpu / 10, out->cpu % 10);
+		printf("%*s ", widths[6], tmp);
+	}
 	if (show_mem) {
-		char tmp[6];
+		char tmp[10];
 		sprintf(tmp, "%*d.%01d", widths[5]-2, out->mem / 10, out->mem % 10);
 		printf("%*s ", widths[5], tmp);
 		printf("%*d ", widths[3], out->vsz);
@@ -221,7 +253,7 @@ void show_usage(int argc, char * argv[]) {
 int main (int argc, char * argv[]) {
 
 	/* Parse arguments */
-	char c;
+	int c;
 	while ((c = getopt(argc, argv, "AT?")) != -1) {
 		switch (c) {
 			case 'A':
@@ -243,6 +275,7 @@ int main (int argc, char * argv[]) {
 				case 'u':
 					show_username = 1;
 					show_mem = 1;
+					show_cpu = 1;
 					// fallthrough
 				case 'a':
 					collect_commandline = 1;
@@ -259,6 +292,8 @@ int main (int argc, char * argv[]) {
 
 	/* Read the entries in the directory */
 	list_t * ents_list = list_create();
+
+	process_ents = hashmap_create_int(10);
 
 	struct dirent * ent = readdir(dirp);
 	while (ent != NULL) {
@@ -282,8 +317,3 @@ int main (int argc, char * argv[]) {
 	return 0;
 }
 
-/*
- * vim: tabstop=4
- * vim: shiftwidth=4
- * vim: noexpandtab
- */

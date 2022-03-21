@@ -1,11 +1,16 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
+/**
+ * @brief Line editor
+ *
+ * Interactive line input editor with syntax highlighting for
+ * a handful of languages. Based on an old version of Bim.
+ * Used by the shell and Kuroko.
+ *
+ * This library is generally usable on Linux and even Windows.
+ *
+ * @copyright
  * This file is part of ToaruOS and is released under the terms
  * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2018 K. Lange
- *
- * Experimental rline replacement with syntax highlighting, based
- * on bim's highlighting and line editing.
- *
+ * Copyright (C) 2018-2021 K. Lange
  */
 #define _XOPEN_SOURCE
 #define _DEFAULT_SOURCE
@@ -46,6 +51,7 @@ int rline_history_offset = 0;
 int rline_scroll = 0;
 char * rline_exit_string = "exit\n";
 int rline_terminal_width = 0;
+char * rline_preload = NULL;
 
 void rline_history_insert(char * str) {
 	if (str[strlen(str)-1] == '\n') {
@@ -229,7 +235,13 @@ int rline_exp_set_tab_complete_func(rline_callback_t func) {
 	return 0;
 }
 
+static int have_unget = -1;
 static int getch(int timeout) {
+	if (have_unget >= 0) {
+		int out = have_unget;
+		have_unget = -1;
+		return out;
+	}
 #ifndef _WIN32
 	return fgetc(stdin);
 #else
@@ -364,6 +376,10 @@ static const char * COLOR_GREEN     = "@2";
 static const char * COLOR_ESCAPE    = "@2";
 static const char * COLOR_SEARCH_FG = "@0";
 static const char * COLOR_SEARCH_BG = "@3";
+static const char * COLOR_ERROR_FG  = "@9";
+static const char * COLOR_ERROR_BG  = "@9";
+static const char * COLOR_BOLD      = "@9";
+static const char * COLOR_LINK      = "@9";
 
 /**
  * Themes are selected from the $RLINE_THEME
@@ -385,6 +401,10 @@ static void rline_exp_load_colorscheme_default(void) {
 	COLOR_ESCAPE    = "@12";
 	COLOR_SEARCH_FG = "@0";
 	COLOR_SEARCH_BG = "@13";
+	COLOR_ERROR_FG  = "@17";
+	COLOR_ERROR_BG  = "@1";
+	COLOR_BOLD      = "@9";
+	COLOR_LINK      = "@14";
 }
 
 static void rline_exp_load_colorscheme_sunsmoke(void) {
@@ -403,6 +423,10 @@ static void rline_exp_load_colorscheme_sunsmoke(void) {
 	COLOR_ESCAPE    = "2;113;203;173";
 	COLOR_SEARCH_FG = "5;234";
 	COLOR_SEARCH_BG = "5;226";
+	COLOR_ERROR_FG  = "5;15";
+	COLOR_ERROR_BG  = "5;196";
+	COLOR_BOLD      = "2;230;230;230;1";
+	COLOR_LINK      = "2;51;162;230;4";
 }
 
 /**
@@ -523,44 +547,11 @@ void paintNHex(struct syntax_state * state, int n) {
 	}
 }
 
-void paint_krk_string(struct syntax_state * state, int type) {
-	/* Assumes you came in from a check of charat() == '"' */
-	paint(1, FLAG_STRING);
-	while (charat() != -1) {
-		if (charat() == '\\' && nextchar() == type) {
-			paint(2, FLAG_ESCAPE);
-		} else if (charat() == type) {
-			paint(1, FLAG_STRING);
-			return;
-		} else if (charat() == '\\') {
-			if (nextchar() == 'x') {
-				paintNHex(state, 2);
-			} else if (nextchar() == 'u') {
-				paintNHex(state, 4);
-			} else if (nextchar() == 'U') {
-				paintNHex(state, 8);
-			} else if (nextchar() >= '0' && nextchar() <= '7') {
-				paint(2, FLAG_ESCAPE);
-				if (charat() >= '0' && charat() <= '7') {
-					paint(1, FLAG_ESCAPE);
-					if (charat() >= '0' && charat() <= '7') {
-						paint(1, FLAG_ESCAPE);
-					}
-				}
-			} else {
-				paint(2, FLAG_ESCAPE);
-			}
-		} else {
-			paint(1, FLAG_STRING);
-		}
-	}
-}
-
 char * syn_krk_keywords[] = {
 	"and","class","def","else","for","if","in","import","del",
 	"let","not","or","return","while","try","except","raise",
 	"continue","break","as","from","elif","lambda","with","is",
-	"pass","assert","yield","finally",
+	"pass","assert","yield","finally","async","await",
 	NULL
 };
 
@@ -573,6 +564,7 @@ char * syn_krk_types[] = {
 	"print","set","any","all","bool","ord","chr","hex","oct","filter",
 	"sorted","bytes","getattr","sum","min","max","id","hash","map","bin",
 	"enumerate","zip","setattr","property","staticmethod","classmethod",
+	"issubclass","hasattr","delattr","NotImplemented","abs",
 	NULL
 };
 
@@ -583,11 +575,82 @@ char * syn_krk_special[] = {
 };
 
 char * syn_krk_exception[] = {
-	"TypeError","ArgumentError","IndexError","KeyError","AttributeError",
-	"NameError","ImportError","IOError","ValueError","KeyboardInterrupt",
-	"ZeroDivisionError","SyntaxError","Exception",
+	"Exception", "TypeError", "ArgumentError", "IndexError", "KeyError",
+	"AttributeError", "NameError", "ImportError", "IOError", "ValueError",
+	"KeyboardInterrupt", "ZeroDivisionError", "NotImplementedError", "SyntaxError",
+	"AssertionError",
 	NULL
 };
+
+void paint_krk_string_shared(struct syntax_state * state, int type, int isFormat, int isTriple) {
+	if (charat() == '\\') {
+		if (nextchar() == 'x') {
+			paintNHex(state, 2);
+		} else if (nextchar() == 'u') {
+			paintNHex(state, 4);
+		} else if (nextchar() == 'U') {
+			paintNHex(state, 8);
+		} else if (nextchar() >= '0' && nextchar() <= '7') {
+			paint(2, FLAG_ESCAPE);
+			if (charat() >= '0' && charat() <= '7') {
+				paint(1, FLAG_ESCAPE);
+				if (charat() >= '0' && charat() <= '7') {
+					paint(1, FLAG_ESCAPE);
+				}
+			}
+		} else {
+			paint(2, FLAG_ESCAPE);
+		}
+	} else if (isFormat && charat() == '{') {
+		paint(1, FLAG_ESCAPE);
+		if (charat() == '}') {
+			state->i--;
+			paint(2, FLAG_ERROR); /* Can't do that. */
+		} else {
+			int x = 0;
+			while (charat() != -1) {
+				if (charat() == '{') {
+					x++;
+				} else if (charat() == '}') {
+					if (x == 0) {
+						paint(1, FLAG_ESCAPE);
+						break;
+					}
+					x--;
+				} else if (charat() == type && !isTriple) {
+					while (charat() != -1) {
+						paint(1, FLAG_ERROR);
+					}
+					return;
+				} else if (find_keywords(state, syn_krk_keywords, FLAG_ESCAPE, c_keyword_qualifier)) {
+					continue;
+				} else if (lastchar() != '.' && find_keywords(state, syn_krk_types, FLAG_TYPE, c_keyword_qualifier)) {
+					continue;
+				} else if (find_keywords(state, syn_krk_exception, FLAG_PRAGMA, c_keyword_qualifier)) {
+					continue;
+				}
+				paint(1, FLAG_NUMERAL);
+			}
+		}
+	} else {
+		paint(1, FLAG_STRING);
+	}
+}
+
+void paint_krk_string(struct syntax_state * state, int type, int isFormat) {
+	/* Assumes you came in from a check of charat() == '"' */
+	paint(1, FLAG_STRING);
+	while (charat() != -1) {
+		if (charat() == '\\' && nextchar() == type) {
+			paint(2, FLAG_ESCAPE);
+		} else if (charat() == type) {
+			paint(1, FLAG_STRING);
+			return;
+		} else {
+			paint_krk_string_shared(state,type,isFormat,0);
+		}
+	}
+}
 
 int paint_krk_numeral(struct syntax_state * state) {
 	if (charat() == '0' && (nextchar() == 'x' || nextchar() == 'X')) {
@@ -609,16 +672,18 @@ int paint_krk_numeral(struct syntax_state * state) {
 	return 0;
 }
 
-int paint_krk_triple_string(struct syntax_state * state, int type) {
+int paint_krk_triple_string(struct syntax_state * state, int type, int isFormat) {
 	while (charat() != -1) {
-		if (charat() == type) {
+		if (charat() == '\\' && nextchar() == type) {
+			paint(2, FLAG_ESCAPE);
+		} else if (charat() == type) {
 			paint(1, FLAG_STRING);
 			if (charat() == type && nextchar() == type) {
 				paint(2, FLAG_STRING);
 				return 0;
 			}
 		} else {
-			paint(1, FLAG_STRING);
+			paint_krk_string_shared(state,type,isFormat,1);
 		}
 	}
 	return (type == '"') ? 1 : 2; /* continues */
@@ -635,12 +700,13 @@ int syn_krk_calculate(struct syntax_state * state) {
 				while (c_keyword_qualifier(charat())) paint(1, FLAG_TYPE);
 				return 0;
 			} else if (charat() == '"' || charat() == '\'') {
+				int isFormat = (lastchar() == 'f');
 				if (nextchar() == charat() && charrel(2) == charat()) {
 					int type = charat();
 					paint(3, FLAG_STRING);
-					return paint_krk_triple_string(state, type);
+					return paint_krk_triple_string(state, type, isFormat);
 				} else {
-					paint_krk_string(state, charat());
+					paint_krk_string(state, charat(), isFormat);
 				}
 				return 0;
 			} else if (find_keywords(state, syn_krk_keywords, FLAG_KEYWORD, c_keyword_qualifier)) {
@@ -659,10 +725,11 @@ int syn_krk_calculate(struct syntax_state * state) {
 				return 0;
 			}
 			break;
+		/* rline doesn't support multiline editing anyway */
 		case 1:
-			return paint_krk_triple_string(state, '"');
+			return paint_krk_triple_string(state, '"', 0);
 		case 2:
-			return paint_krk_triple_string(state, '\'');
+			return paint_krk_triple_string(state, '\'', 0);
 	}
 	return -1;
 }
@@ -810,7 +877,7 @@ int syn_esh_calculate(struct syntax_state * state) {
 		return 0;
 	} else if (find_keywords(state, shell_commands, FLAG_KEYWORD, esh_keyword_qualifier)) {
 		return 0;
-	} else if (isdigit(charat())) {
+	} else if (!c_keyword_qualifier(lastchar()) && isdigit(charat())) {
 		while (isdigit(charat())) paint(1, FLAG_NUMERAL);
 		return 0;
 	} else if (charat() != -1) {
@@ -1069,10 +1136,10 @@ static const char * flag_to_color(int _flag) {
 			return COLOR_GREEN;
 		case FLAG_DIFFMINUS:
 			return COLOR_RED;
-//		case FLAG_BOLD:
-//			return COLOR_BOLD;
-//		case FLAG_LINK:
-//			return COLOR_LINK;
+		case FLAG_BOLD:
+			return COLOR_BOLD;
+		case FLAG_LINK:
+			return COLOR_LINK;
 		case FLAG_ESCAPE:
 			return COLOR_ESCAPE;
 		default:
@@ -1346,6 +1413,9 @@ static void render_line(void) {
 			} else if (c.flags == FLAG_NOTICE) {
 				set_colors(COLOR_SEARCH_FG, COLOR_SEARCH_BG);
 				was_searching = 1;
+			} else if (c.flags == FLAG_ERROR) {
+				set_colors(COLOR_ERROR_FG, COLOR_ERROR_BG);
+				was_searching = 1; /* co-opting this should work... */
 			} else if (was_searching) {
 				fprintf(stdout,"\033[0m");
 				set_colors(color, COLOR_BG);
@@ -1427,6 +1497,7 @@ static void render_line(void) {
 		}
 	}
 
+	printf("\033[0m");
 	set_colors(COLOR_FG, COLOR_BG);
 
 	if (show_right_side && prompt_right_width) {
@@ -1691,7 +1762,7 @@ void redraw_matching_paren(int col) {
 
 void highlight_matching_paren(void) {
 	int col = -1;
-	if (is_paren(the_line->text[column].codepoint)) {
+	if (column < the_line->actual && is_paren(the_line->text[column].codepoint)) {
 		find_matching_paren(&col, 0);
 	} else if (column > 0 && is_paren(the_line->text[column-1].codepoint)) {
 		find_matching_paren(&col, 1);
@@ -1810,31 +1881,18 @@ static void history_previous(void) {
  * Cycle to next history entry
  */
 static void history_next(void) {
-	if (rline_scroll > 1) {
+	if (rline_scroll >= 1) {
+		unsigned char * buf;
+		if (rline_scroll > 1) buf = (unsigned char *)rline_history_prev(rline_scroll-1);
+		else buf = (unsigned char *)temp_buffer;
 		rline_scroll--;
 
 		/* Copy in from history */
 		the_line->actual = 0;
 		column = 0;
 		loading = 1;
-		unsigned char * buf = (unsigned char *)rline_history_prev(rline_scroll);
 		uint32_t istate = 0, c = 0;
 		for (unsigned int i = 0; i < strlen((char *)buf); ++i) {
-			if (!decode(&istate, &c, buf[i])) {
-				insert_char(c);
-			}
-		}
-		loading = 0;
-	} else if (rline_scroll == 1) {
-		/* Copy in from temp */
-		rline_scroll = 0;
-
-		the_line->actual = 0;
-		column = 0;
-		loading = 1;
-		char * buf = temp_buffer;
-		uint32_t istate = 0, c = 0;
-		for (unsigned int i = 0; i < strlen(buf); ++i) {
 			if (!decode(&istate, &c, buf[i])) {
 				insert_char(c);
 			}
@@ -2064,7 +2122,125 @@ static void call_rline_func(rline_callback_t func, rline_context_t * context) {
 	rline_place_cursor();
 }
 
-char * rline_preload = NULL;
+static int reverse_search(void) {
+	/* Store state */
+	char * old_prompt = prompt;
+	int old_prompt_width = prompt_width;
+	int old_prompt_width_calc = prompt_width_calc;
+	line_t * old_line = the_line;
+
+	char buffer[1024] = {0};
+	unsigned int off = 0;
+
+	the_line = NULL;
+
+	prompt = "(r-search) ";
+	prompt_width = strlen(prompt);
+	prompt_width_calc = prompt_width;
+
+	int cin, timeout = 0;
+	uint32_t c = 0, istate = 0;
+
+	int start_at = 0;
+	int retval = 0;
+
+	while (1) {
+		_next: (void)0;
+
+		off = 0;
+		buffer[0] = '\0';
+		for (int j = 0; j < old_line->actual; j++) {
+			buffer[off] = '\0';
+			char_t c = old_line->text[j];
+			off += to_eight(c.codepoint, &buffer[off]);
+		}
+
+		if (the_line) free(the_line);
+		the_line = line_create();
+
+		int match_offset = 0;
+
+		if (off) {
+			for (int i = start_at; i < rline_history_count; ++i) {
+				char * buf= rline_history_prev(i+1);
+				char * match = strstr(buf, buffer);
+				if (match) {
+					match_offset = i;
+					column = 0;
+					loading = 1;
+					uint32_t istate = 0, c = 0;
+					int invert_start = 0;
+					for (unsigned int i = 0; i < strlen((char *)buf); ++i) {
+						if (match == &buf[i]) invert_start = the_line->actual;
+						if (!decode(&istate, &c, buf[i])) {
+							insert_char(c);
+						}
+					}
+					loading = 0;
+					offset = 0;
+					recalculate_tabs(the_line);
+					recalculate_syntax(the_line);
+					for (int i = 0; i < old_line->actual; ++i) {
+						the_line->text[invert_start+i].flags |= FLAG_SELECT;
+					}
+					column = invert_start;
+					break;
+				}
+			}
+		}
+
+		render_line();
+
+		if (the_line->actual == 0) {
+			offset = 0;
+			column = 0;
+			rline_place_cursor();
+			set_fg_color(COLOR_ALT_FG);
+			printf("%s", buffer);
+			fflush(stdout);
+		}
+
+		while ((cin = getch(timeout))) {
+			if (cin == -1) continue;
+			if (!decode(&istate, &c, cin)) {
+				switch (c) {
+					case '\033':
+						have_unget = '\033';
+						goto _done;
+					case DELETE_KEY:
+					case BACKSPACE_KEY:
+						line_delete(old_line, old_line->actual);
+						goto _next;
+					case 13:
+					case ENTER_KEY:
+						retval = 1;
+						goto _done;
+					case 18:
+						start_at = match_offset + 1;
+						goto _next;
+					default: {
+						char_t _c;
+						_c.codepoint = c;
+						_c.flags = 0;
+						_c.display_width = codepoint_width(c);
+						old_line = line_insert(old_line, _c, old_line->actual);
+						goto _next;
+					}
+				}
+			}
+		}
+	}
+
+_done:
+	free(old_line);
+	prompt = old_prompt;
+	prompt_width = old_prompt_width;
+	prompt_width_calc = old_prompt_width_calc;
+	offset = 0;
+	render_line();
+	rline_place_cursor();
+	return retval;
+}
 
 /**
  * Perform actual interactive line editing.
@@ -2167,6 +2343,16 @@ static int read_line(void) {
 						break;
 					case 23: /* ^W */
 						delete_word();
+						break;
+					case 18: /* ^R - Begin reverse search */
+						if (reverse_search()) {
+							loading = 1;
+							column = the_line->actual;
+							recalculate_syntax(the_line);
+							render_line();
+							insert_char('\n');
+							return 1;
+						}
 						break;
 					case 12: /* ^L - Repaint the whole screen */
 						printf("\033[2J\033[H");

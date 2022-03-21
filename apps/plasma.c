@@ -1,10 +1,12 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
+/**
+ * @brief Threaded graphical demo that draws animated plasma.
+ *
+ * Good for burning CPU.
+ *
+ * @copyright
  * This file is part of ToaruOS and is released under the terms
  * of the NCSA / University of Illinois License - see LICENSE.md
  * Copyright (C) 2013-2018 K. Lange
- *
- * plasma - Draw animated plasma in a window
- *
  */
 #include <stdlib.h>
 #include <assert.h>
@@ -82,7 +84,7 @@ void * draw_thread(void * garbage) {
 					+ sin(dist(x, y, 64.0, 64.0) / 8.0)
 					+ sin(dist(x, y + time / 7, 192.0, 64) / 7.0)
 					+ sin(dist(x, y, 192.0, 100.0) / 8.0);
-				GFX(ctx, x + off_x, y + off_y) = palette[(int)((value + 4) * 32)];
+				GFX(ctx, x + off_x, y + off_y) = palette[(unsigned int)((value + 4) * 32) & 0xFF];
 			}
 		}
 		redraw_borders();
@@ -163,7 +165,7 @@ int main (int argc, char ** argv) {
 				case YUTANI_MSG_WINDOW_FOCUS_CHANGE:
 					{
 						struct yutani_msg_window_focus_change * wf = (void*)m->data;
-						yutani_window_t * win = hashmap_get(yctx->windows, (void*)wf->wid);
+						yutani_window_t * win = hashmap_get(yctx->windows, (void*)(uintptr_t)wf->wid);
 						if (win && win == wina) {
 							win->focused = wf->focused;
 						}

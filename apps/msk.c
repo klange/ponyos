@@ -1,9 +1,5 @@
-/* vim: ts=4 sw=4 noexpandtab
- * This file is part of ToaruOS and is released under the terms
- * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2018 K. Lange
- *
- * msk - Package Management Utility for ToaruOS
+/**
+ * @brief Package Management Utility for ToaruOS
  *
  * This is a not-quite-faithful reconstruction of the original
  * Python msk. The supported package format is a bit different,
@@ -11,6 +7,11 @@
  *
  * Packages can optionally be uncompressed, which is also
  * important for bootstrapping at the moment.
+ *
+ * @copyright
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2018 K. Lange
  */
 #include <stdio.h>
 #include <string.h>
@@ -173,6 +174,11 @@ static int update_stores(int argc, char * argv[]) {
 		return usage(argc,argv);
 	}
 
+	const char * manifest_prefix = "";
+#ifdef __aarch64__
+	manifest_prefix = "aarch64.";
+#endif
+
 	needs_lock();
 
 	read_config();
@@ -206,10 +212,10 @@ static int update_stores(int argc, char * argv[]) {
 			}
 		} else {
 			char cmd[512];
-			sprintf(cmd, "fetch -vo /tmp/.msk_remote_%s %s/manifest", remote_name, remote_path);
+			sprintf(cmd, "fetch -vo /tmp/.msk_remote_%s %s/%smanifest", remote_name, remote_path, manifest_prefix);
 			fprintf(stderr, "Downloading remote manifest '%s'...\n", remote_name);
 			if (system(cmd)) {
-				fprintf(stderr, "Error loading remote '%s' from '%s'.\n", remote_name, remote_path);
+				fprintf(stderr, "Skipping unavailable remote manifest '%s' (%s).\n", remote_name, remote_path);
 				goto _next;
 			}
 			sprintf(cmd, "/tmp/.msk_remote_%s", remote_name);
@@ -242,7 +248,7 @@ static int update_stores(int argc, char * argv[]) {
 		one_success = 1;
 
 _next:
-		tok = strtok_r(NULL, " ", &save);
+		tok = strtok_r(NULL, ",", &save);
 	} while (tok);
 	free(order);
 
@@ -294,15 +300,25 @@ static int install_package(char * pkg) {
 	char * type = confreader_getd(msk_manifest, pkg, "type", "");
 	char * msk_remote = confreader_get(msk_manifest, pkg, "remote_path");
 
-	if (strstr(msk_remote, "http:") == msk_remote) {
+	if (strstr(msk_remote, "http:") == msk_remote || strstr(msk_remote, "https:") == msk_remote) {
 		char * source = confreader_get(msk_manifest, pkg, "source");
 		if (source) {
 			fprintf(stderr, "Download %s...\n", pkg);
 			char cmd[1024];
 			sprintf(cmd, "fetch -o /tmp/msk.file -v %s/%s", msk_remote,
 					source);
-			system(cmd);
+			int status;
+			if ((status = system(cmd))) {
+				return status;
+			}
 			hashmap_set(hashmap_get(msk_manifest->sections, pkg), "source", "/tmp/msk.file");
+		}
+	} else if (msk_remote[0] == '/') {
+		char * source = confreader_get(msk_manifest, pkg, "source");
+		if (source) {
+			char * pkg_name = malloc(strlen(msk_remote) + strlen(source) + 2);
+			sprintf(pkg_name, "%s/%s", msk_remote, source);
+			hashmap_set(hashmap_get(msk_manifest->sections, pkg), "source", pkg_name);
 		}
 	}
 
@@ -379,6 +395,17 @@ static int install_package(char * pkg) {
 		return 1;
 	}
 
+	char * source = confreader_get(msk_manifest, pkg, "source");
+	if (source && !strcmp(source, "/tmp/msk.file")) {
+		char cmd[1024];
+		sprintf(cmd, "rm %s", source);
+		int status;
+		if ((status = system(cmd))) {
+			fprintf(stderr, "cleanup command returned %d\n", status);
+			return status;
+		}
+	}
+
 	char * post = confreader_getd(msk_manifest, pkg, "post", "");
 	if (strlen(post)) {
 		int status;
@@ -422,9 +449,9 @@ static int install_packages(int argc, char * argv[]) {
 			notfirst = 1;
 		}
 		fprintf(stderr, "\nContinue? [Y/n] ");
-		fflush(stdout);
-		char resp[4];
-		fgets(resp, 4, stdin);
+		fflush(stderr);
+		char resp[5];
+		fgets(resp, 5, stdin);
 		if (!(!strcmp(resp,"\n") || !strcmp(resp,"y\n") || !strcmp(resp,"Y\n") || !strcmp(resp,"yes\n"))) {
 			fprintf(stderr, "Aborting.\n");
 			return 1;

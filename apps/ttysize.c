@@ -1,9 +1,5 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
- * This file is part of ToaruOS and is released under the terms
- * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2018 K. Lange
- *
- * ttysize - Magically divine terminal size
+/**
+ * @brief ttysize - Magically divine terminal size
  *
  * This is called by getty to determine the size of foreign
  * terminals, such as ones attached over serial.
@@ -12,6 +8,11 @@
  * screen and requesting its position. Note that typing things
  * while this happens can cause problems. Maybe we can flush
  * stdin before doing this to try to avoid any conflicting data?
+ *
+ * @copyright
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2018 K. Lange
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -56,7 +57,7 @@ static void divine_size(int * width, int * height) {
 	char buf[1024] = {0};
 	size_t i = 0;
 	while (1) {
-		char c = getc_timeout(stdin, 200);
+		int c = getc_timeout(stdin, 200);
 		if (c == 'R') break;
 		if (c == -1) goto _done;
 		if (c == '\033') continue;

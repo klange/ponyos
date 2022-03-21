@@ -1,7 +1,7 @@
-PRETTY_NAME="PonyOS 7.0"
+PRETTY_NAME="PonyOS 8.0"
 NAME="PonyOS"
-VERSION_ID="7.0.0"
-VERSION="7.0.0"
+VERSION_ID="8.0.0"
+VERSION="8.0.0"
 ID=ponyos
 HOME_URL="https://ponyos.org/"
 SUPPORT_URL="https://github.com/klange/ponyos"

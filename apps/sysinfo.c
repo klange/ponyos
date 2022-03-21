@@ -1,11 +1,31 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
+/**
+ * @brief Display system information.
+ *
+ * Similar to tools like 'screenfetch', this displays information
+ * about ToaruOS, the current machine state, and the user's
+ * configuration options, alongside a terminal-safe rendition
+ * of the OS's logo.
+ *
+ * This is a bit overcomplicated as we used to show an elaborate
+ * logo from a BMP/PNG, but our current logo can be nicely
+ * represented with block characters so that's kind moot; maybe
+ * this should be simplified...
+ *
+ * Uses a few other utilities:
+ *   hostname
+ *   uname -sr
+ *   uptime -p
+ *   msk count
+ *   sh -v
+ *   yutani-query resolution
+ *   font-tool -n
+ *   cpu-name.krk
+ *   free -ut
+ *
+ * @copyright
  * This file is part of ToaruOS and is released under the terms
  * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2015-2018 K. Lange
- *
- * sysinfo - visually based on screenfetch
- *
- * Displays system information in a visually-pleasing format.
+ * Copyright (C) 2015-2021 K. Lange
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,21 +56,36 @@ void print_thing(int j) {
 	}
 }
 
+static void reset(void) {
+	printf("\033[0m");
+}
+
+static int term_is_toaru = 0;
+static void foreground_color(uint32_t color) {
+	printf(term_is_toaru ? "\033[38;6;%d;%d;%d;%dm" : "\033[38;2;%d;%d;%dm",
+		(int)_RED(color), (int)_GRE(color), (int)_BLU(color), (int)_ALP(color));
+}
+
+static void background_color(uint32_t color) {
+	printf(term_is_toaru ? "\033[48;6;%d;%d;%d;%dm" : "\033[48;2;%d;%d;%dm",
+		(int)_RED(color), (int)_GRE(color), (int)_BLU(color), (int)_ALP(color));
+}
+
 int main(int argc, char * argv[]) {
 
 	/* Prepare data */
 	char * user = getenv("USER");
 	char * wm_theme = getenv("WM_THEME");
 	char * term = getenv("TERM");
-	int term_is_toaru = term && strstr(term,"toaru");
+	term_is_toaru = term && strstr(term,"toaru");
 
 	int i = 0;
 
 	prog_lines[i] = "hostname";
 	sprintf(data_lines[i++], C_A "%s" C_O "@" C_A, user);
 
-	/* no command */
-	sprintf(data_lines[i++], C_A "OS: " C_O "PonyOS");
+	prog_lines[i] = ". /etc/os-release; echo ${PRETTY_NAME}";
+	sprintf(data_lines[i++], C_A "OS: " C_O);
 
 	prog_lines[i] = "uname -sr";
 	sprintf(data_lines[i++], C_A "Kernel: " C_O);
@@ -72,6 +107,12 @@ int main(int argc, char * argv[]) {
 
 	/* from environment */
 	sprintf(data_lines[i++], C_A "WM Theme: " C_O "%s", wm_theme);
+
+	prog_lines[i] = "font-tool -n";
+	sprintf(data_lines[i++], C_A "Font: " C_O);
+
+	prog_lines[i] = "cpu-name.krk";
+	sprintf(data_lines[i++], C_A "CPU: " C_O);
 
 	prog_lines[i] = "free -ut";
 	sprintf(data_lines[i++], C_A "RAM: " C_O);
@@ -102,18 +143,26 @@ int main(int argc, char * argv[]) {
 				rgba(0,0,0,TERM_DEFAULT_OPAC),
 				premultiply(rgba(r_b, g_b, b_b, a_b)));
 
-			if (term_is_toaru) {
-
-				/* Print half block */
-				printf("\033[38;6;%d;%d;%d;%dm\033[48;6;%d;%d;%d;%dm▄",
-						(int)_RED(back), (int)_GRE(back), (int)_BLU(back), (int)_ALP(back),
-						(int)_RED(out), (int)_GRE(out), (int)_BLU(out), (int)_ALP(out));
-			} else {
-				printf("\033[38;2;%d;%d;%dm\033[48;2;%d;%d;%dm▄",
-						(int)_RED(back), (int)_GRE(back), (int)_BLU(back),
-						(int)_RED(out), (int)_GRE(out), (int)_BLU(out));
+			/* Are both cells transparent? */
+			if (a_t == 0 && a_b == 0) {
+				reset();
+				printf(" ");
+				continue;
 			}
 
+			if (a_b == 0) {
+				reset();
+				foreground_color(out);
+				printf("▀");
+			} else if (a_t == 0) {
+				reset();
+				foreground_color(back);
+				printf("▄");
+			} else {
+				foreground_color(back);
+				background_color(out);
+				printf("▄");
+			}
 		}
 		if (j < i) {
 			print_thing(j);

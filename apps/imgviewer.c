@@ -1,9 +1,5 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
- * This file is part of ToaruOS and is released under the terms
- * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2018 K. Lange
- *
- * imgviewer - Display bitmaps in a graphical window.
+/**
+ * @brief imgviewer - Display bitmaps in a graphical window.
  *
  * This is probably the 4th time I've (re)written a version of
  * this application... This uses the libtoaru_graphics sprite
@@ -11,6 +7,10 @@
  * that ends up supporting - which at the time of writing is
  * just bitmaps of various types.
  *
+ * @copyright
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2018 K. Lange
  */
 
 #include <stdio.h>
@@ -20,6 +20,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <getopt.h>
+#include <libgen.h>
 
 #include <toaru/yutani.h>
 #include <toaru/graphics.h>
@@ -43,9 +44,12 @@ int top    = 40;
 int width  = 300;
 int height = 300;
 
+int current_scale = 100;
+
 sprite_t img = {0};
 
 #define APPLICATION_TITLE "Image Viewer"
+static char window_title[1024] = APPLICATION_TITLE;
 
 void usage(char * argv[]) {
 	printf(
@@ -58,22 +62,43 @@ void usage(char * argv[]) {
 }
 
 static void decors() {
-	render_decorations(window, ctx, APPLICATION_TITLE);
+	if (current_scale != 100) {
+		char tmp[1100];
+		snprintf(tmp, 1100, "%s [%d%%]", window_title, current_scale);
+		render_decorations(window, ctx, tmp);
+	} else {
+		render_decorations(window, ctx, window_title);
+	}
 }
 
 void redraw() {
-	static double r = 0.0;
+	uint32_t dark  = rgb(107,107,107);
+	uint32_t light = rgb(147,147,147);
+	uint32_t black = rgb(0,0,0);
+
+	int calc_width = img.width * (current_scale / 100.0);
+	int calc_height = img.height * (current_scale / 100.0);
+
+	int image_left  = width / 2 - calc_width / 2;
+	int image_right = image_left + calc_width; /* TODO scaling */
+	int image_top   = height / 2 - calc_height / 2;
+	int image_bot   = image_top + calc_height;
 
 	for (int y = 0; y < height; ++y) {
 		for (int x = 0; x < width; ++x) {
-			GFX(ctx,x+decor_left_width,y+decor_top_height) = (((y / 10) % 2 == 0) ^ ((x / 10) % 2 == 0)) ? rgb(107,107,107) : rgb(147,147,147);
+			uint32_t color = (x < image_left || x >= image_right || y < image_top || y >= image_bot) ? black :
+			((((y / 10) % 2 == 0) ^ ((x / 10) % 2 == 0)) ? dark : light);
+			GFX(ctx,x+decor_left_width,y+decor_top_height) = color;
 		}
 	}
 
-	draw_sprite(ctx, &img, decor_left_width + width/2 - img.width/2, decor_top_height + height/2 - img.height/2);
+	if (current_scale != 100) {
+		draw_sprite_scaled(ctx, &img, decor_left_width + image_left, decor_top_height + image_top, calc_width, calc_height);
+	} else {
+		draw_sprite(ctx, &img, decor_left_width + image_left, decor_top_height + image_top);
+	}
 	decors();
 	flip(ctx);
-	r += 0.02;
 }
 
 void resize_finish(int w, int h) {
@@ -99,6 +124,11 @@ void resize_finish(int w, int h) {
 	yutani_flip(yctx, window);
 }
 
+static int one_fifth(int scale) {
+	int out = scale * 0.05;
+	if (out) return out;
+	return 1;
+}
 
 int main(int argc, char * argv[]) {
 
@@ -155,13 +185,15 @@ int main(int argc, char * argv[]) {
 		return 1;
 	}
 
-	width = img.width;
-	height = img.height;
+	width  = img.width  < 300 ? 300 : img.width;
+	height = img.height < 300 ? 300 : img.height;
 
 	window = yutani_window_create(yctx, width + decor_width, height + decor_height);
 	yutani_window_move(yctx, window, left, top);
 
-	yutani_window_advertise_icon(yctx, window, APPLICATION_TITLE, "imgviewer");
+	snprintf(window_title, 1023, "%s - " APPLICATION_TITLE, basename(argv[1]));
+
+	yutani_window_advertise_icon(yctx, window, window_title, "image");
 
 	ctx = init_graphics_yutani_double_buffer(window);
 
@@ -190,7 +222,7 @@ int main(int argc, char * argv[]) {
 				case YUTANI_MSG_WINDOW_FOCUS_CHANGE:
 					{
 						struct yutani_msg_window_focus_change * wf = (void*)m->data;
-						yutani_window_t * win = hashmap_get(yctx->windows, (void*)wf->wid);
+						yutani_window_t * win = hashmap_get(yctx->windows, (void*)(uintptr_t)wf->wid);
 						if (win && win == window) {
 							win->focused = wf->focused;
 							decors();
@@ -220,6 +252,17 @@ int main(int argc, char * argv[]) {
 							default:
 								/* Other actions */
 								break;
+						}
+						if (me->wid == window->wid) {
+							if (me->buttons & YUTANI_MOUSE_SCROLL_UP) {
+								current_scale = current_scale + one_fifth(current_scale);
+								redraw();
+								yutani_flip(yctx, window);
+							} else if (me->buttons & YUTANI_MOUSE_SCROLL_DOWN) {
+								current_scale = current_scale - one_fifth(current_scale);
+								redraw();
+								yutani_flip(yctx, window);
+							}
 						}
 					}
 					break;

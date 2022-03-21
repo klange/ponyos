@@ -1,9 +1,10 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
+/**
+ * @brief HTML-ish markup parser.
+ *
+ * @copyright
  * This file is part of ToaruOS and is released under the terms
  * of the NCSA / University of Illinois License - see LICENSE.md
  * Copyright (C) 2018 K. Lange
- *
- * Markup parser.
  */
 #include <stdio.h>
 #include <toaru/markup.h>
@@ -23,7 +24,7 @@ struct markup_state {
 };
 
 struct markup_state * markup_init(void * user, markup_callback_tag_open open, markup_callback_tag_close close, markup_callback_data data) {
-	struct markup_state * out = malloc(sizeof(out));
+	struct markup_state * out = malloc(sizeof(struct markup_state));
 
 	out->state = 0;
 	out->user = user;

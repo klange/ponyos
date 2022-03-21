@@ -1,12 +1,12 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
- * This file is part of ToaruOS and is released under the terms
- * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2013-2014 K. Lange
- *
- * Login Service
+/**
+ * @brief TTY login prompt
  *
  * Provides the user with a login prompt and starts their session.
  *
+ * @copyright
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2013-2014 K. Lange
  */
 
 #include <stdio.h>
@@ -69,10 +69,6 @@ int main(int argc, char ** argv) {
 		}
 	}
 
-	printf("\n");
-	system("uname -a");
-	printf("\n");
-
 	signal(SIGINT, sig_pass);
 	signal(SIGWINCH, sig_pass);
 	signal(SIGSEGV, sig_segv);
@@ -101,6 +97,10 @@ int main(int argc, char ** argv) {
 		if (!strcmp(username, "reboot")) {
 			/* Quick hack so vga text mode login can exit */
 			system("reboot");
+		}
+
+		if (!strcmp(username, "disconnect")) {
+			return 2;
 		}
 
 		fprintf(stdout, "password: ");
@@ -144,9 +144,8 @@ do_fork:
 	f = fork();
 	if (getpid() != pid) {
 		ioctl(STDIN_FILENO, IOCTLTTYLOGIN, &uid);
-		setuid(uid);
+		toaru_set_credentials(uid);
 		setsid();
-		toaru_auth_set_vars();
 		char * args[] = {
 			getenv("SHELL"),
 			NULL

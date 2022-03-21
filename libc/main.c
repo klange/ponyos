@@ -4,6 +4,7 @@
 
 #include <syscall.h>
 #include <syscall_nums.h>
+#include <sys/sysfunc.h>
 
 DEFN_SYSCALL1(exit,  SYS_EXT, int);
 DEFN_SYSCALL2(sleepabs,  SYS_SLEEPABS, unsigned long, unsigned long);
@@ -22,20 +23,26 @@ extern char ** __get_argv(void) {
 }
 
 extern void __stdio_init_buffers(void);
+extern void __stdio_cleanup(void);
 
 void _exit(int val){
 	_fini();
+	__stdio_cleanup();
 	syscall_exit(val);
-
 	__builtin_unreachable();
 }
 
 extern void __make_tls(void);
 
+int __libc_is_multicore = 0;
+static int __libc_init_called = 0;
+
 __attribute__((constructor))
 static void _libc_init(void) {
+	__libc_init_called = 1;
 	__make_tls();
 	__stdio_init_buffers();
+	__libc_is_multicore = sysfunc(TOARU_SYS_FUNC_NPROC, NULL) > 1;
 
 	unsigned int x = 0;
 	unsigned int nulls = 0;
@@ -94,10 +101,19 @@ static void _libc_init(void) {
 	_argv_0 = __get_argv()[0];
 }
 
-void pre_main(int (*main)(int,char**), int argc, char * argv[]) {
+void pre_main(int argc, char * argv[], char ** envp, int (*main)(int,char**)) {
 	if (!__get_argv()) {
 		/* Statically loaded, must set __argv so __get_argv() works */
 		__argv = argv;
+		/* Run our initializers, because I'm pretty sure the kernel didn't... */
+		if (!__libc_init_called) {
+			extern uintptr_t __init_array_start;
+			extern uintptr_t __init_array_end;
+			for (uintptr_t * constructor = &__init_array_start; constructor < &__init_array_end; ++constructor) {
+				void (*constr)(void) = (void*)*constructor;
+				constr();
+			}
+		}
 	}
 	_init();
 	exit(main(argc, argv));

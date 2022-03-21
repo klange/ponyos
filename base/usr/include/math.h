@@ -4,7 +4,10 @@
 
 _Begin_C_Header
 
-#define M_PI 3.1415926
+#define M_PI 3.14159265358979323846
+#define M_E  2.7182818284590452354
+#define NAN (__builtin_nanf(""))
+#define INFINITY (__builtin_inff())
 
 extern double floor(double x);
 extern int abs(int j);
@@ -36,9 +39,33 @@ extern double sinh(double x);
 extern double tan(double x);
 extern double tanh(double x);
 extern double atan(double x);
+extern double log1p(double x);
+extern double expm1(double x);
 
 extern double modf(double x, double *iptr);
 
 extern double hypot(double x, double y);
+
+extern double trunc(double x);
+extern double acosh(double x);
+extern double asinh(double x);
+extern double atanh(double x);
+extern double erf(double x);
+extern double erfc(double x);
+extern double gamma(double x);
+extern double lgamma(double x);
+extern double copysign(double x, double y);
+extern double remainder(double x, double y);
+
+enum {
+    FP_NAN, FP_INFINITE, FP_ZERO, FP_SUBNORMAL, FP_NORMAL
+};
+
+extern int fpclassify(double x);
+
+#define isfinite(x) ((fpclassify(x) != FP_NAN && fpclassify(x) != FP_INFINITE))
+#define isnormal(x) (fpclassify(x) == FP_NORMAL)
+#define isnan(x)    (fpclassify(x) == FP_NAN)
+#define isinf(x)    (fpclassify(x) == FP_INFINITE)
 
 _End_C_Header

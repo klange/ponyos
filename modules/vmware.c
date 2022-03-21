@@ -1,9 +1,7 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
- * This file is part of ToaruOS and is released under the terms
- * of the NCSA / University of Illinois License - see LICENSE.md
- * Copyright (C) 2017-2018 K. Lange
- *
- * VMWare backdoor driver.
+/**
+ * @file  kernel/arch/x86_64/vmware.c
+ * @brief VMware/QEMU mouse and VMWare backdoor driver.
+ * @package x86_64
  *
  * Supports absolute mouse cursor and resolution setting.
  *
@@ -15,18 +13,29 @@
  * Resolution setting:
  *   Enabled when the "vmware" LFB driver is active. Automatically
  *   resizes the display when the window size changes.
+ *
+ * @copyright
+ * This file is part of ToaruOS and is released under the terms
+ * of the NCSA / University of Illinois License - see LICENSE.md
+ * Copyright (C) 2017-2021 K. Lange
  */
 
-#include <kernel/system.h>
-#include <kernel/fs.h>
+#include <errno.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <kernel/vfs.h>
+#include <kernel/string.h>
 #include <kernel/printf.h>
 #include <kernel/types.h>
-#include <kernel/logging.h>
-#include <kernel/module.h>
 #include <kernel/video.h>
 #include <kernel/pipe.h>
+#include <kernel/process.h>
 #include <kernel/mouse.h>
+#include <kernel/time.h>
 #include <kernel/args.h>
+#include <kernel/module.h>
+
+#include <kernel/arch/x86_64/ports.h>
 
 #define VMWARE_MAGIC  0x564D5868 /* hXMV */
 #define VMWARE_PORT   0x5658
@@ -51,7 +60,7 @@
 /* -Wpedantic complains about unnamed unions */
 #pragma GCC diagnostic ignored "-Wpedantic"
 
-extern void (*ps2_mouse_alternate)(void); /* modules/mouse.c */
+extern void (*ps2_mouse_alternate)(uint8_t); /* modules/mouse.c */
 
 static fs_node_t * mouse_pipe;
 
@@ -72,8 +81,8 @@ typedef struct {
 		uint32_t dx;
 		uint16_t port;
 	};
-	uint32_t si;
-	uint32_t di;
+	uintptr_t si;
+	uintptr_t di;
 } vmware_cmd;
 
 /** Low bandwidth backdoor */
@@ -142,9 +151,9 @@ static void mouse_absolute(void) {
 
 volatile int8_t vmware_mouse_byte = 0;
 
-static void vmware_mouse(void) {
+static void vmware_mouse(uint8_t byte) {
 	/* unused, but we need to read the fake mouse event bytes from the PS/2 device. */
-	vmware_mouse_byte = inportb(0x60);
+	vmware_mouse_byte = byte;
 
 	/* Read status byte. */
 	vmware_cmd cmd;
@@ -175,11 +184,8 @@ static void vmware_mouse(void) {
 	 * I guess the flags tell you if this was relative or absolute, so if we
 	 * actually used the relative mode, we'd want to check that, but...
 	 */
-	int flags   = (cmd.ax & 0xFFFF0000) >> 16;
+	//int flags   = (cmd.ax & 0xFFFF0000) >> 16;
 	int buttons = (cmd.ax & 0x0000FFFF);
-
-	debug_print(INFO, "flags=%4x buttons=%4x", flags, buttons);
-	debug_print(INFO, "x=%x y=%x z=%x", cmd.bx, cmd.cx, cmd.dx);
 
 	unsigned int x = 0;
 	unsigned int y = 0;
@@ -282,7 +288,7 @@ static int open_tclo_channel(void) {
 	return tclo_channel;
 }
 
-static int msg_send(int channel, char * msg, size_t size) {
+static int msg_send(int channel, const char * msg, size_t size) {
 	{
 		vmware_cmd cmd = {0};
 		cmd.cx = CMD_MESSAGE | 0x00010000; /* CMD_MESSAGE size */
@@ -302,7 +308,7 @@ static int msg_send(int channel, char * msg, size_t size) {
 		cmd.bx = 0x0010000;
 		cmd.cx = size;
 		cmd.dx = channel << 16;
-		cmd.si = (uint32_t)msg;
+		cmd.si = (uintptr_t)msg;
 		vmware_send_hb(&cmd);
 
 		if (!(cmd.bx & 0x0010000)) {
@@ -334,7 +340,7 @@ static int msg_recv(int channel, char * buf, size_t bufsize) {
 		cmd.bx = 0x00010000;
 		cmd.cx = size;
 		cmd.dx = channel << 16;
-		cmd.di = (uint32_t)buf;
+		cmd.di = (uintptr_t)buf;
 
 		vmware_get_hb(&cmd);
 		if (!(cmd.bx & 0x00010000)) {
@@ -354,7 +360,7 @@ static int msg_recv(int channel, char * buf, size_t bufsize) {
 	return size;
 }
 
-static int rpci_string(char * request) {
+static int rpci_string(const char * request) {
 	/* Open channel */
 	int channel = open_rpci_channel();
 	if (channel < 0) return channel;
@@ -400,8 +406,8 @@ static int attempt_scale(void) {
 				resend = 0;
 			} else {
 				unsigned long s, ss;
-				relative_time(0, 10, &s, &ss);
-				sleep_until((process_t *)current_process, s, ss);
+				relative_time(0, 10000, &s, &ss);
+				sleep_until((process_t *)this_core->current_process, s, ss);
 				switch_task(0);
 			}
 			if ((i = msg_send(c, buf, 0)) < 0) { return 1; }
@@ -450,17 +456,17 @@ static int attempt_scale(void) {
 	}
 }
 
-static void vmware_resize(void * data, char * name) {
+static void vmware_resize(void * data) {
 	while (1) {
 		attempt_scale();
 		unsigned long s, ss;
 		relative_time(1, 0, &s, &ss);
-		sleep_until((process_t *)current_process, s, ss);
+		sleep_until((process_t *)this_core->current_process, s, ss);
 		switch_task(0);
 	}
 }
 
-static int ioctl_mouse(fs_node_t * node, int request, void * argp) {
+static int ioctl_mouse(fs_node_t * node, unsigned long request, void * argp) {
 	switch (request) {
 		case 1:
 			/* Disable */
@@ -479,30 +485,28 @@ static int ioctl_mouse(fs_node_t * node, int request, void * argp) {
 	}
 }
 
-static int init(void) {
-	if (detect_device()) {
+static int vmware_initialize(int argc, char * argv[]) {
+	if (!detect_device()) return -ENODEV;
 
-		mouse_pipe = make_pipe(sizeof(mouse_device_packet_t) * PACKETS_IN_PIPE);
-		mouse_pipe->flags = FS_CHARDEVICE;
+	mouse_pipe = make_pipe(sizeof(mouse_device_packet_t) * PACKETS_IN_PIPE);
+	mouse_pipe->flags = FS_CHARDEVICE;
 
-		vfs_mount("/dev/vmmouse", mouse_pipe);
+	vfs_mount("/dev/vmmouse", mouse_pipe);
 
-		mouse_pipe->flags = FS_CHARDEVICE;
-		mouse_pipe->ioctl = ioctl_mouse;
+	mouse_pipe->flags = FS_CHARDEVICE;
+	mouse_pipe->ioctl = ioctl_mouse;
 
-		/*
-		 * We have a hack in the PS/2 mouse driver that lets us
-		 * take over for the normal mouse driver and essential
-		 * intercept the interrputs when they are valid.
-		 */
-		ps2_mouse_alternate = vmware_mouse;
+	/*
+	 * We have a hack in the PS/2 mouse driver that lets us
+	 * take over for the normal mouse driver and essential
+	 * intercept the interrputs when they are valid.
+	 */
+	ps2_mouse_alternate = vmware_mouse;
 
-		mouse_absolute();
+	mouse_absolute();
 
-		if (lfb_driver_name && !strcmp(lfb_driver_name, "vmware") && !args_present("novmwareresset")) {
-			create_kernel_tasklet(vmware_resize, "[vmware]", NULL);
-		}
-
+	if (lfb_driver_name && !strcmp(lfb_driver_name, "vmware") && !args_present("novmwareresset")) {
+		spawn_worker_thread(vmware_resize, "[vmware]", NULL);
 	}
 
 	return 0;
@@ -512,6 +516,9 @@ static int fini(void) {
 	return 0;
 }
 
-MODULE_DEF(vmmware, init, fini);
-MODULE_DEPENDS(ps2mouse); /* For ps2_mouse_alternate */
-MODULE_DEPENDS(lfbvideo); /* For lfb resolution */
+struct Module metadata = {
+	.name = "vmware",
+	.init = vmware_initialize,
+	.fini = fini,
+};
+

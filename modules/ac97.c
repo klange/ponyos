@@ -1,21 +1,39 @@
-/* vim: tabstop=4 shiftwidth=4 noexpandtab
+/**
+ * @file kernel/audio/ac97.c
+ * @brief Driver for the Intel AC'97.
+ * @package x86_64
+ *
+ * Simple PCM interface for the AC'97 codec when used with the
+ * ICH hardware interface. There are other hardware interfaces
+ * that use this codec and this driver could probably be ported
+ * to them.
+ *
+ * Note that the audio subsystem is intended to be non-blocking
+ * so that buffer filling can be done directly in interrupt handlers.
+ *
+ * @see http://www.intel.com/design/chipsets/manuals/29802801.pdf
+ *
+ * @copyright
  * This file is part of ToaruOS and is released under the terms
  * of the NCSA / University of Illinois License - see LICENSE.md
  * Copyright (C) 2015 Michael Gerow
- * Copyright (C) 2015-2018 K. Lange
- *
- * Driver for the Intel AC'97.
- *
- * See <http://www.intel.com/design/chipsets/manuals/29802801.pdf>.
+ * Copyright (C) 2015-2021 K. Lange
  */
 
-#include <kernel/logging.h>
-#include <kernel/mem.h>
-#include <kernel/module.h>
-#include <kernel/mod/snd.h>
+#include <errno.h>
+#include <kernel/types.h>
+#include <kernel/string.h>
 #include <kernel/printf.h>
 #include <kernel/pci.h>
-#include <kernel/system.h>
+#include <kernel/process.h>
+#include <kernel/mmu.h>
+#include <kernel/list.h>
+#include <kernel/module.h>
+#include <kernel/mod/snd.h>
+
+#include <kernel/arch/x86_64/ports.h>
+#include <kernel/arch/x86_64/regs.h>
+#include <kernel/arch/x86_64/irq.h>
 
 /* Utility macros */
 #define N_ELEMENTS(arr) (sizeof(arr) / sizeof((arr)[0]))
@@ -133,29 +151,22 @@ static void find_ac97(uint32_t device, uint16_t vendorid, uint16_t deviceid, voi
 }
 
 #define DIVISION 0x1000
-static int irq_handler(struct regs * regs) {
+static int ac97_irq_handler(struct regs * regs) {
 	uint16_t sr = inports(_device.nabmbar + AC97_PO_SR);
-	if (!sr) return 0;
-
 	if (sr & AC97_X_SR_BCIS) {
-		size_t f = (_device.lvi + 2) % AC97_BDL_LEN;
-		for (size_t i = 0; i < AC97_BDL_BUFFER_LEN * sizeof(*_device.bufs[0]); i += DIVISION) {
-			snd_request_buf(&_snd, DIVISION, (uint8_t *)_device.bufs[f] + i);
-			//switch_task(1);
-		}
-		_device.lvi = (_device.lvi + 1) % AC97_BDL_LEN;
-		outportb(_device.nabmbar + AC97_PO_LVI, _device.lvi);
+		uint16_t current_buffer = inportb(_device.nabmbar + AC97_PO_CIV);
+		uint16_t last_valid = ((current_buffer+2) & (AC97_BDL_LEN-1));
+		snd_request_buf(&_snd, 0x1000, (uint8_t *)_device.bufs[last_valid]);
+		outportb(_device.nabmbar + AC97_PO_LVI, last_valid);
+		snd_request_buf(&_snd, 0x1000, (uint8_t *)_device.bufs[last_valid]+0x1000);
+		outports(_device.nabmbar + AC97_PO_SR, AC97_X_SR_BCIS);
 	} else if (sr & AC97_X_SR_LVBCI) {
-		debug_print(NOTICE, "ac97 irq is lvbci");
+		outports(_device.nabmbar + AC97_PO_SR, AC97_X_SR_LVBCI);
 	} else if (sr & AC97_X_SR_FIFOE) {
-		debug_print(NOTICE, "ac97 irq is fifoe");
+		outports(_device.nabmbar + AC97_PO_SR, AC97_X_SR_FIFOE);
 	} else {
-		/* don't handle it */
 		return 0;
 	}
-	debug_print(NOTICE, "ac97 status register: 0x%4x", sr);
-	outports(_device.nabmbar + AC97_PO_SR, sr & 0x1E);
-
 	irq_ack(_device.irq);
 	return 1;
 }
@@ -233,16 +244,17 @@ static int ac97_mixer_write(uint32_t knob_id, uint32_t val) {
 	return 0;
 }
 
-static int init(void) {
-	debug_print(NOTICE, "Initializing AC97");
+static int ac97_install(int argc, char * argv[]) {
+	//debug_print(NOTICE, "Initializing AC97");
 	pci_scan(&find_ac97, -1, &_device);
 	if (!_device.pci_device) {
-		return 1;
+		return -ENODEV;
 	}
 	_device.nabmbar = pci_read_field(_device.pci_device, AC97_NABMBAR, 2) & ((uint32_t) -1) << 1;
 	_device.nambar = pci_read_field(_device.pci_device, PCI_BAR0, 4) & ((uint32_t) -1) << 1;
 	_device.irq = pci_get_interrupt(_device.pci_device);
-	irq_install_handler(_device.irq, irq_handler, "ac97");
+	//printf("device wants irq %zd\n", _device.irq);
+	irq_install_handler(_device.irq, ac97_irq_handler, "ac97");
 	/* Enable all matter of interrupts */
 	outportb(_device.nabmbar + AC97_PO_CR, AC97_X_CR_FEIE | AC97_X_CR_IOCE);
 
@@ -252,11 +264,13 @@ static int init(void) {
 	outports(_device.nambar + AC97_PCM_OUT_VOLUME, 0x0000);
 
 	/* Allocate our BDL and our buffers */
-	_device.bdl = (void *)kmalloc_p(AC97_BDL_LEN * sizeof(*_device.bdl), &_device.bdl_p);
+	_device.bdl_p = mmu_allocate_a_frame() << 12;
+	_device.bdl   = mmu_map_from_physical(_device.bdl_p);
 	memset(_device.bdl, 0, AC97_BDL_LEN * sizeof(*_device.bdl));
+
 	for (int i = 0; i < AC97_BDL_LEN; i++) {
-		_device.bufs[i] = (uint16_t *)kmalloc_p(AC97_BDL_BUFFER_LEN * sizeof(*_device.bufs[0]),
-												&_device.bdl[i].pointer);
+		_device.bdl[i].pointer = mmu_allocate_n_frames(2) << 12;
+		_device.bufs[i] = mmu_map_from_physical(_device.bdl[i].pointer);
 		memset(_device.bufs[i], 0, AC97_BDL_BUFFER_LEN * sizeof(*_device.bufs[0]));
 		AC97_CL_SET_LENGTH(_device.bdl[i].cl, AC97_BDL_BUFFER_LEN);
 		/* Set all buffers to interrupt */
@@ -273,22 +287,21 @@ static int init(void) {
 	outports(_device.nambar + AC97_MASTER_VOLUME, 0x2020);
 	uint16_t t = inports(_device.nambar + AC97_MASTER_VOLUME) & 0x1f;
 	if (t == 0x1f) {
-		debug_print(WARNING, "This device only supports 5 bits of audio volume.");
+		//debug_print(WARNING, "This device only supports 5 bits of audio volume.");
 		_device.bits = 5;
 		_device.mask = 0x1f;
-		outports(_device.nambar + AC97_MASTER_VOLUME, 0x0f0f);
 	} else {
 		_device.bits = 6;
 		_device.mask = 0x3f;
-		outports(_device.nambar + AC97_MASTER_VOLUME, 0x1f1f);
 	}
+	outports(_device.nambar + AC97_MASTER_VOLUME, 0x0000);
 
 	snd_register(&_snd);
 
 	/* Start things playing */
 	outportb(_device.nabmbar + AC97_PO_CR, inportb(_device.nabmbar + AC97_PO_CR) | AC97_X_CR_RPBM);
 
-	debug_print(NOTICE, "AC97 initialized successfully");
+	//debug_print(NOTICE, "AC97 initialized successfully");
 
 	return 0;
 }
@@ -303,5 +316,9 @@ static int fini(void) {
 	return 0;
 }
 
-MODULE_DEF(ac97, init, fini);
-MODULE_DEPENDS(snd);
+struct Module metadata = {
+	.name = "ac97",
+	.init = ac97_install,
+	.fini = fini,
+};
+
