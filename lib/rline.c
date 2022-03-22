@@ -429,6 +429,28 @@ static void rline_exp_load_colorscheme_sunsmoke(void) {
 	COLOR_LINK      = "2;51;162;230;4";
 }
 
+static void rline_exp_load_colorscheme_strawberry(void) {
+	COLOR_FG        = "2;255;240;247";
+	COLOR_BG        = "@9";
+	COLOR_ALT_FG    = "2;122;122;122";
+	COLOR_ALT_BG    = "2;46;43;46";
+	COLOR_KEYWORD   = "2;212;106;132";
+	COLOR_STRING    = "2;70;141;212";
+	COLOR_COMMENT   = "2;158;153;129;3";
+	COLOR_TYPE      = "2;230;206;110";
+	COLOR_PRAGMA    = "2;194;70;54";
+	COLOR_NUMERAL   = "2;230;43;127";
+	COLOR_RED       = "2;222;53;53";
+	COLOR_GREEN     = "2;55;167;0";
+	COLOR_ESCAPE    = "2;113;203;173";
+	COLOR_SEARCH_FG = "5;234";
+	COLOR_SEARCH_BG = "5;226";
+	COLOR_ERROR_FG  = "5;15";
+	COLOR_ERROR_BG  = "5;196";
+	COLOR_BOLD      = "2;230;230;230;1";
+	COLOR_LINK      = "2;51;162;230;4";
+}
+
 /**
  * Syntax highlighting flags.
  */
@@ -2422,6 +2444,8 @@ int rline(char * buffer, int buf_size) {
 	char * theme = getenv("RLINE_THEME");
 	if (theme && !strcmp(theme,"sunsmoke")) { /* TODO bring back theme tables */
 		rline_exp_load_colorscheme_sunsmoke();
+	} else if (theme && !strcmp(theme,"strawberry")) { /* TODO bring back theme tables */
+		rline_exp_load_colorscheme_strawberry();
 	} else {
 		rline_exp_load_colorscheme_default();
 	}
