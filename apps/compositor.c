@@ -2138,13 +2138,41 @@ static char * precache_shmfont(char * ident, char * name) {
 	return font;
 }
 
+static struct font_def fonts_override[] = {
+	FONT("sans-serif",            "truetype/equestria/Equestria.ttf"),
+	FONT("sans-serif.bold",       "truetype/equestria/Equestria-Bold.ttf"),
+	FONT("sans-serif.italic",     "truetype/equestria/Equestria-Italic.ttf"),
+	FONT("sans-serif.bolditalic", "truetype/equestria/Equestria-BoldItalic.ttf"),
+	{NULL, NULL},
+	{NULL, NULL},
+	{NULL, NULL},
+	{NULL, NULL}
+};
+
+static int should_use_equestria(void) {
+	/* Did the user specifically disable it? */
+	char * no_equestria = getenv("NO_EQUESTRIA");
+	if (no_equestria && !strcmp(no_equestria,"no-equestria")) return 0;
+
+	/* Is it available? */
+	struct stat statbuf;
+	if (lstat("/usr/share/fonts/truetype/equestria/Equestria.ttf",&statbuf) < 0) return 0;
+
+	return 1;
+}
+
 static void load_fonts(yutani_globals_t * yg) {
+	/* PonyOS: Use equestria? */
+	int use_equestria = should_use_equestria();
+
 	int i = 0;
 	while (fonts[i].identifier) {
+		struct font_def *font = &fonts[i];
+		if (use_equestria && fonts_override[i].identifier) font = &fonts_override[i];
 		char tmp[100];
-		sprintf(tmp, "sys.%s.fonts.%s", yg->server_ident, fonts[i].identifier);
-		TRACE("Loading font %s -> %s", fonts[i].path, tmp);
-		if (!precache_shmfont(tmp, fonts[i].path)) {
+		sprintf(tmp, "sys.%s.fonts.%s", yg->server_ident, font->identifier);
+		TRACE("Loading font %s -> %s", font->path, tmp);
+		if (!precache_shmfont(tmp, font->path)) {
 			TRACE("  ... failed.");
 		}
 		++i;
