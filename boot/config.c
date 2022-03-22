@@ -101,6 +101,10 @@ int kmain() {
 			"Migrates the ramdisk from tarball to an in-memory",
 			"temporary filesystem at boot. Needed for packages.");
 
+	BOOT_OPTION(_equestria,   1, "Use Equestria font",
+			"Enables the thematically appropriate font",
+			"in desktop applications.");
+
 	while (1) {
 		/* Loop over rendering the menu */
 		show_menu();
@@ -118,6 +122,10 @@ int kmain() {
 
 		if (_migrate) {
 			strcat(cmdline, MIGRATE_CMDLINE);
+		}
+
+		if (!_equestria) {
+			strcat(cmdline, "no-equestria ");
 		}
 
 		char * _video_command_line = DEFAULT_VID_CMDLINE;
