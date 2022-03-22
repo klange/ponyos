@@ -205,10 +205,10 @@ static int print_human_readable_size(char * _out, uint64_t s) {
 	}
 }
 
-#define HILIGHT_BORDER_TOP rgb(54,128,205)
-#define HILIGHT_GRADIENT_TOP rgb(93,163,236)
-#define HILIGHT_GRADIENT_BOTTOM rgb(56,137,220)
-#define HILIGHT_BORDER_BOTTOM rgb(47,106,167)
+#define HILIGHT_BORDER_TOP rgb(150,29,150)
+#define HILIGHT_GRADIENT_TOP rgb(208,61,207)
+#define HILIGHT_GRADIENT_BOTTOM rgb(176,43,176)
+#define HILIGHT_BORDER_BOTTOM rgb(132,17,132)
 
 /**
  * Clip text and add ellipsis to fit a specified display width.
