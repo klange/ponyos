@@ -2,6 +2,9 @@
 
 export-cmd START kcmdline -g start
 
+# PonyOS: Allow Equestria to be disabled on kcmdline
+export-cmd NO_EQUESTRIA kcmdline -g no-equestria
+
 # We haven't actually hit a login yet, so make sure these are set here...
 export USER=root
 export HOME=/home/root
