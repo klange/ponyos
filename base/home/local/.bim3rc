@@ -16,7 +16,7 @@ if not checkprop('can_unicode'):
 
 # Themes are actually Kuroko functions now, but we load
 # them into a table like always for the :theme command
-theme('sunsmoke')
+theme('strawberry')
 
 # Non-string values are coerced into strings, so these commands
 # can take integer values.
