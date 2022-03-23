@@ -7,3 +7,6 @@
 [submodule "kuroko"]
 	path = kuroko
 	url = ../../kuroko-lang/kuroko
+[submodule "base/usr/ponysay"]
+	path = base/usr/ponysay
+	url = https://github.com/klange/ponysay
