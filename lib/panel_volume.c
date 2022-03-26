@@ -94,14 +94,14 @@ void _menu_draw_MenuEntry_Slider(gfx_context_t * ctx, struct MenuEntry * self, i
 
 	struct SliderStuff stuff;
 	stuff.level = (ctx->width - VOLUME_SLIDER_PAD) * (float)volume_level / (float)0xFC000000;
-	stuff.on  = rgba(0,120,220,0);
+	stuff.on  = rgba(210,50,210,0);
 	stuff.off = rgba(140,140,140,0);
 	draw_rounded_rectangle_pattern(ctx,
 		/* x */ VOLUME_SLIDER_LEFT_PAD - 4,
 		/* y */ offset + VOLUME_SLIDER_VERT_PAD - 1,
 		/* w */ ctx->width - VOLUME_SLIDER_PAD + 8,
 		/* h */ self->height - 2 * VOLUME_SLIDER_VERT_PAD + 2, 6, volume_pattern, &stuff);
-	stuff.on  = rgba(40,160,255,0);
+	stuff.on =  rgba(255,72,254,0);
 	stuff.off = rgba(200,200,200,0);
 	draw_rounded_rectangle_pattern(ctx,
 		/* x */ VOLUME_SLIDER_LEFT_PAD - 3,

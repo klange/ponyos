@@ -54,7 +54,7 @@ extern struct PanelWidget * widget_new(void);
 #define FOCUS_COLOR   rgb(255,255,255)
 #define TEXT_COLOR    rgb(230,230,230)
 #define ICON_COLOR    rgb(230,230,230)
-#define SPECIAL_COLOR rgb(93,163,236)
+#define SPECIAL_COLOR rgb(255,72,254)
 
 extern struct TT_Font * font;
 extern struct TT_Font * font_bold;
