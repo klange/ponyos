@@ -209,15 +209,25 @@ static long sock_icmp_recv(sock_t * sock, struct msghdr * msg, int flags) {
 
 	char * packet = net_sock_get(sock);
 	if (!packet) return -EINTR;
-	size_t packet_size = *(size_t*)packet;
-	struct ipv4_packet * data = (struct ipv4_packet*)(packet + sizeof(size_t));
+	size_t packet_size = *(size_t*)packet - sizeof(struct ipv4_packet);
+
+	struct ipv4_packet * src = (struct ipv4_packet*)(packet + sizeof(size_t));
 
 	if (packet_size > msg->msg_iov[0].iov_len) {
 		dprintf("ICMP recv too big for vector\n");
 		packet_size = msg->msg_iov[0].iov_len;
 	}
 
-	memcpy(msg->msg_iov[0].iov_base, data, packet_size);
+	if (msg->msg_namelen == sizeof(struct sockaddr_in)) {
+		if (msg->msg_name) {
+			((struct sockaddr_in*)msg->msg_name)->sin_family = AF_INET;
+			((struct sockaddr_in*)msg->msg_name)->sin_port = 0;
+			((struct sockaddr_in*)msg->msg_name)->sin_addr.s_addr = src->source;
+			((struct sockaddr_in*)msg->msg_name)->sin_zero[0] = src->ttl;
+		}
+	}
+
+	memcpy(msg->msg_iov[0].iov_base, src->payload, packet_size);
 	free(packet);
 	return packet_size;
 }
@@ -529,10 +539,19 @@ static long sock_udp_recv(sock_t * sock, struct msghdr * msg, int flags) {
 	char * packet = net_sock_get(sock);
 	if (!packet) return -EINTR;
 	struct ipv4_packet * data = (struct ipv4_packet*)(packet + sizeof(size_t));
+	struct udp_packet * udp_packet = (struct udp_packet*)&data->payload;
 
 	printf("udp: got response, size is %u - sizeof(ipv4) - sizeof(udp) = %lu\n",
 		ntohs(data->length), ntohs(data->length) - sizeof(struct ipv4_packet) - sizeof(struct udp_packet));
-	memcpy(msg->msg_iov[0].iov_base, data->payload + 8, ntohs(data->length) - sizeof(struct ipv4_packet) - sizeof(struct udp_packet));
+	memcpy(msg->msg_iov[0].iov_base, udp_packet->payload, ntohs(data->length) - sizeof(struct ipv4_packet) - sizeof(struct udp_packet));
+
+	if (msg->msg_namelen == sizeof(struct sockaddr_in)) {
+		if (msg->msg_name) {
+			((struct sockaddr_in*)msg->msg_name)->sin_family = AF_INET;
+			((struct sockaddr_in*)msg->msg_name)->sin_port = udp_packet->source_port;
+			((struct sockaddr_in*)msg->msg_name)->sin_addr.s_addr = data->source;
+		}
+	}
 
 	printf("udp: data copied to iov 0, return length?\n");
 
