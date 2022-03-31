@@ -100,7 +100,7 @@
 
 			<h2>Using the CD</h2>
 			<p>The CD should boot in QEMU, VirtualBox, VMWare, or even on real hardware if you're a brave pony!</p>
-			<p>For all VMs, 1GB of RAM is recommended. When using VirtualBox, select "Other/Unknown 64-bit" for the OS type. For VMware, use a 64-bit guest configuration. For QEMU, <code>qemu-system-x86_64 -m 1G -enable-kvm -soundhw ac97 -cdrom ponyos.iso</code> should suffice.</p>
+			<p>For all VMs, 1GB of RAM is recommended. When using VirtualBox, select "Other/Unknown 64-bit" for the OS type. For VMware, use a 64-bit guest configuration. For QEMU, <code>qemu-system-x86_64 -smp 4 -m 1G -enable-kvm -soundhw ac97 -cdrom ponyos.iso</code> should suffice.</p>
 			<p>The CD will automatically log in the user <code>local</code>. If you are asked for a password for this user, that password is also <code>local</code>.</p>
 
 			<h2>Building from Scratch</h2>
