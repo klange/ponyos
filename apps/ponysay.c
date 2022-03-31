@@ -11,7 +11,7 @@
 int main(int argc, char * argv[]) {
 	char ** args = malloc(sizeof(char *) * (argc + 3)); /* two for -m ponysay, one for null */
 
-	chdir("/usr/ponysay");
+	setenv("KUROKOPATH","/usr/ponysay/",1);
 
 	args[0] = "kuroko";
 	args[1] = "-m";
