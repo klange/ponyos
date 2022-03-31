@@ -17,7 +17,7 @@ OC = ${TARGET}-objcopy
 STRIP= ${TARGET}-strip
 
 # CFLAGS for kernel objects and modules
-KERNEL_CFLAGS  = -ffreestanding -O2 -std=gnu11 -g -static
+KERNEL_CFLAGS  = -ffreestanding -O2 -std=gnu11 -g -static --sysroot=base
 KERNEL_CFLAGS += -Wall -Wextra -Wno-unused-function -Wno-unused-parameter
 KERNEL_CFLAGS += -pedantic -Wwrite-strings ${ARCH_KERNEL_CFLAGS}
 
